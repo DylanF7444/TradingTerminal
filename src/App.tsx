@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Home, Settings, Database, Activity } from 'lucide-react';
-
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 // TypeScript Interfaces
 interface HomeData {
   message: string;
@@ -33,9 +34,15 @@ interface Tab {
 interface SaveSettingsArgs {
   settings: SettingsData;
 }
+interface ActivityLog {
+  timestamp: string;
+  action: string;
+  data?: any; // Optional field for WebSocket data
+}
 
-// Simulated Tauri invoke function (replace with actual @tauri-apps/api in real app)
-const invoke = async <T,>(cmd: string, args: Record<string, any> = {}): Promise<T> => {
+
+// Simulated Tauri invoke_dummy function (replace with actual @tauri-apps/api in real app)
+const invoke_dummy = async <T,>(cmd: string, args: Record<string, any> = {}): Promise<T> => {
   // Simulate backend responses
   await new Promise(resolve => setTimeout(resolve, 100));
   
@@ -68,7 +75,7 @@ const HomeTab: React.FC = () => {
   const [data, setData] = useState<HomeData | null>(null);
 
   useEffect(() => {
-    invoke<HomeData>('get_home_data').then(setData);
+    invoke_dummy<HomeData>('get_home_data').then(setData);
   }, []);
 
   return (
@@ -114,12 +121,12 @@ const SettingsTab: React.FC = () => {
   const [saved, setSaved] = useState<boolean>(false);
 
   useEffect(() => {
-    invoke<SettingsData>('get_settings').then(setSettings);
+    invoke_dummy<SettingsData>('get_settings').then(setSettings);
   }, []);
 
   const handleSave = async (): Promise<void> => {
     if (!settings) return;
-    await invoke<{ success: boolean }>('save_settings', { settings });
+    await invoke_dummy<{ success: boolean }>('save_settings', { settings });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -197,7 +204,7 @@ const DataTab: React.FC = () => {
   const [items, setItems] = useState<DatabaseItem[]>([]);
 
   useEffect(() => {
-    invoke<DatabaseItem[]>('get_database_items').then(setItems);
+    invoke_dummy<DatabaseItem[]>('get_database_items').then(setItems);
   }, []);
 
   const getStatusColor = (status: DatabaseItem['status']): string => {
@@ -231,33 +238,71 @@ const DataTab: React.FC = () => {
     </div>
   );
 };
+// Activity Tab Component
 
 // Activity Tab Component
 const ActivityTab: React.FC = () => {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
+    // Load initial logs
     invoke<ActivityLog[]>('get_activity_log').then(setLogs);
+
+    // Start WebSocket
+    invoke('start_websocket').then(() => {
+      setIsConnected(true);
+    });
+
+    // Listen for real-time updates
+    let unlisten: (() => void) | null = null;
+    
+    listen<ActivityLog>('market-update', (event) => {
+      setLogs(prev => [...prev, event.payload].slice(-100)); // Keep last 100
+    }).then(unlistenFn => {
+      unlisten = unlistenFn;
+    });
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
   }, []);
 
   return (
     <div className="p-6">
-      <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-        <Activity size={28} />
-        Activity Log
-      </h2>
-      <div className="space-y-2">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-bold flex items-center gap-2">
+          <Activity size={28} />
+          Activity Log
+        </h2>
+        <div className="flex items-center gap-2">
+          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-400'}`} />
+          <span className="text-sm text-gray-600">
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
+        </div>
+      </div>
+      <div className="space-y-2 max-h-[600px] overflow-y-auto">
         {logs.map((log, idx) => (
           <div key={idx} className="bg-white border-l-4 border-blue-500 rounded p-4">
             <p className="font-medium">{log.action}</p>
             <p className="text-sm text-gray-500">{log.timestamp}</p>
+            {log.data && (
+              <details className="mt-2">
+                <summary className="text-sm text-blue-600 cursor-pointer">View Details</summary>
+                <pre className="mt-2 text-xs bg-gray-50 p-2 rounded overflow-x-auto">
+                  {JSON.stringify(log.data, null, 2)}
+                </pre>
+              </details>
+            )}
           </div>
         ))}
       </div>
     </div>
   );
 };
-
 // Main App Component
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('home');
