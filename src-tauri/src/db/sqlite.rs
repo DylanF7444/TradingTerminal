@@ -678,26 +678,26 @@ pub fn query_timeseries(
     limit: Option<usize>,
 ) -> SqliteResult<Vec<TimeseriesPoint>> {
     let mut query = String::from("SELECT timestamp, source_id, metric_type, value, metadata FROM timeseries WHERE 1=1");
-    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    let mut params_vec: Vec<Value> = vec![];
     
     if let Some(sid) = source_id {
         query.push_str(" AND source_id = ?");
-        params_vec.push(Box::new(sid.to_string()));
+        params_vec.push(Value::Text(sid.to_string()));
     }
     
     if let Some(mt) = metric_type {
         query.push_str(" AND metric_type = ?");
-        params_vec.push(Box::new(mt.to_string()));
+        params_vec.push(Value::Text(mt.to_string()));
     }
     
     if let Some(st) = start_time {
         query.push_str(" AND timestamp >= ?");
-        params_vec.push(Box::new(st));
+        params_vec.push(Value::Integer(st));
     }
     
     if let Some(et) = end_time {
         query.push_str(" AND timestamp <= ?");
-        params_vec.push(Box::new(et));
+        params_vec.push(Value::Integer(et));
     }
     
     query.push_str(" ORDER BY timestamp DESC");
@@ -707,7 +707,8 @@ pub fn query_timeseries(
     }
 
     let mut stmt = conn.prepare(&query)?;
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+    // Convert Value references to &dyn ToSql
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
     
     let points = stmt.query_map(&param_refs[..], |row| {
         Ok(TimeseriesPoint {
@@ -847,17 +848,21 @@ pub fn get_scraper_status(conn: &Connection, node_id: &str) -> SqliteResult<Scra
          FROM scraper_status WHERE node_id = ?1"
     )?;
 
-    let status = stmt.query_row(params![node_id], |row| {
+    stmt.query_row(params![node_id], |row| {
+        let active: i32 = row.get(0)?;
+        let last_update: Option<i64> = row.get(1)?;
+        let last_error: Option<String> = row.get(2)?;
+        let data_points_collected: i64 = row.get(3)?;
+        let uptime_seconds: i64 = row.get(4)?;
+        
         Ok(ScraperStatus {
-            active: row.get::<_, i32>(0)? != 0,
-            last_update: row.get(1)?,
-            last_error: row.get(2)?,
-            data_points_collected: row.get::<_, i64>(3)? as u64,
-            uptime_seconds: row.get::<_, i64>(4)? as u64,
+            active: active != 0,
+            last_update,
+            last_error,
+            data_points_collected: data_points_collected as u64,
+            uptime_seconds: uptime_seconds as u64,
         })
-    })?;
-
-    Ok(status)
+    })
 }
 
 #[derive(Debug, Clone)]
