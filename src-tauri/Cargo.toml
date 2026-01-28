@@ -6,7 +6,9 @@ edition = "2021"
 authors = ["Fenzoe"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-
+wiremock = "0.6"
+tempfile = "3.0"
+criterion = "0.5"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -20,3 +22,5 @@ rusqlite = { version = "0.30", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 anyhow = "1.0"
+rand = "0.8"  # For mock data
+
