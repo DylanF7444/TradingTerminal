@@ -28,6 +28,27 @@ pub mod storage;
 
 // Re-export all commands for main.rs invoke_handler registration
 pub use data_sources::{add_data_source, remove_data_source, get_data_sources};
-pub use markets::{add_market, remove_market, get_markets, get_orderbook};
-pub use trading::{place_order, get_positions, close_position};
-pub use storage::{store_timeseries, query_timeseries, get_correlation_data};
+
+// Markets: includes state initializer for main.rs
+pub use markets::{
+    add_market, 
+    remove_market, 
+    get_markets, 
+    get_orderbook,
+    refresh_market_connection,
+    get_market_status,
+    init_state as init_market_state,
+    MarketState,
+};
+
+pub use trading::{
+    place_order, 
+    get_positions, 
+    close_position
+};
+
+pub use storage::{
+    store_timeseries, 
+    query_timeseries, 
+    get_correlation_data
+};

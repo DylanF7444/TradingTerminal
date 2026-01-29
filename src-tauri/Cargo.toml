@@ -25,9 +25,9 @@ anyhow = "1.0"
 rand = "0.8"  # For mock data
 uuid = { version = "1.0", features = ["v4"] }
 env_logger = "0.10"
-log = "0.4"
+log = "0.8"
 sysinfo = "0.29"  # For get_system_info_cmd
-
+lru = "0.11"
 
 [features]
 default = ["custom-protocol"]
