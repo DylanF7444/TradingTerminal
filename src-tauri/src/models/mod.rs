@@ -13,8 +13,9 @@
 // ARCHITECTURE PATTERN:
 // Models are organized by domain:
 // - node.rs: Graph nodes (info sources and markets)
-// - market.rs: Market data structures (orderbooks, trades)
-// - position.rs: Trading positions and P&L
+// - market.rs: Market data structures (orderbooks, trades, order types)
+// - position.rs: Trading positions, fills, and P&L
+// - storage.rs: Time-series data points for historical storage/analysis
 //
 // Cross-Cutting Concerns:
 // - All types derive Serialize/Deserialize for Tauri compatibility
@@ -37,8 +38,9 @@
 // FRONTEND SYNCHRONIZATION:
 // These types must remain compatible with:
 // - src/types/nodes.ts (Node, NodeType, InfoSourceType, MarketType)
-// - src/types/markets.ts (Orderbook, TradeResult)
+// - src/types/markets.ts (Orderbook, TradeResult, OrderSide)
 // - src/types/sources.ts (Source configurations)
+// - src/types/storage.ts (DataPoint, TimeseriesPoint)
 //
 // When modifying enums, update both Rust and TypeScript definitions simultaneously.
 //
@@ -54,11 +56,14 @@
 // - NodeType: Discriminated union of InfoSource vs Market
 // - InfoSourceType: Specific data source categories (Crypto, News, Weather, etc.)
 // - MarketType: Supported prediction markets (Polymarket, Kalshi)
-// - Orderbook: Real-time market depth (bids/asks)
-// - TradeSide/OrderType: Trading command enumerations
-// - TradeResult: Execution confirmation with fill details
-// - TimeseriesPoint: Single data point for storage module
+// - Orderbook: Real-time market depth (bids/asks with levels)
+// - OrderbookLevel: Individual price/size pair in orderbook
+// - TradeSide/OrderType: Trading command enumerations (Buy/Sell, Market/Limit)
+// - TradeResult: Execution confirmation with fill details and fees
+// - TimeseriesPoint: Single timestamped data point for storage module
+// - DataPoint: Time-series entry with metadata for storage.rs
 // - Position: Trading position (defined in position.rs)
+// - Fill: Individual trade execution details
 //
 // DEPENDENCIES:
 // - serde: serialization frameworks
@@ -100,7 +105,39 @@
 pub mod node;
 pub mod market;
 pub mod position;
+//pub mod storage;
 
-pub use node::{Node, NodeType, InfoSourceType, MarketType};
-pub use market::{Orderbook, TradeSide, OrderType, TradeResult, TimeseriesPoint, DataPoint};
-pub use position::Position;
+// Core node graph types
+pub use node::{
+    Node, 
+    NodeType, 
+    InfoSourceType, 
+    MarketType
+};
+
+// Market data and trading types
+pub use market::{
+    Orderbook, 
+    OrderbookLevel,
+    TradeSide, 
+    OrderType, 
+    TradeResult,
+    MarketStatus
+};
+
+// Position tracking types
+pub use position::{
+    Position,
+    PositionStatus,
+    Fill
+};
+
+// Time-series storage types
+/* 
+pub use storage::{
+    DataPoint,
+    TimeseriesPoint,
+    Candle,
+    MetricType
+};
+*/
