@@ -235,7 +235,6 @@ import {
   Video, 
   Plus, 
   Trash2, 
-  Settings, 
   Activity,
   X,
   CheckCircle2,
@@ -245,41 +244,6 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { InfoSourceType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
-
-// Configuration schemas for each source type
-interface SourceConfig {
-  CryptoPrices: {
-    symbols: string;
-    update_interval_seconds: number;
-    exchange: string;
-  };
-  NewsSource: {
-    keywords: string;
-    sources: string;
-    sentiment_analysis: boolean;
-  };
-  Weather: {
-    location: string;
-    metrics: string[];
-  };
-  SocialMedia: {
-    platform: 'twitter' | 'reddit';
-    keywords: string;
-    volume_threshold: number;
-  };
-  FinancialPrices: {
-    tickers: string;
-    provider: string;
-  };
-  CommodityPrices: {
-    commodities: string;
-    unit: string;
-  };
-  Livestream: {
-    url: string;
-    analysis_type: 'ocr' | 'audio' | 'chat';
-  };
-}
 
 interface SourcePanelProps {
   onAddSource?: (node: Node) => void;
@@ -343,6 +307,27 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
     description: 'Video/audio stream monitoring (OCR, transcription)',
     color: 'text-pink-400',
     defaultConfig: { url: '', analysis_type: 'ocr' }
+  },
+  [InfoSourceType.EconomicIndicators]: {
+    label: 'Economic Indicators',
+    icon: TrendingUp,
+    description: 'CPI, unemployment, GDP data',
+    color: 'text-emerald-400',
+    defaultConfig: { indicators: 'CPI,unemployment', country: 'US' }
+  },
+  [InfoSourceType.OnChainData]: {
+    label: 'On-Chain Data',
+    icon: Activity,
+    description: 'Blockchain metrics and analytics',
+    color: 'text-indigo-400',
+    defaultConfig: { metrics: 'volume,gas', network: 'ethereum' }
+  },
+  [InfoSourceType.CustomAPI]: {
+    label: 'Custom API',
+    icon: Cloud,
+    description: 'User-defined API endpoint',
+    color: 'text-gray-400',
+    defaultConfig: { endpoint: '', headers: {}, refresh_interval: 60 }
   }
 };
 
@@ -582,12 +567,17 @@ export default function SourcePanel({
         ) : (
           <div className="divide-y divide-gray-800">
             {existingSources.map((source) => {
-              const type = Object.values(InfoSourceType).find(
-                t => source.node_type.InfoSource === t
-              );
+              // Check if node is an InfoSource type and extract the type
+              let type: InfoSourceType | null = null;
+              if ('InfoSource' in source.node_type) {
+                type = source.node_type.InfoSource;
+              }
               const meta = type ? SOURCE_TYPE_METADATA[type] : null;
               const Icon = meta?.icon || Activity;
-              const isConnected = source.metadata?.status === 'connected';
+              // Use quality.successRate from metadata to determine connection status
+              const isConnected = type && source.metadata && 'quality' in source.metadata 
+                ? (source.metadata.quality?.successRate ?? 0) > 0.5 
+                : false;
 
               return (
                 <div 
@@ -600,7 +590,7 @@ export default function SourcePanel({
                     </div>
                     <div>
                       <div className="text-sm font-medium text-gray-200">
-                        {source.metadata?.name || meta?.label || 'Unknown'}
+                        {source.name || meta?.label || 'Unknown'}
                       </div>
                       <div className="text-xs text-gray-500 flex items-center gap-1">
                         <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />

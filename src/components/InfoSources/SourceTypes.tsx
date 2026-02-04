@@ -713,6 +713,192 @@ export const SOURCE_TYPE_DEFINITIONS: Record<InfoSourceType, SourceTypeDefinitio
       }
       return { valid: Object.keys(errors).length === 0, errors };
     }
+  },
+
+  [InfoSourceType.EconomicIndicators]: {
+    metadata: {
+      label: 'Economic Indicators',
+      icon: TrendingUp,
+      description: 'CPI, unemployment, GDP, and other macroeconomic data',
+      color: 'text-green-400',
+      bgColor: 'bg-green-500'
+    },
+    configSchema: [
+      {
+        field: 'indicators',
+        type: 'multiselect',
+        label: 'Indicators',
+        required: true,
+        options: [
+          { value: 'CPI', label: 'Consumer Price Index (CPI)' },
+          { value: 'UNEMPLOYMENT', label: 'Unemployment Rate' },
+          { value: 'GDP', label: 'Gross Domestic Product' },
+          { value: 'FED_RATE', label: 'Federal Funds Rate' },
+          { value: 'PPI', label: 'Producer Price Index' },
+          { value: 'RETAIL_SALES', label: 'Retail Sales' },
+          { value: 'NONFARM_PAYROLL', label: 'Non-Farm Payroll' }
+        ],
+        helpText: 'Select economic indicators to track'
+      },
+      {
+        field: 'country',
+        type: 'select',
+        label: 'Country',
+        required: true,
+        options: [
+          { value: 'US', label: 'United States' },
+          { value: 'EU', label: 'European Union' },
+          { value: 'UK', label: 'United Kingdom' },
+          { value: 'JP', label: 'Japan' },
+          { value: 'CN', label: 'China' }
+        ],
+        helpText: 'Country/region for economic data'
+      }
+    ],
+    defaults: {
+      indicators: ['CPI', 'UNEMPLOYMENT'],
+      country: 'US'
+    },
+    validator: (config) => {
+      const errors: Record<string, string> = {};
+      if (!config.indicators || config.indicators.length === 0) {
+        errors.indicators = 'Select at least one indicator';
+      }
+      return { valid: Object.keys(errors).length === 0, errors };
+    }
+  },
+
+  [InfoSourceType.OnChainData]: {
+    metadata: {
+      label: 'On-Chain Data',
+      icon: Activity,
+      description: 'Blockchain metrics including transaction volume and gas fees',
+      color: 'text-indigo-400',
+      bgColor: 'bg-indigo-500'
+    },
+    configSchema: [
+      {
+        field: 'network',
+        type: 'select',
+        label: 'Blockchain Network',
+        required: true,
+        options: [
+          { value: 'ethereum', label: 'Ethereum' },
+          { value: 'bitcoin', label: 'Bitcoin' },
+          { value: 'polygon', label: 'Polygon' },
+          { value: 'arbitrum', label: 'Arbitrum' },
+          { value: 'optimism', label: 'Optimism' },
+          { value: 'solana', label: 'Solana' }
+        ],
+        helpText: 'Blockchain network to monitor'
+      },
+      {
+        field: 'metrics',
+        type: 'multiselect',
+        label: 'On-Chain Metrics',
+        required: true,
+        options: [
+          { value: 'transaction_volume', label: 'Transaction Volume' },
+          { value: 'gas_fees', label: 'Gas Fees' },
+          { value: 'active_addresses', label: 'Active Addresses' },
+          { value: 'hash_rate', label: 'Hash Rate' },
+          { value: 'block_size', label: 'Block Size' },
+          { value: 'validator_count', label: 'Validator Count' }
+        ],
+        helpText: 'Select metrics to track'
+      }
+    ],
+    defaults: {
+      network: 'ethereum',
+      metrics: ['transaction_volume', 'gas_fees']
+    },
+    validator: (config) => {
+      const errors: Record<string, string> = {};
+      if (!config.network) errors.network = 'Network selection required';
+      if (!config.metrics || config.metrics.length === 0) {
+        errors.metrics = 'Select at least one metric';
+      }
+      return { valid: Object.keys(errors).length === 0, errors };
+    }
+  },
+
+  [InfoSourceType.CustomAPI]: {
+    metadata: {
+      label: 'Custom API',
+      icon: Cloud,
+      description: 'Connect to any custom REST API endpoint',
+      color: 'text-gray-400',
+      bgColor: 'bg-gray-500'
+    },
+    configSchema: [
+      {
+        field: 'endpoint_url',
+        type: 'text',
+        label: 'API Endpoint URL',
+        placeholder: 'https://api.example.com/v1/data',
+        required: true,
+        validation: (val: string) => {
+          if (!val) return 'URL required';
+          if (!val.startsWith('http')) return 'Must be HTTP or HTTPS URL';
+          return null;
+        },
+        helpText: 'Full URL of the API endpoint'
+      },
+      {
+        field: 'method',
+        type: 'select',
+        label: 'HTTP Method',
+        required: true,
+        options: [
+          { value: 'GET', label: 'GET' },
+          { value: 'POST', label: 'POST' },
+          { value: 'PUT', label: 'PUT' },
+          { value: 'PATCH', label: 'PATCH' }
+        ],
+        helpText: 'HTTP method for the request'
+      },
+      {
+        field: 'api_key',
+        type: 'password',
+        label: 'API Key',
+        required: false,
+        secret: true,
+        helpText: 'API key or bearer token (stored securely)'
+      },
+      {
+        field: 'headers',
+        type: 'textarea',
+        label: 'Custom Headers',
+        placeholder: '{"X-Custom-Header": "value"}',
+        helpText: 'Additional HTTP headers as JSON object',
+        advanced: true
+      },
+      {
+        field: 'poll_interval',
+        type: 'range',
+        label: 'Polling Interval (seconds)',
+        min: 5,
+        max: 3600,
+        step: 5,
+        helpText: 'How often to poll the endpoint',
+        advanced: true
+      }
+    ],
+    defaults: {
+      endpoint_url: '',
+      method: 'GET',
+      api_key: '',
+      headers: '{}',
+      poll_interval: 60
+    },
+    validator: (config) => {
+      const errors: Record<string, string> = {};
+      if (!config.endpoint_url) errors.endpoint_url = 'Endpoint URL required';
+      if (config.endpoint_url && !config.endpoint_url.startsWith('http')) {
+        errors.endpoint_url = 'Invalid URL format';
+      }
+      return { valid: Object.keys(errors).length === 0, errors };
+    }
   }
 };
 
