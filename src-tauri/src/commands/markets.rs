@@ -191,7 +191,7 @@
 // ============================================================================
 
 use crate::db;
-use crate::models::market::{Orderbook, OrderbookLevel};
+use crate::models::market::Orderbook;
 use crate::models::node::{MarketType, Node, NodeType};
 use chrono::{DateTime, Utc};
 use lru::LruCache;
@@ -772,24 +772,24 @@ fn parse_orderbook_update(
 
 fn parse_polymarket_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn std::error::Error>> {
     // Parse Polymarket format
-    let bids = data["bids"]
+    let bids: Vec<[f64; 2]> = data["bids"]
         .as_array()
         .map(|arr| arr.iter()
             .filter_map(|v| {
                 let price = v["price"].as_f64()?;
                 let size = v["size"].as_f64()?;
-                Some(OrderbookLevel { price, size })
+                Some([price, size])
             })
             .collect())
         .unwrap_or_default();
     
-    let asks = data["asks"]
+    let asks: Vec<[f64; 2]> = data["asks"]
         .as_array()
         .map(|arr| arr.iter()
             .filter_map(|v| {
                 let price = v["price"].as_f64()?;
                 let size = v["size"].as_f64()?;
-                Some(OrderbookLevel { price, size })
+                Some([price, size])
             })
             .collect())
         .unwrap_or_default();
@@ -799,48 +799,66 @@ fn parse_polymarket_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<
         .map(|ts| DateTime::from_timestamp(ts, 0).unwrap_or_else(|| Utc::now()))
         .unwrap_or_else(|| Utc::now());
     
-    let liquidity: f64 = bids.iter().map(|b| b.size).sum::<f64>() + 
-                        asks.iter().map(|a| a.size).sum::<f64>();
+    let liquidity: f64 = bids.iter().map(|b| b[1]).sum::<f64>() +
+                        asks.iter().map(|a| a[1]).sum::<f64>();
+    
+    // Calculate spread (best_ask - best_bid)
+    let spread = match (bids.first(), asks.first()) {
+        (Some(bid), Some(ask)) => ask[0] - bid[0],
+        _ => 0.0,
+    };
     
     Ok(Orderbook {
         bids,
         asks,
-        timestamp,
+        timestamp: timestamp.timestamp(),
         liquidity,
+        spread,
         market_id: data["market_id"].as_str().unwrap_or("unknown").to_string(),
     })
 }
 
 fn parse_kalshi_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn std::error::Error>> {
     // Parse Kalshi format (different structure)
-    let bids = data["orderbook"]["yes"]
+    let bids: Vec<[f64; 2]> = data["orderbook"]["yes"]
         .as_array()
         .map(|arr| arr.iter()
             .filter_map(|v| {
                 let price = v["price"].as_f64()? / 100.0; // Kalshi uses cents
                 let size = v["count"].as_f64()?;
-                Some(OrderbookLevel { price, size })
+                Some([price, size])
             })
         .collect())
         .unwrap_or_default();
     
     // Kalshi structure might be different - adjust as needed
-    let asks = data["orderbook"]["no"]
+    let asks: Vec<[f64; 2]> = data["orderbook"]["no"]
         .as_array()
         .map(|arr| arr.iter()
             .filter_map(|v| {
                 let price = 1.0 - (v["price"].as_f64()? / 100.0); // Invert for NO side
                 let size = v["count"].as_f64()?;
-                Some(OrderbookLevel { price, size })
+                Some([price, size])
             })
             .collect())
         .unwrap_or_default();
     
+    // Calculate liquidity
+    let liquidity: f64 = bids.iter().map(|b| b[1]).sum::<f64>() +
+                        asks.iter().map(|a| a[1]).sum::<f64>();
+    
+    // Calculate spread (best_ask - best_bid)
+    let spread = match (bids.first(), asks.first()) {
+        (Some(bid), Some(ask)) => ask[0] - bid[0],
+        _ => 0.0,
+    };
+    
     Ok(Orderbook {
         bids,
         asks,
-        timestamp: Utc::now(),
-        liquidity: 0.0, // Calculate if available
+        timestamp: Utc::now().timestamp(),
+        liquidity,
+        spread,
         market_id: data["market_id"].as_str().unwrap_or("unknown").to_string(),
     })
 }
