@@ -284,7 +284,6 @@ import {
   Link, 
   Link2, 
   Plus, 
-  Trash2, 
   ExternalLink, 
   AlertCircle, 
   CheckCircle2, 
@@ -295,7 +294,7 @@ import {
   Unplug,
   Shield
 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
 
@@ -570,14 +569,20 @@ export default function MarketPanel({
         ) : (
           <div className="divide-y divide-gray-800">
             {existingMarkets.map((market) => {
-              const platform = market.node_type.Market;
-              if (!platform) return null;
+              // Type guard: Check if this is a Market node
+              if (!('Market' in market.node_type)) return null;
               
+              const platform = market.node_type.Market;
               const config = PLATFORM_CONFIGS[platform];
+              if (!config) return null;
+              
               const Icon = config.icon;
-              const status = market.metadata?.status || 'connecting';
+              
+              // Safely access metadata properties with type assertions
+              const metadata = market.metadata as Record<string, any>;
+              const status = metadata?.status || 'connecting';
               const isConnected = status === 'connected';
-              const balance = market.metadata?.balance || 0;
+              const balance = metadata?.balance || 0;
 
               return (
                 <div 
@@ -590,7 +595,7 @@ export default function MarketPanel({
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium text-gray-200 truncate">
-                        {market.metadata?.market_id || config.name}
+                        {metadata?.market_id || config.name}
                       </div>
                       <div className="text-xs text-gray-500 flex items-center gap-2">
                         <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
