@@ -228,7 +228,7 @@
 // ============================================================================
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 
 // ============================================================================
 // TYPES
@@ -295,7 +295,8 @@ export function useTauriCommand<T = any, P = any>(
       setLoading(true);
 
       // Debug logging (keys only for security)
-      if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((import.meta as any).env?.DEV) {
         console.log(`[Tauri] Invoking: ${command}`, params ? Object.keys(params) : 'no params');
       }
 

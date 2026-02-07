@@ -379,7 +379,7 @@
 // ============================================================================
 
 import { StateCreator } from 'zustand';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import {
   Position,
   Order,
@@ -391,9 +391,7 @@ import {
   HistoryQueryOptions,
   PositionStatus,
   OrderStatus,
-  Side,
-  OrderType,
-} from '../types/positions';
+} from '../types/markets';
 
 // =============================================================================
 // SLICE STATE INTERFACE
@@ -862,7 +860,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
     const newOrder: Order = {
       ...order,
       id: `ord-${Date.now()}`,
-      status: 'pending',
+      status: 'pending' as OrderStatus,
       createdAt: Date.now(),
       filledSize: 0,
       avgFillPrice: 0,
@@ -880,7 +878,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
     set((state) => ({
       pendingOrders: state.pendingOrders.map((o) =>
         o.id === orderId
-          ? { ...o, filledSize, status: filledSize >= o.size ? 'filled' : 'partial' }
+          ? { ...o, filledSize, status: (filledSize >= o.size ? 'filled' : 'partial') as OrderStatus }
           : o
       ),
       lastUpdate: Date.now(),
@@ -895,7 +893,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
     try {
       const positions = await invoke<Position[]>('get_positions', {});
       
-      set((state) => {
+      set(() => {
         // Rebuild positionByMarket index
         const byMarket: Record<string, Position[]> = {};
         positions.forEach((pos) => {
@@ -1025,7 +1023,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
   },
 
   resetDailyStats: () => {
-    set((state) => ({
+    set(() => ({
       dailyStats: {
         date: new Date().toISOString().split('T')[0],
         trades: 0,

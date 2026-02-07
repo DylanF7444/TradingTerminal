@@ -302,11 +302,10 @@
 
 import React, { forwardRef } from 'react';
 import { Loader2 } from 'lucide-react';
-import { clsx, type ClassValue } from 'clsx';
 
 // Utility for cleaner class merging
-function cn(...inputs: ClassValue[]) {
-  return clsx(inputs);
+function cn(...inputs: (string | boolean | undefined | null)[]) {
+  return inputs.filter(Boolean).join(' ');
 }
 
 // Button variant and size types

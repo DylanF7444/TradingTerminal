@@ -253,36 +253,67 @@
 // - Tailwind effects: shadow-lg, ring-2, animate-ping, etc.
 // ============================================================================
 
+import type { Node } from "../../types/nodes";
 
-export enum InfoSourceType {
-  CryptoPrices = "CryptoPrices",
-  FinancialPrices = "FinancialPrices",
-  CommodityPrices = "CommodityPrices",
-  NewsSource = "NewsSource",
-  SocialMedia = "SocialMedia",
-  Weather = "Weather",
-  Livestream = "Livestream",
+export interface NodeComponentProps {
+  node: Node;
+  viewport: { x: number; y: number; zoom: number };
+  isSelected: boolean;
+  isDragging: boolean;
+  onClick: () => void;
+  onMouseDown: (e: React.MouseEvent) => void;
 }
 
-export enum MarketType {
-  Polymarket = "Polymarket",
-  Kalshi = "Kalshi",
-}
+export default function NodeComponent({ 
+  node, 
+  viewport, 
+  isSelected, 
+  isDragging,
+  onClick, 
+  onMouseDown 
+}: NodeComponentProps) {
+  // Transform position based on viewport
+  const screenX = node.position[0] * viewport.zoom + viewport.x;
+  const screenY = node.position[1] * viewport.zoom + viewport.y;
 
-export type NodeType =
-  | { InfoSource: InfoSourceType }
-  | { Market: MarketType };
+  // Determine node style based on type
+  const isInfoSource = 'InfoSource' in node.node_type;
+  const baseColor = isInfoSource ? "bg-blue-500" : "bg-emerald-500";
+  const glowColor = isInfoSource ? "shadow-blue-500/50" : "shadow-emerald-500/50";
 
-export interface Node {
-  id: string;
-  node_type: NodeType;
-  position: [number, number];
-  connections: string[];
-  metadata: {
-    name?: string;
-    market_id?: string;
-    status?: string;
-    last_value?: number | string;
-    [key: string]: any;
-  };
+  return (
+    <div
+      className={`
+        absolute transform -translate-x-1/2 -translate-y-1/2 
+        w-12 h-12 rounded-full ${baseColor} 
+        border-2 ${isSelected ? "border-yellow-400" : "border-white/20"}
+        ${isDragging ? "cursor-grabbing" : "cursor-grab"}
+        ${isDragging ? "scale-110" : "hover:scale-105"}
+        transition-transform duration-150
+        shadow-lg ${glowColor}
+        flex items-center justify-center
+        select-none z-10
+      `}
+      style={{
+        left: screenX,
+        top: screenY,
+      }}
+      onClick={onClick}
+      onMouseDown={onMouseDown}
+    >
+      {/* Node Icon/Label */}
+      <span className="text-white text-xs font-bold">
+        {isInfoSource ? "I" : "M"}
+      </span>
+      
+      {/* Selection indicator ring */}
+      {isSelected && (
+        <div className="absolute inset-0 rounded-full border-2 border-yellow-400 animate-ping opacity-20" />
+      )}
+      
+      {/* Connection ports (visual only) */}
+      <div className="absolute -right-1 top-1/2 w-2 h-2 bg-white rounded-full transform -translate-y-1/2" />
+      <div className="absolute -left-1 top-1/2 w-2 h-2 bg-white rounded-full transform -translate-y-1/2" />
+    </div>
+  );
 }

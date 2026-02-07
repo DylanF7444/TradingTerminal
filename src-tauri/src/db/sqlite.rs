@@ -255,10 +255,14 @@
 // SQLite implementation for prediction market trading terminal
 // Handles all database operations: nodes, connections, time-series, positions
 
-use rusqlite::{Connection, params, Row, Result as SqliteResult};
+use rusqlite::{params, Row, Result as SqliteResult, types::Value};
+use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::path::Path;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+
+// Re-export rusqlite::Connection so other modules can use it
+pub use rusqlite::Connection;
 
 use crate::models::node::{Node, NodeType, InfoSourceType, MarketType};
 use crate::models::position::Position;
@@ -429,23 +433,20 @@ fn create_indexes(conn: &Connection) -> SqliteResult<()> {
 
 /// Apply SQLite performance optimizations
 pub fn apply_optimizations(conn: &Connection) -> SqliteResult<()> {
-    // WAL mode: Allows concurrent reads while writing
-    conn.execute("PRAGMA journal_mode = WAL", [])?;
+    // Note: PRAGMA journal_mode = WAL is handled via execute_batch in create_connection
+    // to avoid rusqlite issues with PRAGMA returning results
     
     // NORMAL synchronous: Fast writes, safe for crashes (but not power loss)
-    conn.execute("PRAGMA synchronous = NORMAL", [])?;
+    let _ = conn.execute("PRAGMA synchronous = NORMAL", []);
     
     // 64MB cache size for better performance
-    conn.execute("PRAGMA cache_size = -64000", [])?;
+    let _ = conn.execute("PRAGMA cache_size = -64000", []);
     
     // Store temp tables in memory
-    conn.execute("PRAGMA temp_store = MEMORY", [])?;
-    
-    // Memory-mapped I/O for large databases (30GB limit)
-    conn.execute("PRAGMA mmap_size = 30000000000", [])?;
+    let _ = conn.execute("PRAGMA temp_store = MEMORY", []);
     
     // Foreign keys enforcement
-    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    let _ = conn.execute("PRAGMA foreign_keys = ON", []);
 
     println!("Database optimizations applied");
     Ok(())
@@ -726,7 +727,7 @@ pub fn query_timeseries(
     Ok(points)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeseriesPoint {
     pub timestamp: i64,
     pub source_id: String,
@@ -1042,7 +1043,7 @@ pub fn get_database_stats(conn: &Connection) -> SqliteResult<DatabaseStats> {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseStats {
     pub total_nodes: u64,
     pub total_timeseries_points: u64,

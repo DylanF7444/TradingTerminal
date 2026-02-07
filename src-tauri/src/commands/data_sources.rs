@@ -140,14 +140,14 @@ use crate::models::node::{Node, NodeType, InfoSourceType};
 use crate::services::scraper;
 use crate::db::sqlite;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 // Dummy storage for active scrapers (in real implementation, this would be more sophisticated)
-lazy_static::lazy_static! {
-    static ref ACTIVE_SCRAPERS: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>> = 
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
-}
+static ACTIVE_SCRAPERS: LazyLock<Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>> = 
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 /// Add a new data source and start scraping
 #[tauri::command]

@@ -6,13 +6,13 @@ pub mod sqlite;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 // Global database connection pool
 // In a real implementation, consider using r2d2 for connection pooling
-lazy_static::lazy_static! {
-    static ref DB_CONNECTION: Arc<Mutex<Option<Connection>>> = Arc::new(Mutex::new(None));
-}
+static DB_CONNECTION: LazyLock<Arc<Mutex<Option<Connection>>>> = 
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 /// Initialize the database with schema and optimizations
 /// Called once during application startup from main.rs

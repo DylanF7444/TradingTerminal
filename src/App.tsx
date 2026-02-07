@@ -95,28 +95,23 @@
 //
 // ============================================================================
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 // Store hooks
-import { useAppStore } from './store';
+import { useStore } from './store';
 
 // Layout components
 import Canvas from './components/Canvas/Canvas';
 import SourcePanel from './components/InfoSources/SourcePanel';
 import MarketPanel from './components/Markets/MarketPanel';
-import PositionMonitor from './components/Positions/PositionMonitor';
 import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
-import NodeDetails from './components/NodeDetails/NodeDetails';
-import Toolbar from './components/Toolbar/Toolbar';
-import StatusBar from './components/StatusBar/StatusBar';
 
 // UI components
-import { Button } from './components/UI/Button';
 import { Modal } from './components/UI/Modal';
 
 // Types
-import type { Node, Connection } from './types/nodes';
+import type { Node } from './types/nodes';
 
 // =============================================================================
 // LAYOUT CONSTANTS
@@ -127,13 +122,6 @@ const PANEL_WIDTHS = {
   leftSidebar: 280,
   rightSidebar: 384, // 96 * 4 = 384px (Tailwind w-96)
   bottomPanel: 240,
-};
-
-/** Minimum panel sizes before collapsing */
-const MIN_PANEL_SIZES = {
-  leftSidebar: 200,
-  rightSidebar: 300,
-  bottomPanel: 150,
 };
 
 /** Breakpoints for responsive behavior */
@@ -150,7 +138,7 @@ const BREAKPOINTS = {
 /**
  * Root application component managing layout and global UI state.
  */
-function App(): JSX.Element {
+function App(): ReactNode {
   // -------------------------------------------------------------------------
   // Global State Selectors (Zustand)
   // -------------------------------------------------------------------------
@@ -163,8 +151,16 @@ function App(): JSX.Element {
     clearSelection,
     viewport,
     setViewport,
-  } = useAppStore(
-    useShallow((state) => ({
+  } = useStore(
+    useShallow((state: { 
+      nodes: Record<string, Node>; 
+      connections: Array<{ source: string; target: string; strength: number }>;
+      selectedIds: Set<string>;
+      selectNode: (id: string | null, multi?: boolean) => void;
+      clearSelection: () => void;
+      viewport: { x: number; y: number; zoom: number };
+      setViewport: (viewport: { x: number; y: number; zoom: number }) => void;
+    }) => ({
       nodes: state.nodes,
       connections: state.connections,
       selectedIds: state.selectedIds,
@@ -195,10 +191,10 @@ function App(): JSX.Element {
   const [showHelp, setShowHelp] = useState(false);
   
   /** Window size for responsive behavior */
-  const [windowSize, setWindowSize] = useState({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  });
+  const [windowSize, setWindowSize] = useState(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1200,
+    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+  }));
 
   // -------------------------------------------------------------------------
   // Derived State
@@ -230,7 +226,7 @@ function App(): JSX.Element {
   
   /** Handle window resize with debouncing */
   useEffect(() => {
-    let timeoutId: NodeJS.Timeout;
+    let timeoutId: ReturnType<typeof setTimeout>;
     
     const handleResize = () => {
       clearTimeout(timeoutId);
@@ -313,7 +309,7 @@ function App(): JSX.Element {
 
   /** Handle node movement from Canvas */
   const handleNodeMove = useCallback((id: string, position: [number, number]) => {
-    const { updateNodePosition } = useAppStore.getState();
+    const { updateNodePosition } = useStore.getState();
     updateNodePosition(id, position);
   }, []);
 
@@ -400,12 +396,34 @@ function App(): JSX.Element {
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Toolbar */}
-        <Toolbar 
-          onToggleRightPanel={toggleRightSidebar}
-          onToggleBottomPanel={toggleBottomPanel}
-          rightPanelOpen={showRightSidebar}
-          bottomPanelOpen={showBottomPanel}
-        />
+        <div className="h-14 bg-gray-900 border-b border-gray-800 flex items-center px-4 gap-2">
+          <button
+            onClick={toggleRightSidebar}
+            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              showRightSidebar ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            Details
+          </button>
+          <button
+            onClick={toggleBottomPanel}
+            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              showBottomPanel ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            Positions
+          </button>
+          <div className="flex-1" />
+          <button
+            onClick={() => setShowHelp(true)}
+            className="p-2 hover:bg-gray-800 rounded-lg text-gray-400"
+            title="Help"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </button>
+        </div>
 
         {/* Canvas Area */}
         <div className="flex-1 relative overflow-hidden">
@@ -438,8 +456,8 @@ function App(): JSX.Element {
                 </svg>
               </button>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <PositionMonitor />
+            <div className="flex-1 overflow-hidden flex items-center justify-center text-gray-500">
+              <p>Position monitor coming soon...</p>
             </div>
           </div>
         )}
@@ -463,13 +481,22 @@ function App(): JSX.Element {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto p-4">
-            <NodeDetails node={selectedNode} />
+            <div className="text-gray-400 text-sm">
+              <p className="mb-2"><strong>ID:</strong> {selectedNode.id}</p>
+              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode.node_type)}</p>
+              <p className="mb-2"><strong>Position:</strong> [{selectedNode.position[0]}, {selectedNode.position[1]}]</p>
+              <p className="mb-2"><strong>Connections:</strong> {selectedNode.connections.length}</p>
+              <p className="mb-2"><strong>Created:</strong> {new Date(selectedNode.createdAt).toLocaleString()}</p>
+            </div>
           </div>
         </aside>
       )}
 
       {/* Status Bar */}
-      <StatusBar className="fixed bottom-0 left-72 right-0 h-6 bg-gray-950 border-t border-gray-800 text-xs flex items-center px-3 text-gray-500 z-50" />
+      <div className="fixed bottom-0 left-72 right-0 h-6 bg-gray-950 border-t border-gray-800 text-xs flex items-center px-3 text-gray-500 z-50">
+        <span>Ready</span>
+        <span className="ml-auto">{layoutMode} mode</span>
+      </div>
     </div>
   );
 
@@ -531,7 +558,20 @@ function App(): JSX.Element {
         {/* Bottom Panel */}
         {showBottomPanel && (
           <div className="h-48 bg-gray-900 border-t border-gray-800">
-            <PositionMonitor />
+            <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800">
+              <h2 className="text-sm font-semibold text-gray-300">Positions & Activity</h2>
+              <button 
+                onClick={toggleBottomPanel}
+                className="p-1 hover:bg-gray-700 rounded text-gray-400"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden flex items-center justify-center text-gray-500">
+              <p>Position monitor coming soon...</p>
+            </div>
           </div>
         )}
       </main>
@@ -544,7 +584,26 @@ function App(): JSX.Element {
             onClick={toggleRightSidebar}
           />
           <aside className="absolute right-0 top-0 bottom-0 w-96 bg-gray-900 shadow-xl">
-            <NodeDetails node={selectedNode} onClose={toggleRightSidebar} />
+            <div className="h-14 flex items-center justify-between px-4 border-b border-gray-800">
+              <h2 className="font-semibold text-gray-200">Node Details</h2>
+              <button 
+                onClick={toggleRightSidebar}
+                className="p-1.5 hover:bg-gray-800 rounded-lg text-gray-400"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="text-gray-400 text-sm">
+                <p className="mb-2"><strong>ID:</strong> {selectedNode.id}</p>
+                <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode.node_type)}</p>
+                <p className="mb-2"><strong>Position:</strong> [{selectedNode.position[0]}, {selectedNode.position[1]}]</p>
+                <p className="mb-2"><strong>Connections:</strong> {selectedNode.connections.length}</p>
+                <p className="mb-2"><strong>Created:</strong> {new Date(selectedNode.createdAt).toLocaleString()}</p>
+              </div>
+            </div>
           </aside>
         </div>
       )}
@@ -589,7 +648,7 @@ function App(): JSX.Element {
             connections={connectionsArray}
             viewport={viewport}
             selectedNodeId={selectedNode?.id || null}
-            onNodeClick={(node) => {
+            onNodeClick={(node: Node) => {
               handleNodeClick(node);
               setMobileActiveTab('details');
             }}
@@ -608,7 +667,13 @@ function App(): JSX.Element {
         
         {mobileActiveTab === 'details' && selectedNode ? (
           <div className="h-full overflow-y-auto p-4">
-            <NodeDetails node={selectedNode} />
+            <div className="text-gray-400 text-sm">
+              <p className="mb-2"><strong>ID:</strong> {selectedNode.id}</p>
+              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode.node_type)}</p>
+              <p className="mb-2"><strong>Position:</strong> [{selectedNode.position[0]}, {selectedNode.position[1]}]</p>
+              <p className="mb-2"><strong>Connections:</strong> {selectedNode.connections.length}</p>
+              <p className="mb-2"><strong>Created:</strong> {new Date(selectedNode.createdAt).toLocaleString()}</p>
+            </div>
           </div>
         ) : mobileActiveTab === 'details' ? (
           <div className="h-full flex items-center justify-center text-gray-500">
@@ -619,7 +684,9 @@ function App(): JSX.Element {
 
       {/* Mobile Bottom Sheet for Positions */}
       <div className="bg-gray-900 border-t border-gray-800 max-h-48 overflow-hidden">
-        <PositionMonitor compact />
+        <div className="p-4 text-center text-gray-500 text-sm">
+          Position monitor coming soon...
+        </div>
       </div>
     </div>
   );

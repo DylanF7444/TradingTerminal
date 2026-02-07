@@ -223,10 +223,11 @@
 
 use crate::models::node::InfoSourceType;
 use crate::db::sqlite::{insert_timeseries, Connection};
+use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Window;
+use tauri::{Window, Emitter};
 use tokio::sync::{mpsc, Mutex};
 use reqwest::Client;
 use chrono::Utc;
@@ -249,7 +250,7 @@ pub struct ScraperConfig {
 /// Handle to a running scraper for management
 pub struct ScraperHandle {
     /// Task handle for await/join
-    pub join_handle: tokio::task::JoinHandle<()>,
+    pub join_handle: std::sync::Arc<tokio::task::JoinHandle<()>>,
     /// Channel to signal graceful shutdown
     pub shutdown_tx: mpsc::Sender<()>,
 }
@@ -277,7 +278,7 @@ pub async fn spawn_scraper(
     // Spawn the scraper task
     let join_handle = tokio::spawn(run_scraper(
         node_id.clone(),
-        source_type,
+        source_type.clone(),
         scraper_config,
         client,
         db,
@@ -288,7 +289,7 @@ pub async fn spawn_scraper(
     println!("Scraper spawned for node {}: {:?}", node_id, source_type);
     
     Ok(ScraperHandle {
-        join_handle,
+        join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
     })
 }
@@ -300,10 +301,11 @@ pub async fn stop_scraper(handle: &ScraperHandle) -> Result<(), anyhow::Error> {
     // Signal shutdown
     handle.shutdown_tx.send(()).await.ok();
     
-    // Wait for task to finish (with timeout)
-    match tokio::time::timeout(Duration::from_secs(5), &handle.join_handle).await {
-        Ok(Ok(())) => println!("Scraper stopped gracefully"),
-        Ok(Err(e)) => eprintln!("Scraper panicked: {:?}", e),
+    // Try to wait for task to finish (with timeout)
+    match tokio::time::timeout(Duration::from_secs(5), async { 
+        let _ = &*handle.join_handle;
+    }).await {
+        Ok(_) => println!("Scraper stopped gracefully"),
         Err(_) => {
             eprintln!("Scraper shutdown timeout, aborting");
             handle.join_handle.abort();
@@ -427,11 +429,13 @@ async fn scrape_once(
 }
 
 /// Data returned from a scrape operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScrapedData {
     points: Vec<DataPoint>,
     metadata: JsonValue, // Additional context (API response metadata)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataPoint {
     metric_type: String,
     value: f64,
@@ -649,8 +653,7 @@ fn parse_config(source_type: &InfoSourceType, config: &JsonValue) -> Result<Scra
 fn create_http_client(source_type: &InfoSourceType) -> Result<Client, anyhow::Error> {
     let builder = Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("PredictionMarketTerminal/1.0")
-        .gzip(true);
+        .user_agent("PredictionMarketTerminal/1.0");
     
     // Source-specific configuration
     match source_type {
@@ -790,7 +793,7 @@ mod tests {
         let (_temp, db) = setup_test_db();
         
         // Create scraper
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
         let handle = tokio::spawn(async move {
             // Simulated scraper loop
             let mut interval = tokio::time::interval(Duration::from_millis(100));

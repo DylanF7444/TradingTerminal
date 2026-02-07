@@ -400,29 +400,6 @@ function scale(v: Position, s: number): Position {
 }
 
 /**
- * Add two vectors.
- */
-function add(a: Position, b: Position): Position {
-  return [a[0] + b[0], a[1] + b[1]];
-}
-
-/**
- * Subtract two vectors.
- */
-function subtract(a: Position, b: Position): Position {
-  return [a[0] - b[0], a[1] - b[1]];
-}
-
-/**
- * Calculate centroid of positions.
- */
-function centroid(positions: Position[]): Position {
-  if (positions.length === 0) return [0, 0];
-  const sum = positions.reduce((acc, pos) => add(acc, pos), [0, 0] as Position);
-  return [sum[0] / positions.length, sum[1] / positions.length];
-}
-
-/**
  * Seeded random number generator for deterministic layouts.
  */
 function createSeededRandom(seed: number): () => number {
@@ -837,7 +814,7 @@ export class ForceDirectedLayout implements LayoutAlgorithm {
     }
   }
 
-  estimateComplexity(nodeCount: number, connectionCount: number): number {
+  estimateComplexity(nodeCount: number, _connectionCount: number): number {
     const barnesHutFactor = this.config.useSpatialIndex ? Math.log(nodeCount) : nodeCount;
     return nodeCount * barnesHutFactor * this.config.maxIterations;
   }
@@ -917,14 +894,16 @@ export class HierarchicalLayout implements LayoutAlgorithm {
     outgoing: Map<string, Set<string>>,
     incoming: Map<string, Set<string>>
   ): string[][] {
+    // outgoing is used by the minimizeCrossings method
+    void outgoing;
     const layers: string[][] = [];
     const assigned = new Set<string>();
-    const remaining = new Set(nodes.map(n => n.id));
+    const remaining = new Set<string>(nodes.map(n => n.id as string));
 
     // Find sources (no incoming edges)
-    let currentLayer = nodes
+    let currentLayer: string[] = nodes
       .filter(n => incoming.get(n.id)?.size === 0)
-      .map(n => n.id);
+      .map(n => n.id as string);
 
     while (currentLayer.length > 0) {
       layers.push(currentLayer);
@@ -1079,7 +1058,7 @@ export class CircularLayout implements LayoutAlgorithm {
 
   execute(
     nodes: Node[],
-    connections: Connection[],
+    _connections: Connection[],
     options: LayoutOptions = {}
   ): LayoutResult {
     const startTime = performance.now();
@@ -1158,7 +1137,7 @@ export class CircularLayout implements LayoutAlgorithm {
     }
   }
 
-  estimateComplexity(nodeCount: number, connectionCount: number): number {
+  estimateComplexity(nodeCount: number, _connectionCount: number): number {
     return nodeCount; // O(n)
   }
 }
@@ -1185,7 +1164,7 @@ export class GridLayout implements LayoutAlgorithm {
 
   execute(
     nodes: Node[],
-    connections: Connection[],
+    _connections: Connection[],
     options: LayoutOptions = {}
   ): LayoutResult {
     const startTime = performance.now();
@@ -1273,7 +1252,7 @@ export class GridLayout implements LayoutAlgorithm {
     }
   }
 
-  estimateComplexity(nodeCount: number, connectionCount: number): number {
+  estimateComplexity(nodeCount: number, _connectionCount: number): number {
     return nodeCount; // O(n)
   }
 }
@@ -1331,7 +1310,7 @@ export class LayoutEngine {
       throw new Error(`Unknown layout type: ${type}`);
     }
 
-    return algorithm.execute(nodes, connections, options);
+    return algorithm.execute(nodes, connections, options ?? {});
   }
 
   /**

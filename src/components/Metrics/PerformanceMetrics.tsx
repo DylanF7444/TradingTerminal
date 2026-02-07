@@ -337,7 +337,15 @@ import {
   Wifi,
   Server
 } from 'lucide-react';
-import { format } from 'date-fns';
+// Date formatting utility (replaces date-fns for smaller bundle)
+function formatTime(date: Date): string {
+  return date.toLocaleTimeString('en-US', { 
+    hour12: false, 
+    hour: '2-digit', 
+    minute: '2-digit', 
+    second: '2-digit' 
+  });
+}
 
 // Metric data interfaces
 interface MetricValue {
@@ -602,7 +610,7 @@ export default function PerformanceMetrics({
 }: PerformanceMetricsProps) {
   const [activeAlerts, setActiveAlerts] = useState<MetricAlert[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const prevMetricsRef = useRef<PerformanceMetricsData | undefined>();
+  const prevMetricsRef = useRef<PerformanceMetricsData | undefined>(undefined);
   
   const thresholds = { ...DEFAULT_THRESHOLDS, ...customThresholds };
 
@@ -748,7 +756,7 @@ export default function PerformanceMetrics({
 
         {/* Last Update */}
         <div className={`px-4 text-xs ${isStale ? 'text-amber-500' : 'text-gray-600'}`}>
-          {isStale ? 'Stale' : format(lastUpdate, 'HH:mm:ss')}
+          {isStale ? 'Stale' : formatTime(lastUpdate)}
         </div>
       </div>
     );
@@ -877,7 +885,7 @@ export default function PerformanceMetrics({
           <div className="flex items-center gap-1" title={`Last updated: ${lastUpdate.toISOString()}`}>
             <Clock className="w-3 h-3" />
             <span className={isStale ? 'text-amber-500' : ''}>
-              {isStale ? 'Stale' : format(lastUpdate, 'HH:mm:ss')}
+              {isStale ? 'Stale' : formatTime(lastUpdate)}
             </span>
           </div>
         </div>

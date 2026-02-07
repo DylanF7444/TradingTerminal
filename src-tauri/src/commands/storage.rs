@@ -231,19 +231,18 @@
 //
 // ============================================================================
 
-use crate::models::node::Node;
-use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use chrono::{Duration as ChronoDuration, Utc};
 use lru::LruCache;
-use r2d2::{Pool, PooledConnection};
+use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{Manager, Runtime, State, Window};
+use tauri::State;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
@@ -312,8 +311,8 @@ impl StorageState {
         init_database(&pool)?;
         
         let buffer: Arc<Mutex<Vec<DataPoint>>> = Arc::new(Mutex::new(Vec::with_capacity(WRITE_BUFFER_SIZE)));
-        let query_cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(QUERY_CACHE_SIZE).unwrap())));
-        let correlation_cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())));
+        let query_cache = Arc::new(Mutex::new(LruCache::<String, CachedQuery>::new(NonZeroUsize::new(QUERY_CACHE_SIZE).unwrap())));
+        let correlation_cache = Arc::new(Mutex::new(LruCache::<String, (f64, Instant)>::new(NonZeroUsize::new(100).unwrap())));
         
         // Spawn background flush task
         let buffer_clone = buffer.clone();
@@ -332,7 +331,7 @@ impl StorageState {
             db_pool: pool,
             write_buffer: buffer,
             query_cache,
-            correlation_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap()))),
+            correlation_cache,
             _flush_handle: Arc::new(flush_handle),
         })
     }
@@ -397,7 +396,7 @@ pub async fn query_timeseries(
     // Check cache first
     let cache_key = format!("{}:{}:{}:{}:{:?}", source_id, metric, start_time, end_time, granularity);
     {
-        let cache = state.query_cache.lock().await;
+        let mut cache = state.query_cache.lock().await;
         if let Some(cached) = cache.get(&cache_key) {
             if cached.cached_at.elapsed() < Duration::from_secs(QUERY_CACHE_TTL_SECS) {
                 return Ok(cached.data.clone());
@@ -442,7 +441,7 @@ pub async fn get_correlation_data(
     // Check correlation cache
     let cache_key = format!("{}:{}:{}:{}:{}", source_a, source_b, start_time, end_time, time_range);
     {
-        let cache = state.correlation_cache.lock().await;
+        let mut cache = state.correlation_cache.lock().await;
         if let Some((value, cached_at)) = cache.get(&cache_key) {
             if cached_at.elapsed() < Duration::from_secs(CORRELATION_CACHE_TTL_SECS) {
                 return Ok(*value);
@@ -478,18 +477,18 @@ pub async fn get_available_metrics(
     source_id: String,
     state: State<'_, StorageState>,
 ) -> Result<Vec<String>, String> {
-    let conn = state.db_pool.get().map_err(|e| e.to_string())?;
+    let conn = state.db_pool.get().map_err(|e: r2d2::Error| e.to_string())?;
     
     let mut stmt = conn.prepare(
         "SELECT DISTINCT metric_type FROM timeseries WHERE source_id = ? ORDER BY metric_type"
-    ).map_err(|e| e.to_string())?;
+    ).map_err(|e: rusqlite::Error| e.to_string())?;
     
-    let metrics: Result<Vec<String>, _> = stmt.query_map([&source_id], |row| {
+    let metrics: Result<Vec<String>, rusqlite::Error> = stmt.query_map(params![source_id], |row: &rusqlite::Row| {
         row.get::<_, String>(0)
-    }).map_err(|e| e.to_string())?
+    }).map_err(|e: rusqlite::Error| e.to_string())?
     .collect();
     
-    metrics.map_err(|e| e.to_string())
+    metrics.map_err(|e: rusqlite::Error| e.to_string())
 }
 
 /// Delete time-series data older than timestamp
@@ -499,18 +498,18 @@ pub async fn delete_timeseries(
     before_timestamp: i64,
     state: State<'_, StorageState>,
 ) -> Result<usize, String> {
-    let conn = state.db_pool.get().map_err(|e| e.to_string())?;
+    let conn = state.db_pool.get().map_err(|e: r2d2::Error| e.to_string())?;
     
     let rows_affected = if let Some(source) = source_id {
         conn.execute(
             "DELETE FROM timeseries WHERE source_id = ? AND timestamp < ?",
             params![source, before_timestamp],
-        ).map_err(|e| e.to_string())?
+        ).map_err(|e: rusqlite::Error| e.to_string())?
     } else {
         conn.execute(
             "DELETE FROM timeseries WHERE timestamp < ?",
             [before_timestamp],
-        ).map_err(|e| e.to_string())?
+        ).map_err(|e: rusqlite::Error| e.to_string())?
     };
     
     // Vacuum to reclaim space (optional, could be scheduled)
@@ -526,47 +525,51 @@ pub async fn delete_timeseries(
 pub async fn get_storage_stats(
     state: State<'_, StorageState>,
 ) -> Result<JsonValue, String> {
-    let conn = state.db_pool.get().map_err(|e| e.to_string())?;
+    let conn = state.db_pool.get().map_err(|e: r2d2::Error| e.to_string())?;
     
     // Total rows
     let total_rows: i64 = conn.query_row(
         "SELECT COUNT(*) FROM timeseries",
         [],
-        |row| row.get(0)
-    ).map_err(|e| e.to_string())?;
+        |row: &rusqlite::Row| row.get(0)
+    ).map_err(|e: rusqlite::Error| e.to_string())?;
     
     // Database size
-    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap_or(0);
-    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap_or(0);
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r: &rusqlite::Row| r.get(0)).unwrap_or(0);
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r: &rusqlite::Row| r.get(0)).unwrap_or(0);
     let db_size = page_count * page_size;
     
     // Time range
     let (oldest, newest): (Option<i64>, Option<i64>) = conn.query_row(
         "SELECT MIN(timestamp), MAX(timestamp) FROM timeseries",
         [],
-        |row| Ok((row.get(0).unwrap_or(None), row.get(1).unwrap_or(None)))
-    ).map_err(|e| e.to_string())?;
+        |row: &rusqlite::Row| Ok((row.get(0).unwrap_or(None), row.get(1).unwrap_or(None)))
+    ).map_err(|e: rusqlite::Error| e.to_string())?;
     
     // Rows per source (top 10)
     let mut stmt = conn.prepare(
         "SELECT source_id, COUNT(*) as count FROM timeseries GROUP BY source_id ORDER BY count DESC LIMIT 10"
-    ).map_err(|e| e.to_string())?;
+    ).map_err(|e: rusqlite::Error| e.to_string())?;
     
-    let source_counts: Result<HashMap<String, i64>, _> = stmt.query_map([], |row| {
+    let source_counts: Result<HashMap<String, i64>, rusqlite::Error> = stmt.query_map([], |row: &rusqlite::Row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    }).map_err(|e| e.to_string())?
+    }).map_err(|e: rusqlite::Error| e.to_string())?
     .collect();
+    
+    let write_buffer_size = {
+        let buf = state.write_buffer.lock().await;
+        buf.len()
+    };
+    
+    let rows_per_source = source_counts.map_err(|e: rusqlite::Error| e.to_string())?;
     
     Ok(serde_json::json!({
         "total_rows": total_rows,
         "db_size_bytes": db_size,
         "oldest_record": oldest,
         "newest_record": newest,
-        "rows_per_source": source_counts.map_err(|e| e.to_string())?,
-        "write_buffer_size": {
-            let buf = state.write_buffer.lock().await;
-            buf.len()
-        }
+        "rows_per_source": rows_per_source,
+        "write_buffer_size": write_buffer_size
     }))
 }
 
@@ -577,12 +580,16 @@ pub async fn get_storage_stats(
 fn init_database(pool: &Pool<SqliteConnectionManager>) -> Result<(), Box<dyn std::error::Error>> {
     let conn = pool.get()?;
     
+    // Apply WAL mode first (must be done before any transactions)
+    // Note: PRAGMA returns a result, so we use query_row to capture it
+    let _ : String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    
+    // Apply other PRAGMAs
+    conn.execute("PRAGMA synchronous = NORMAL", [])?;
+    
     // Create table with optimized schema for time-series
     conn.execute_batch(
         "
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
-        
         CREATE TABLE IF NOT EXISTS timeseries (
             timestamp INTEGER NOT NULL,
             source_id TEXT NOT NULL,
@@ -607,7 +614,7 @@ fn init_database(pool: &Pool<SqliteConnectionManager>) -> Result<(), Box<dyn std
 async fn flush_buffer(
     buffer: &Arc<Mutex<Vec<DataPoint>>>,
     pool: &Pool<SqliteConnectionManager>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let points: Vec<DataPoint> = {
         let mut buf = buffer.lock().await;
         if buf.is_empty() {
@@ -616,6 +623,7 @@ async fn flush_buffer(
         std::mem::replace(&mut *buf, Vec::with_capacity(WRITE_BUFFER_SIZE))
     };
     
+    let num_points = points.len();
     let pool = pool.clone();
     tokio::task::spawn_blocking(move || {
         let mut conn = pool.get()?;
@@ -640,10 +648,10 @@ async fn flush_buffer(
         }
         
         tx.commit()?;
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }).await.map_err(|e| format!("Flush task failed: {}", e))??;
     
-    println!("Flushed {} data points to database", points.len());
+    println!("Flushed {} data points to database", num_points);
     Ok(())
 }
 
@@ -653,7 +661,7 @@ async fn query_raw_timeseries(
     metric: &str,
     start_time: i64,
     end_time: i64,
-) -> Result<Vec<DataPoint>, Box<dyn std::error::Error>> {
+) -> Result<Vec<DataPoint>, Box<dyn std::error::Error + Send + Sync>> {
     let source_id = source_id.to_string();
     let metric = metric.to_string();
     let pool = pool.clone();
@@ -661,16 +669,16 @@ async fn query_raw_timeseries(
     tokio::task::spawn_blocking(move || {
         let conn = pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT timestamp, value, metadata FROM timeseries 
+            "SELECT timestamp, value, metadata FROM timeseries
              WHERE source_id = ? AND metric_type = ? AND timestamp BETWEEN ? AND ?
              ORDER BY timestamp ASC"
         )?;
         
-        let points: Result<Vec<DataPoint>, _> = stmt.query_map(
+        let points: Result<Vec<DataPoint>, rusqlite::Error> = stmt.query_map(
             params![source_id, metric, start_time, end_time],
-            |row| {
+            |row: &rusqlite::Row| {
                 let metadata_str: Option<String> = row.get(2)?;
-                let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
+                let metadata: Option<JsonValue> = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
                 
                 Ok(DataPoint {
                     timestamp: row.get(0)?,
@@ -683,7 +691,7 @@ async fn query_raw_timeseries(
         )?
         .collect();
         
-        Ok::<Vec<DataPoint>, Box<dyn std::error::Error>>(points?)
+        Ok::<Vec<DataPoint>, Box<dyn std::error::Error + Send + Sync>>(points?)
     }).await?
 }
 
@@ -694,7 +702,7 @@ async fn query_downsampled(
     start_time: i64,
     end_time: i64,
     granularity: &str,
-) -> Result<Vec<DataPoint>, Box<dyn std::error::Error>> {
+) -> Result<Vec<DataPoint>, Box<dyn std::error::Error + Send + Sync>> {
     let interval_seconds = match granularity {
         "1min" => 60,
         "5min" => 300,
@@ -711,26 +719,24 @@ async fn query_downsampled(
         let conn = pool.get()?;
         
         // SQLite window function for time bucketing
-        let sql = format!(
-            "SELECT 
+        // Note: ? are SQL parameter placeholders, not format placeholders
+        let sql = "SELECT
                 (timestamp / ?) * ? as bucket,
                 FIRST_VALUE(value) OVER (PARTITION BY bucket ORDER BY timestamp) as open,
                 MAX(value) as high,
                 MIN(value) as low,
                 LAST_VALUE(value) OVER (PARTITION BY bucket ORDER BY timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as close,
                 AVG(value) as avg
-             FROM timeseries 
+             FROM timeseries
              WHERE source_id = ? AND metric_type = ? AND timestamp BETWEEN ? AND ?
              GROUP BY bucket
-             ORDER BY bucket",
-             interval_seconds, interval_seconds
-        );
+             ORDER BY bucket";
         
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(sql)?;
         
-        let points: Result<Vec<DataPoint>, _> = stmt.query_map(
+        let points: Result<Vec<DataPoint>, rusqlite::Error> = stmt.query_map(
             params![interval_seconds, interval_seconds, source_id, metric, start_time, end_time],
-            |row| {
+            |row: &rusqlite::Row| {
                 Ok(DataPoint {
                     timestamp: row.get::<_, i64>(0)? * interval_seconds,
                     source_id: source_id.clone(),
@@ -748,7 +754,7 @@ async fn query_downsampled(
             }
         )?.collect();
         
-        Ok::<Vec<DataPoint>, Box<dyn std::error::Error>>(points?)
+        Ok::<Vec<DataPoint>, Box<dyn std::error::Error + Send + Sync>>(points?)
     }).await?
 }
 

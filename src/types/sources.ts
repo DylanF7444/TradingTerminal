@@ -66,6 +66,8 @@
 //
 // ============================================================================
 
+import { InfoSourceType } from './nodes';
+
 // =============================================================================
 // BASE SOURCE TYPES
 // =============================================================================
@@ -158,7 +160,7 @@ export interface BaseSourceConfig {
   name: string;
   
   /** Source category from InfoSourceType */
-  type: import('./nodes').InfoSourceType;
+  type: InfoSourceType;
   
   /** Data delivery mode */
   deliveryMode: DeliveryMode;
@@ -328,7 +330,7 @@ export interface CustomAuthConfig {
  * Supports multiple providers with normalized output format.
  */
 export interface CryptoPricesConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.CryptoPrices;
+  type: InfoSourceType.CryptoPrices;
   
   /** Data provider selection */
   provider: CryptoProvider;
@@ -382,7 +384,7 @@ export enum CryptoProvider {
  * Traditional financial markets configuration.
  */
 export interface FinancialPricesConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.FinancialPrices;
+  type: InfoSourceType.FinancialPrices;
   
   /** Data provider */
   provider: FinancialProvider;
@@ -424,7 +426,7 @@ export enum FinancialProvider {
  * Commodity prices configuration.
  */
 export interface CommodityPricesConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.CommodityPrices;
+  type: InfoSourceType.CommodityPrices;
   
   /** Commodity categories */
   categories: Array<'energy' | 'metals' | 'agriculture' | 'livestock'>;
@@ -447,7 +449,7 @@ export interface CommodityPricesConfig extends BaseSourceConfig {
  * News aggregator configuration.
  */
 export interface NewsSourceConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.NewsSource;
+  type: InfoSourceType.NewsSource;
   
   /** News providers */
   providers: NewsProvider[];
@@ -513,7 +515,7 @@ export enum NewsProvider {
  * Social media source configuration.
  */
 export interface SocialMediaConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.SocialMedia;
+  type: InfoSourceType.SocialMedia;
   
   /** Platform selection */
   platforms: SocialPlatform[];
@@ -586,7 +588,7 @@ export enum SocialPlatform {
  * Weather data configuration.
  */
 export interface WeatherConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.Weather;
+  type: InfoSourceType.Weather;
   
   /** Weather provider */
   provider: WeatherProvider;
@@ -628,7 +630,7 @@ export enum WeatherProvider {
  * Livestream metrics configuration.
  */
 export interface LivestreamConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.Livestream;
+  type: InfoSourceType.Livestream;
   
   /** Platform */
   platform: StreamPlatform;
@@ -666,7 +668,7 @@ export enum StreamPlatform {
  * Economic indicators configuration.
  */
 export interface EconomicIndicatorsConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.EconomicIndicators;
+  type: InfoSourceType.EconomicIndicators;
   
   /** Data source */
   source: EconomicSource;
@@ -740,7 +742,7 @@ export enum EconomicIndicator {
  * On-chain data configuration.
  */
 export interface OnChainDataConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.OnChainData;
+  type: InfoSourceType.OnChainData;
   
   /** Blockchain networks */
   networks: Array<'bitcoin' | 'ethereum' | 'arbitrum' | 'optimism' | 'polygon'>;
@@ -789,7 +791,7 @@ export enum OnChainMetric {
  * Custom API source configuration.
  */
 export interface CustomAPIConfig extends BaseSourceConfig {
-  type: import('./nodes').InfoSourceType.CustomAPI;
+  type: InfoSourceType.CustomAPI;
   
   /** HTTP method */
   method: 'GET' | 'POST' | 'PUT' | 'PATCH';
@@ -1081,7 +1083,7 @@ export type SourceEvents =
  */
 export interface CreateSourceParams {
   /** Source type */
-  type: import('./nodes').InfoSourceType;
+  type: InfoSourceType;
   
   /** Display name */
   name: string;
@@ -1140,28 +1142,28 @@ export interface SourceHealth {
  * Type guard for crypto price configs.
  */
 export function isCryptoPricesConfig(config: SourceConfig): config is CryptoPricesConfig {
-  return config.type === import('./nodes').InfoSourceType.CryptoPrices;
+  return config.type === InfoSourceType.CryptoPrices;
 }
 
 /**
  * Type guard for news source configs.
  */
 export function isNewsSourceConfig(config: SourceConfig): config is NewsSourceConfig {
-  return config.type === import('./nodes').InfoSourceType.NewsSource;
+  return config.type === InfoSourceType.NewsSource;
 }
 
 /**
  * Type guard for social media configs.
  */
 export function isSocialMediaConfig(config: SourceConfig): config is SocialMediaConfig {
-  return config.type === import('./nodes').InfoSourceType.SocialMedia;
+  return config.type === InfoSourceType.SocialMedia;
 }
 
 /**
  * Get default configuration for a source type.
  */
 export function getDefaultConfig(
-  type: import('./nodes').InfoSourceType
+  type: InfoSourceType
 ): Partial<SourceConfig> {
   const base: Partial<BaseSourceConfig> = {
     deliveryMode: DeliveryMode.Polling,
@@ -1173,7 +1175,7 @@ export function getDefaultConfig(
   };
   
   switch (type) {
-    case import('./nodes').InfoSourceType.CryptoPrices:
+    case InfoSourceType.CryptoPrices:
       return {
         ...base,
         type,
@@ -1185,7 +1187,7 @@ export function getDefaultConfig(
         interval: 5,
       } as Partial<CryptoPricesConfig>;
       
-    case import('./nodes').InfoSourceType.NewsSource:
+    case InfoSourceType.NewsSource:
       return {
         ...base,
         type,
@@ -1205,7 +1207,7 @@ export function getDefaultConfig(
         interval: 60,
       } as Partial<NewsSourceConfig>;
       
-    case import('./nodes').InfoSourceType.SocialMedia:
+    case InfoSourceType.SocialMedia:
       return {
         ...base,
         type,
@@ -1229,7 +1231,7 @@ export function getDefaultConfig(
       } as Partial<SocialMediaConfig>;
       
     default:
-      return base;
+      return base as Partial<SourceConfig>;
   }
 }
 
@@ -1238,17 +1240,17 @@ export function getDefaultConfig(
 // =============================================================================
 
 /** Maximum sources per type (prevent abuse) */
-export const MAX_SOURCES_PER_TYPE: Record<import('./nodes').InfoSourceType, number> = {
-  [import('./nodes').InfoSourceType.CryptoPrices]: 10,
-  [import('./nodes').InfoSourceType.FinancialPrices]: 5,
-  [import('./nodes').InfoSourceType.CommodityPrices]: 5,
-  [import('./nodes').InfoSourceType.NewsSource]: 3,
-  [import('./nodes').InfoSourceType.SocialMedia]: 3,
-  [import('./nodes').InfoSourceType.Weather]: 5,
-  [import('./nodes').InfoSourceType.Livestream]: 5,
-  [import('./nodes').InfoSourceType.EconomicIndicators]: 3,
-  [import('./nodes').InfoSourceType.OnChainData]: 5,
-  [import('./nodes').InfoSourceType.CustomAPI]: 10,
+export const MAX_SOURCES_PER_TYPE: Record<InfoSourceType, number> = {
+  [InfoSourceType.CryptoPrices]: 10,
+  [InfoSourceType.FinancialPrices]: 5,
+  [InfoSourceType.CommodityPrices]: 5,
+  [InfoSourceType.NewsSource]: 3,
+  [InfoSourceType.SocialMedia]: 3,
+  [InfoSourceType.Weather]: 5,
+  [InfoSourceType.Livestream]: 5,
+  [InfoSourceType.EconomicIndicators]: 3,
+  [InfoSourceType.OnChainData]: 5,
+  [InfoSourceType.CustomAPI]: 10,
 };
 
 /** Default rate limits (requests per minute) by provider */

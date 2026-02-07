@@ -118,18 +118,14 @@ pub use node::{
 // Market data and trading types
 pub use market::{
     Orderbook, 
-    OrderbookLevel,
     TradeSide, 
     OrderType, 
-    TradeResult,
-    MarketStatus
+    TradeResult
 };
 
 // Position tracking types
 pub use position::{
-    Position,
-    PositionStatus,
-    Fill
+    Position
 };
 
 // Time-series storage types
@@ -141,3 +137,7 @@ pub use storage::{
     MetricType
 };
 */
+
+// Trading signal types
+pub mod trading_signal;
+pub use trading_signal::TradingSignal;

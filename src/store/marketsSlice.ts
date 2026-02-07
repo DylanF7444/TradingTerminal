@@ -223,7 +223,17 @@
 
 import { StateCreator } from 'zustand';
 import { Node, MarketType } from '../types/nodes';
-import { Orderbook, MarketStatus } from '../types/markets';
+import { Orderbook } from '../types/markets';
+
+// Market connection status interface
+interface MarketConnectionStatus {
+  connected: boolean;
+  connecting: boolean;
+  latency: number;
+  lastHeartbeat: Date;
+  errorCount: number;
+  errorMessage: string | null;
+}
 
 // ============================================================================
 // SLICE STATE INTERFACE
@@ -233,7 +243,7 @@ export interface MarketsSlice {
   // State
   markets: Node[];
   orderbooks: Record<string, Orderbook>;
-  marketStatus: Record<string, MarketStatus>;
+  marketStatus: Record<string, MarketConnectionStatus>;
   selectedMarketId: string | null;
   isLoading: boolean;
   error: string | null;
@@ -245,7 +255,7 @@ export interface MarketsSlice {
   
   // Data updates
   updateOrderbook: (marketId: string, orderbook: Orderbook) => void;
-  setMarketStatus: (id: string, status: Partial<MarketStatus>) => void;
+  setMarketStatus: (id: string, status: Partial<MarketConnectionStatus>) => void;
   updateMarketPrice: (id: string, midPrice: number, spread: number) => void;
   clearOrderbook: (id: string) => void;
   
@@ -261,7 +271,7 @@ export interface MarketsSlice {
   
   // Queries (selectors)
   getMarketOrderbook: (id: string) => Orderbook | undefined;
-  getMarketStatus: (id: string) => MarketStatus | undefined;
+  getMarketStatus: (id: string) => MarketConnectionStatus | undefined;
   getConnectedMarkets: () => Node[];
   getSelectedMarket: () => Node | undefined;
 }
@@ -294,7 +304,7 @@ export const createMarketsSlice: StateCreator<MarketsSlice, [], [], MarketsSlice
       }
 
       // Initialize status
-      const newStatus: MarketStatus = {
+      const newStatus: MarketConnectionStatus = {
         connected: false,
         connecting: true,
         latency: 0,
@@ -312,7 +322,7 @@ export const createMarketsSlice: StateCreator<MarketsSlice, [], [], MarketsSlice
         // Initialize empty orderbook placeholder
         orderbooks: {
           ...state.orderbooks,
-          [market.id]: { bids: [], asks: [], timestamp: new Date(), liquidity: 0 }
+          [market.id]: { marketId: market.id, bids: [], asks: [], timestamp: Date.now(), sequence: 0, liquidity: 0 }
         }
       };
     });
@@ -347,12 +357,12 @@ export const createMarketsSlice: StateCreator<MarketsSlice, [], [], MarketsSlice
   updateOrderbook: (marketId: string, orderbook: Orderbook) => {
     set((state) => {
       // Validation: Ensure prices are properly sorted
-      const sortedBids = [...orderbook.bids].sort((a, b) => b[0] - a[0]); // Descending
-      const sortedAsks = [...orderbook.asks].sort((a, b) => a[0] - b[0]); // Ascending
+      const sortedBids = [...orderbook.bids].sort((a, b) => b.price - a.price); // Descending
+      const sortedAsks = [...orderbook.asks].sort((a, b) => a.price - b.price); // Ascending
       
       // Calculate total liquidity
-      const liquidity = sortedBids.reduce((sum, [_, size]) => sum + size, 0) +
-                       sortedAsks.reduce((sum, [_, size]) => sum + size, 0);
+      const liquidity = sortedBids.reduce((sum, level) => sum + level.size, 0) +
+                       sortedAsks.reduce((sum, level) => sum + level.size, 0);
 
       return {
         orderbooks: {
@@ -362,14 +372,14 @@ export const createMarketsSlice: StateCreator<MarketsSlice, [], [], MarketsSlice
             bids: sortedBids,
             asks: sortedAsks,
             liquidity,
-            lastUpdate: new Date()
+            lastUpdate: Date.now()
           }
         }
       };
     });
   },
 
-  setMarketStatus: (id: string, status: Partial<MarketStatus>) => {
+  setMarketStatus: (id: string, status: Partial<MarketConnectionStatus>) => {
     set((state) => ({
       marketStatus: {
         ...state.marketStatus,
@@ -500,8 +510,8 @@ export const selectOrderbookWithSpread = (state: MarketsSlice, marketId: string)
   const ob = state.orderbooks[marketId];
   if (!ob || !ob.bids.length || !ob.asks.length) return null;
   
-  const bestBid = ob.bids[0][0];
-  const bestAsk = ob.asks[0][0];
+  const bestBid = ob.bids[0].price;
+  const bestAsk = ob.asks[0].price;
   const spread = bestAsk - bestBid;
   const spreadPercent = (spread / ((bestAsk + bestBid) / 2)) * 100;
   
@@ -517,7 +527,7 @@ export const selectOrderbookWithSpread = (state: MarketsSlice, marketId: string)
 // Selector for markets by type (Polymarket vs Kalshi)
 export const selectMarketsByType = (state: MarketsSlice, type: MarketType) => {
   return state.markets.filter(m => 
-    m.node_type.Market === type
+    'Market' in m.node_type && m.node_type.Market === type
   );
 };
 

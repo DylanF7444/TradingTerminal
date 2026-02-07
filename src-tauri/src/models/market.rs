@@ -272,7 +272,7 @@ pub struct Orderbook {
 }
 
 /// Trade direction (betting FOR or AGAINST outcome)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TradeSide {
     /// Buying YES contracts (betting event WILL happen)
     #[serde(rename = "buy")]

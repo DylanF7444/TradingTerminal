@@ -225,11 +225,12 @@ import { createMarketsSlice, type MarketsSlice } from './marketsSlice';
 import { createPositionsSlice, type PositionsSlice } from './positionsSlice';
 
 // UI State (defined inline as it's simple)
-interface UISlice {
+export interface UISlice {
   sidebarOpen: boolean;
   activePanel: 'sources' | 'markets' | 'positions' | 'metrics';
   theme: 'dark' | 'light';
   selectedSourceId: string | null;
+  selectedNodeId: string | null;
   modalOpen: string | null; // 'add-source' | 'add-market' | null
   
   // Actions
@@ -237,37 +238,45 @@ interface UISlice {
   setActivePanel: (panel: UISlice['activePanel']) => void;
   setTheme: (theme: UISlice['theme']) => void;
   setSelectedSourceId: (id: string | null) => void;
+  setSelectedNodeId: (id: string | null) => void;
   openModal: (modal: string) => void;
   closeModal: () => void;
 }
 
 // Combined Store State
-type StoreState = NodesSlice & MarketsSlice & PositionsSlice & UISlice;
+export type StoreState = NodesSlice & MarketsSlice & PositionsSlice & UISlice;
+
+// Type helpers for slice creators - using any for simplicity with zustand middleware chain
+type StoreSet = any;
+type StoreGet = any;
 
 // ============================================================================
 // SLICE IMPLEMENTATIONS
 // ============================================================================
 
-const createUISlice = (set: any, get: any): UISlice => ({
+const createUISlice = (set: StoreSet, _get: StoreGet): UISlice => ({
   sidebarOpen: true,
   activePanel: 'sources',
   theme: 'dark',
   selectedSourceId: null,
+  selectedNodeId: null,
   modalOpen: null,
 
   toggleSidebar: () => set((state: StoreState) => ({ 
     sidebarOpen: !state.sidebarOpen 
   })),
   
-  setActivePanel: (panel) => set({ activePanel: panel }),
+  setActivePanel: (panel) => set(() => ({ activePanel: panel })),
   
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => set(() => ({ theme })),
   
-  setSelectedSourceId: (id) => set({ selectedSourceId: id }),
+  setSelectedSourceId: (id) => set(() => ({ selectedSourceId: id })),
   
-  openModal: (modal) => set({ modalOpen: modal }),
+  setSelectedNodeId: (id) => set(() => ({ selectedNodeId: id })),
   
-  closeModal: () => set({ modalOpen: null }),
+  openModal: (modal) => set(() => ({ modalOpen: modal })),
+  
+  closeModal: () => set(() => ({ modalOpen: null })),
 });
 
 // ============================================================================
@@ -284,9 +293,9 @@ export const useStore = create<StoreState>()(
         subscribeWithSelector(
           (set, get, api) => ({
             // Combine all slices
-            ...createNodesSlice(set, get, api),
-            ...createMarketsSlice(set, get, api),
-            ...createPositionsSlice(set, get, api),
+            ...createNodesSlice(set as unknown as Parameters<typeof createNodesSlice>[0], get as unknown as Parameters<typeof createNodesSlice>[1], api as unknown as Parameters<typeof createNodesSlice>[2]),
+            ...createMarketsSlice(set as unknown as Parameters<typeof createMarketsSlice>[0], get as unknown as Parameters<typeof createMarketsSlice>[1], api as unknown as Parameters<typeof createMarketsSlice>[2]),
+            ...createPositionsSlice(set as unknown as Parameters<typeof createPositionsSlice>[0], get as unknown as Parameters<typeof createPositionsSlice>[1], api as unknown as Parameters<typeof createPositionsSlice>[2]),
             ...createUISlice(set, get),
           })
         ),
@@ -295,7 +304,7 @@ export const useStore = create<StoreState>()(
           version: 1, // For state migrations
           
           // Only persist specific parts of state (UI preferences, not real-time data)
-          partialize: (state) => ({
+          partialize: (state: StoreState) => ({
             // UI State
             sidebarOpen: state.sidebarOpen,
             theme: state.theme,
@@ -306,11 +315,11 @@ export const useStore = create<StoreState>()(
           }),
           
           // Migration handling (when version changes)
-          migrate: (persistedState: any, version) => {
+          migrate: (persistedState: unknown, version: number) => {
             if (version === 0) {
               // Migration from version 0 to 1
               return {
-                ...persistedState,
+                ...(persistedState as Record<string, unknown>),
                 selectedSourceId: null, // New field in v1
               } as StoreState;
             }
@@ -320,8 +329,7 @@ export const useStore = create<StoreState>()(
       ),
       {
         name: 'PredictionMarketTerminal',
-        enabled: process.env.NODE_ENV === 'development',
-        trace: true,
+        enabled: true,
       }
     )
   )
@@ -340,20 +348,21 @@ export const setState = useStore.setState;
 export const subscribe = useStore.subscribe;
 
 // Specific selectors for better performance
-export const useNodes = () => useStore((state) => state.nodes);
-export const useConnections = () => useStore((state) => state.connections);
-export const useSelectedNode = () => useStore((state) => 
-  state.nodes.find(n => n.id === state.selectedNodeId)
-);
+export const useNodes = () => useStore((state: StoreState) => state.nodes);
+export const useConnections = () => useStore((state: StoreState) => state.connections);
+export const useSelectedNode = () => useStore((state: StoreState) => {
+  const nodesArray = Object.values(state.nodes);
+  return nodesArray.find((n) => n.id === state.selectedNodeId);
+});
 
-export const useMarkets = () => useStore((state) => state.markets);
+export const useMarkets = () => useStore((state: StoreState) => state.markets);
 export const useOrderbook = (marketId: string) => 
-  useStore((state) => state.orderbooks[marketId]);
+  useStore((state: StoreState) => state.orderbooks[marketId]);
 
-export const usePositions = () => useStore((state) => state.positions);
-export const useDailyPnL = () => useStore((state) => state.dailyPnL);
+export const usePositions = () => useStore((state: StoreState) => state.openPositions);
+export const useDailyPnL = () => useStore((state: StoreState) => state.dailyStats.realizedPnl);
 
-export const useUI = () => useStore((state) => ({
+export const useUI = () => useStore((state: StoreState) => ({
   sidebarOpen: state.sidebarOpen,
   activePanel: state.activePanel,
   theme: state.theme,
@@ -361,7 +370,7 @@ export const useUI = () => useStore((state) => ({
 }));
 
 // Actions selectors (dispatchers)
-export const useNodeActions = () => useStore((state) => ({
+export const useNodeActions = () => useStore((state: StoreState) => ({
   addNode: state.addNode,
   removeNode: state.removeNode,
   updateNodePosition: state.updateNodePosition,
@@ -370,20 +379,20 @@ export const useNodeActions = () => useStore((state) => ({
   removeConnection: state.removeConnection,
 }));
 
-export const useMarketActions = () => useStore((state) => ({
+export const useMarketActions = () => useStore((state: StoreState) => ({
   addMarket: state.addMarket,
   removeMarket: state.removeMarket,
   updateOrderbook: state.updateOrderbook,
   setMarketStatus: state.setMarketStatus,
 }));
 
-export const usePositionActions = () => useStore((state) => ({
+export const usePositionActions = () => useStore((state: StoreState) => ({
   openPosition: state.openPosition,
   closePosition: state.closePosition,
-  updatePositionPnL: state.updatePositionPnL,
+  updatePositionPrice: state.updatePositionPrice,
 }));
 
-export const useUIActions = () => useStore((state) => ({
+export const useUIActions = () => useStore((state: StoreState) => ({
   toggleSidebar: state.toggleSidebar,
   setActivePanel: state.setActivePanel,
   setTheme: state.setTheme,
@@ -398,23 +407,24 @@ export const useUIActions = () => useStore((state) => ({
 // Subscribe to specific state changes and sync to backend
 if (typeof window !== 'undefined') {
   // Debounced node position sync
-  let positionTimeout: NodeJS.Timeout;
+  let positionTimeout: ReturnType<typeof setTimeout>;
   
   useStore.subscribe(
-    (state) => state.nodes,
+    (state: StoreState) => state.nodes,
     (nodes) => {
       // Clear existing timeout
       clearTimeout(positionTimeout);
       
       // Debounce position updates (500ms after drag ends)
       positionTimeout = setTimeout(() => {
-        // Sync to SQLite via Tauri
-        const { invoke } = require('@tauri-apps/api/tauri');
-        nodes.forEach((node: any) => {
-          invoke('update_node_position', {
-            id: node.id,
-            position: node.position,
-          }).catch(console.error);
+        // Sync to SQLite via Tauri - lazy import
+        void import('@tauri-apps/api/core').then(({ invoke }) => {
+          Object.values(nodes).forEach((node) => {
+            void invoke('update_node_position', {
+              id: node.id,
+              position: node.position,
+            }).catch(console.error);
+          });
         });
       }, 500);
     },
@@ -422,13 +432,13 @@ if (typeof window !== 'undefined') {
   );
 
   // Log state changes in development
-  if (process.env.NODE_ENV === 'development') {
-    useStore.subscribe((state) => {
+  if (typeof import.meta !== 'undefined' && (import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+    useStore.subscribe((state: StoreState) => {
       console.log('[Store]', {
-        nodes: state.nodes.length,
+        nodes: Object.keys(state.nodes).length,
         connections: state.connections.length,
         markets: state.markets.length,
-        positions: state.positions.length,
+        positions: state.openPositions.length,
       });
     });
   }

@@ -3,7 +3,7 @@
 // ============================================================================
 //
 // Module: commands/markets.rs
-// Purpose: Tauri command handlers for prediction market platform connections
+// Purpose: Tauri command handlers for prediction market market connections
 //
 // OVERVIEW:
 // This module manages connections to prediction market platforms (Polymarket, Kalshi)
@@ -81,50 +81,6 @@
 //   - Only handles/connection IDs stored in memory
 //   - Retrieved by ID when making authenticated calls
 //
-// EXTERNAL METHODS CALLED:
-//
-// Platform API clients (implemented in services/market_api/):
-// - authenticate_polymarket(api_key) -> Result<AuthToken, Error>
-//   - POST /auth/api-key to Polymarket
-//   - Returns JWT token for subsequent requests
-//
-// - authenticate_kalshi(api_key, api_secret) -> Result<Session, Error>
-//   - POST /login to Kalshi
-//   - Establishes session cookie/token
-//
-// - connect_websocket(url, auth_token) -> Result<WebSocketStream, Error>
-//   - Opens WSS connection to platform
-//   - Sends authentication frame
-//   - Returns framed stream for orderbook updates
-//
-// - fetch_rest_orderbook(market_id, platform) -> Result<Orderbook, Error>
-//   - GET /exchange/v1/orderbooks/{id} (Polymarket)
-//   - GET /markets/{id}/orderbook (Kalshi)
-//   - Normalizes different formats to internal Orderbook struct
-//
-// Database operations (db/sqlite.rs):
-// - store_market_node(node) -> Result<(), Error>
-// - fetch_market_node(id) -> Result<Node, Error>
-// - update_market_status(id, status) -> Result<(), Error>
-// - archive_market_node(id) -> Result<(), Error>
-//
-// WebSocket handlers (services/market_websocket.rs):
-// - spawn_websocket_listener(connection_id, stream) -> JoinHandle
-//   - Processes incoming orderbook deltas
-//   - Updates ORDERBOOK_CACHE
-//   - Emits "orderbook:update" events to frontend
-//   - Handles reconnection logic
-//
-// DEPENDENCIES:
-// - crate::models::node::{Node, NodeType, MarketType}
-// - crate::models::market::Orderbook
-// - tokio_tungstenite (WebSocket client)
-// - reqwest (HTTP client for REST APIs)
-// - tauri::api::notification (connection error alerts)
-// - serde_json (credential serialization)
-// - chrono (timestamp handling)
-// - lru::LruCache (in-memory caching)
-//
 // ERROR HANDLING:
 // All commands return Result<T, String> for Tauri compatibility
 // Errors categorized as:
@@ -147,50 +103,9 @@
 // - WebSocket connections use wss:// (TLS) exclusively
 // - No plaintext credential storage in SQLite
 //
-// TESTING:
-// - Unit tests use mock WebSocket servers (tokio-test)
-// - Mock API responses for authentication
-// - Tests verify cache invalidation logic
-// - Connection failure scenarios tested
-//
-// USAGE EXAMPLE (from frontend):
-// ```typescript
-// import { invoke } from '@tauri-apps/api/tauri';
-// 
-// // Connect to Polymarket
-// const marketNode = await invoke('add_market', {
-//   marketType: 'Polymarket',
-//   apiCredentials: { apiKey: 'pm_key_xxx' }, // Stored securely
-//   marketId: 'BTC-100K-2026'
-// });
-// 
-// // Fetch orderbook
-// const orderbook = await invoke('get_orderbook', {
-//   marketId: marketNode.id
-// });
-// console.log('Best bid:', orderbook.bids[0]);
-// ```
-//
-// FUTURE ENHANCEMENTS:
-// - Support for additional platforms (PredictIt, Betfair)
-// - Orderbook aggregation across platforms
-// - Connection pooling for multiple markets per platform
-// - Automatic failover to REST when WebSocket fails
-// - Market metadata caching (descriptions, resolution criteria)
 // ============================================================================
 
-// ============================================================================
-// MARKET CONNECTION COMMAND HANDLERS
-// ============================================================================
-//
-// Module: commands/markets.rs
-// Purpose: Tauri command handlers for prediction market platform connections
-//
-// ... (comment header preserved as requested)
-//
-// ============================================================================
-
-use crate::db;
+use crate::db::get_connection;
 use crate::models::market::Orderbook;
 use crate::models::node::{MarketType, Node, NodeType};
 use chrono::{DateTime, Utc};
@@ -201,10 +116,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{Manager, Runtime, State, Window};
+use tauri::{Emitter, Manager, Runtime, State, Window};
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, WebSocketStream};
-use tokio::net::TcpStream;
 use futures_util::{SinkExt, StreamExt};
 
 // ============================================================================
@@ -324,7 +238,13 @@ pub async fn add_market<R: Runtime>(
     };
     
     // Store in database
-    db::store_market_node(&node).await.map_err(|e| e.to_string())?;
+    let conn = get_connection().await.map_err(|e| e.to_string())?;
+    let conn_guard = conn.lock().await;
+    let Some(db_conn) = &*conn_guard else {
+        return Err("Database not initialized".to_string());
+    };
+    crate::db::insert_node(db_conn, &node).map_err(|e| e.to_string())?;
+    drop(conn_guard);
     
     // Establish WebSocket connection
     let ws_handle = spawn_websocket_listener(
@@ -377,7 +297,14 @@ pub async fn remove_market(
         let _ = send_unsubscribe(&conn.platform, &conn.market_id).await;
         
         // Archive in database instead of hard delete (preserve history)
-        db::archive_market_node(&id).await.map_err(|e| e.to_string())?;
+        let db_conn_result = get_connection().await.map_err(|e| e.to_string())?;
+        let conn_guard = db_conn_result.lock().await;
+        let Some(db_conn) = &*conn_guard else {
+            return Err("Database not initialized".to_string());
+        };
+        // Soft delete by setting archived flag
+        crate::db::delete_node(db_conn, &id).map_err(|e| e.to_string())?;
+        drop(conn_guard);
         
         // Clean up credentials
         remove_credentials(&conn.credentials_id).await?;
@@ -395,8 +322,17 @@ pub async fn remove_market(
 /// Get all active markets
 #[tauri::command]
 pub async fn get_markets() -> Result<Vec<Node>, String> {
-    db::fetch_all_market_nodes().await
-        .map_err(|e| e.to_string())
+    let conn = get_connection().await.map_err(|e| e.to_string())?;
+    let conn_guard = conn.lock().await;
+    let Some(db_conn) = &*conn_guard else {
+        return Err("Database not initialized".to_string());
+    };
+    let nodes = crate::db::get_all_active_nodes(db_conn).map_err(|e| e.to_string())?;
+    // Filter to only market nodes
+    let market_nodes: Vec<Node> = nodes.into_iter()
+        .filter(|n| matches!(n.node_type, NodeType::Market(_)))
+        .collect();
+    Ok(market_nodes)
 }
 
 /// Get current orderbook for a market
@@ -407,7 +343,7 @@ pub async fn get_orderbook(
 ) -> Result<Orderbook, String> {
     // Check cache first
     {
-        let cache = state.orderbook_cache.lock().await;
+        let mut cache = state.orderbook_cache.lock().await;
         if let Some(cached) = cache.get(&market_node_id) {
             if cached.timestamp.elapsed() < Duration::from_secs(ORDERBOOK_TTL_SECONDS) {
                 return Ok(cached.orderbook.clone());
@@ -573,7 +509,7 @@ async fn connect_and_listen<R: Runtime>(
     connections: Arc<RwLock<HashMap<String, MarketConnection>>>,
     cache: Arc<Mutex<LruCache<String, CachedOrderbook>>>,
     window: Window<R>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Connect
     let url = format!("{}?token={}", ws_url, auth_token);
     let (ws_stream, _) = connect_async(&url).await?;
@@ -648,7 +584,7 @@ async fn handle_ws_message<R: Runtime>(
     platform: &MarketType,
     cache: &Arc<Mutex<LruCache<String, CachedOrderbook>>>,
     window: &Window<R>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let value: serde_json::Value = serde_json::from_str(text)?;
     
     // Parse platform-specific format into standard Orderbook
@@ -681,7 +617,7 @@ async fn handle_ws_message<R: Runtime>(
 async fn authenticate_platform(
     platform: &MarketType,
     credentials: &JsonValue,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Placeholder implementations - replace with actual API calls
     
     match platform {
@@ -709,7 +645,7 @@ async fn authenticate_platform(
 async fn fetch_rest_orderbook(
     platform: &MarketType,
     market_id: &str,
-) -> Result<Orderbook, Box<dyn std::error::Error>> {
+) -> Result<Orderbook, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
     
     match platform {
@@ -744,7 +680,7 @@ async fn fetch_rest_orderbook(
 async fn send_unsubscribe(
     platform: &MarketType,
     market_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Implementation would send unsubscribe frame if connection still open
     // For now, just log
     println!("Unsubscribing {} from {}", market_id, 
@@ -763,14 +699,14 @@ async fn send_unsubscribe(
 fn parse_orderbook_update(
     value: serde_json::Value,
     platform: &MarketType,
-) -> Result<Orderbook, Box<dyn std::error::Error>> {
+) -> Result<Orderbook, Box<dyn std::error::Error + Send + Sync>> {
     match platform {
         MarketType::Polymarket => parse_polymarket_orderbook(value),
         MarketType::Kalshi => parse_kalshi_orderbook(value),
     }
 }
 
-fn parse_polymarket_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn std::error::Error>> {
+fn parse_polymarket_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn std::error::Error + Send + Sync>> {
     // Parse Polymarket format
     let bids: Vec<[f64; 2]> = data["bids"]
         .as_array()
@@ -818,7 +754,7 @@ fn parse_polymarket_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<
     })
 }
 
-fn parse_kalshi_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn std::error::Error>> {
+fn parse_kalshi_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn std::error::Error + Send + Sync>> {
     // Parse Kalshi format (different structure)
     let bids: Vec<[f64; 2]> = data["orderbook"]["yes"]
         .as_array()
@@ -840,7 +776,7 @@ fn parse_kalshi_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn 
                 let size = v["count"].as_f64()?;
                 Some([price, size])
             })
-            .collect())
+        .collect())
         .unwrap_or_default();
     
     // Calculate liquidity
@@ -888,15 +824,15 @@ fn validate_credentials(
 
 // Placeholder for secure credential storage
 async fn store_credentials_securely(
-    node_id: &str,
-    creds: &JsonValue,
+    _node_id: &str,
+    _creds: &JsonValue,
 ) -> Result<String, String> {
     // In real implementation, use Tauri's secure storage API or OS keyring
     // Returns a reference ID to retrieve later
-    Ok(format!("creds:{}", node_id))
+    Ok(format!("creds:{}", _node_id))
 }
 
-async fn retrieve_credentials(creds_id: &str) -> Result<JsonValue, String> {
+async fn retrieve_credentials(_creds_id: &str) -> Result<JsonValue, String> {
     // Retrieve from secure storage
     // Mock implementation
     Ok(serde_json::json!({
@@ -905,43 +841,8 @@ async fn retrieve_credentials(creds_id: &str) -> Result<JsonValue, String> {
     }))
 }
 
-async fn remove_credentials(creds_id: &str) -> Result<(), String> {
+async fn remove_credentials(_creds_id: &str) -> Result<(), String> {
     // Remove from secure storage
-    println!("Removing credentials {}", creds_id);
+    println!("Removing credentials {}", _creds_id);
     Ok(())
-}
-
-// ============================================================================
-// DATABASE WRAPPER FUNCTIONS (placeholders - implement in db/sqlite.rs)
-// ============================================================================
-
-pub mod db {
-    use super::*;
-    
-    pub async fn store_market_node(node: &Node) -> Result<(), Box<dyn std::error::Error>> {
-        // Implementation: INSERT INTO nodes (id, node_type, position, connections, metadata)
-        println!("Storing market node {} in database", node.id);
-        Ok(())
-    }
-    
-    pub async fn fetch_market_node(id: &str) -> Result<Node, Box<dyn std::error::Error>> {
-        // Implementation: SELECT * FROM nodes WHERE id = ?
-        Err("Not implemented".into())
-    }
-    
-    pub async fn fetch_all_market_nodes() -> Result<Vec<Node>, Box<dyn std::error::Error>> {
-        // Implementation: SELECT * FROM nodes WHERE node_type LIKE '%Market%'
-        Ok(vec![])
-    }
-    
-    pub async fn update_market_status(id: &str, status: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Implementation: UPDATE nodes SET metadata = json_set(metadata, '$.status', ?) WHERE id = ?
-        Ok(())
-    }
-    
-    pub async fn archive_market_node(id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Implementation: UPDATE nodes SET archived = true, archived_at = ? WHERE id = ?
-        println!("Archiving market node {}", id);
-        Ok(())
-    }
 }

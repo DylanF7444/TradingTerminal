@@ -266,14 +266,13 @@
 // - Compliance reporting (tax lot tracking, wash sale detection)
 // ============================================================================
 
-use crate::models::market::{TradeResult, TradeSide, OrderType, TradingSignal};
-use crate::models::position::Position;
+use crate::models::{market::{TradeResult, TradeSide, OrderType}, position::Position, TradingSignal};
 use crate::db::sqlite::Connection;
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Mutex};
 use chrono::Utc;
+use tauri::Emitter;
 
 /// Executor service managing trade execution
 pub struct Executor {
@@ -559,7 +558,7 @@ impl Executor {
     }
 
     /// Get current market price
-    async fn get_market_price(&self, market_id: &str) -> Option<f64> {
+    async fn get_market_price(&self, _market_id: &str) -> Option<f64> {
         // Query from cache or API
         // Simplified: return mock
         Some(0.50)

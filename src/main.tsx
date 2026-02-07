@@ -80,18 +80,18 @@
 
 import React, { StrictMode, Suspense, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { invoke } from '@tauri-apps/api/tauri';
-import { appWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 
 // Global styles - Tailwind CSS
-import './index.css';
+import './styles.css';
 
 // Application root component
 import App from './App';
 
 // Store hooks for initialization
-import { useAppStore } from './store';
+import { useStore } from './store';
 
 // =============================================================================
 // PLATFORM DETECTION
@@ -108,7 +108,7 @@ const isTauri = typeof window !== 'undefined' &&
 /**
  * Detect if running in development mode.
  */
-const isDevelopment = process.env.NODE_ENV === 'development';
+const isDevelopment = import.meta.env.DEV;
 
 /**
  * Detect system color scheme preference.
@@ -183,6 +183,8 @@ async function initializeTauri(): Promise<void> {
 
   try {
     // Set up window event listeners
+    const appWindow = getCurrentWindow();
+    
     const unlistenClose = await listen('tauri://close-requested', () => {
       logger.info('Close requested, performing cleanup...');
       // Perform cleanup, save state, etc.
@@ -206,8 +208,8 @@ async function initializeTauri(): Promise<void> {
     });
 
     // Register cleanup for hot reload
-    if (isDevelopment && import.meta.hot) {
-      import.meta.hot.dispose(() => {
+    if (isDevelopment && (import.meta as any).hot) {
+      (import.meta as any).hot.dispose(() => {
         unlistenClose();
         unlistenFocus();
         unlistenBlur();
@@ -371,7 +373,7 @@ function LoadingShell() {
 
       {/* Version info */}
       <p className="mt-8 text-xs text-gray-600">
-        v{process.env.VITE_APP_VERSION || '0.1.0'}
+        v{import.meta.env.VITE_APP_VERSION || '0.1.0'}
         {isTauri ? ' • Desktop' : ' • Web'}
         {isDevelopment && ' • Dev'}
       </p>
@@ -420,7 +422,7 @@ function Root() {
     if (!isReady) return;
 
     // Hydrate store from persistence if needed
-    const store = useAppStore.getState();
+    const store = useStore.getState();
     
     // Sync with backend on startup
     store.syncPositions?.().catch((err: Error) => {
@@ -540,8 +542,8 @@ window.addEventListener('error', (event) => {
 // HOT MODULE REPLACEMENT
 // =============================================================================
 
-if (isDevelopment && import.meta.hot) {
-  import.meta.hot.accept(() => {
+if (isDevelopment && (import.meta as any).hot) {
+  (import.meta as any).hot.accept(() => {
     logger.info('Hot module replacement triggered');
   });
 }

@@ -266,8 +266,8 @@
 // ============================================================================
 
 import { StateCreator } from 'zustand';
-import { Node, Connection, NodeType, InfoSourceType, MarketType } from '../types/nodes';
-import { calculateGraphLayout } from '../utils/graphLayout';
+import { Node, Connection } from '../types/nodes';
+import { calculateForceLayout } from '../utils/graphLayout';
 
 // =============================================================================
 // SLICE STATE INTERFACE
@@ -687,11 +687,11 @@ export const createNodesSlice: StateCreator<NodesSlice> = (set, get) => ({
     if (nodesArray.length === 0) return;
     
     // Calculate new positions using force-directed layout
-    const newPositions = calculateGraphLayout(nodesArray, state.connections);
+    const layoutResult = calculateForceLayout(nodesArray, state.connections);
     
     // Batch update all node positions
     const updates: Record<string, Partial<Node>> = {};
-    newPositions.forEach((pos, id) => {
+    layoutResult.positions.forEach((pos: [number, number], id: string) => {
       updates[id] = { position: pos };
     });
     

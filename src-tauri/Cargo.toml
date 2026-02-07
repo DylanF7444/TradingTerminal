@@ -6,19 +6,22 @@ edition = "2021"
 authors = ["Fenzoe"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
 wiremock = "0.6"
 tempfile = "3.0"
 criterion = "0.5"
 
 [dependencies]
-tauri = { version = "2", features = ["shell-open", "system-tray"] }
-tauri-plugin-opener = "2"
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 reqwest = { version = "0.11", features = ["json"] }
 rusqlite = { version = "0.30", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 anyhow = "1.0"
@@ -32,3 +35,5 @@ lru = "0.11"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+

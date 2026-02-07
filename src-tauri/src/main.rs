@@ -165,7 +165,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 // External crate imports
-use tauri::{Manager, State, RunEvent, WindowEvent, SystemTrayEvent};
+use tauri::{Manager, State, RunEvent, WindowEvent};
 use tokio::sync::Mutex;
 use log::info;
 
@@ -177,7 +177,7 @@ use crate::commands::{
     storage,
 };
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
-use crate::services::{scraper, analyzer, executor};
+use crate::services::{scraper};
 
 /// Application state shared across all commands and services
 /// 
@@ -199,10 +199,10 @@ pub struct AppState {
     pub active_scrapers: Arc<Mutex<std::collections::HashMap<String, scraper::ScraperHandle>>>,
     
     /// Analyzer service handle (signal processing)
-    pub analyzer_handle: Arc<Mutex<Option<analyzer::AnalyzerHandle>>>,
+    pub analyzer_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     
     /// Executor service handle (trade execution)
-    pub executor_handle: Arc<Mutex<Option<executor::ExecutorHandle>>>,
+    pub executor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     
     /// Application configuration (hot-reloadable)
     pub config: Arc<Mutex<AppConfig>>,
@@ -289,10 +289,6 @@ fn main() {
             vacuum_database_cmd,
         ])
         
-        // Configure system tray (optional, for background operation)
-        .system_tray(create_system_tray())
-        .on_system_tray_event(handle_system_tray_event)
-        
         // Run the application
         .build(tauri::generate_context!())
         .expect("Error building Tauri application")
@@ -307,12 +303,9 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     info!("Initializing application...");
     
     // 1. Resolve application data directory
-    let app_dir = if let Some(dir) = app.path_resolver().app_data_dir() {
-        dir
-    } else {
-        // Fallback to temp directory (rare edge case)
+    let app_dir = app.path().app_data_dir().unwrap_or_else(|_| {
         std::env::temp_dir().join("prediction_market_terminal")
-    };
+    });
     
     std::fs::create_dir_all(&app_dir)?;
     info!("App directory: {:?}", app_dir);
@@ -345,7 +338,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     
     // 6. Start background services (scraper supervisor, analyzer, executor)
     // In a real implementation, these would be started here or on-demand
-    tauri::async_runtime::spawn(start_background_services(app.handle()));
+    tauri::async_runtime::spawn(start_background_services(app.handle().clone()));
     
     info!("Application initialization complete");
     Ok(())
@@ -374,7 +367,7 @@ async fn start_background_services(app_handle: tauri::AppHandle) {
 /// Handle application run events
 /// 
 /// Called for lifecycle events like window close, system signals, etc.
-fn handle_run_event(app_handle: tauri::AppHandle, event: RunEvent) {
+fn handle_run_event(app_handle: &tauri::AppHandle, event: RunEvent) {
     match event {
         RunEvent::WindowEvent { label, event: window_event, .. } => {
             if label == "main" {
@@ -429,15 +422,17 @@ async fn graceful_shutdown(app_handle: tauri::AppHandle) {
     drop(scrapers); // Release lock
     
     // 2. Stop analyzer
-    if let Some(handle) = state.analyzer_handle.lock().await.as_ref() {
+    let mut analyzer = state.analyzer_handle.lock().await;
+    if let Some(handle) = analyzer.take() {
         info!("Stopping analyzer");
-        // handle.shutdown().await;
+        handle.abort();
     }
     
     // 3. Stop executor
-    if let Some(handle) = state.executor_handle.lock().await.as_ref() {
+    let mut executor = state.executor_handle.lock().await;
+    if let Some(handle) = executor.take() {
         info!("Stopping executor");
-        // handle.shutdown().await;
+        handle.abort();
     }
     
     // 4. Database cleanup (VACUUM if needed, close connections)
@@ -448,49 +443,6 @@ async fn graceful_shutdown(app_handle: tauri::AppHandle) {
     }
     
     info!("Graceful shutdown complete");
-}
-
-/// Create system tray icon and menu
-fn create_system_tray() -> tauri::SystemTray {
-    let quit = tauri::CustomMenuItem::new("quit".to_string(), "Quit");
-    let hide = tauri::CustomMenuItem::new("hide".to_string(), "Hide");
-    let show = tauri::CustomMenuItem::new("show".to_string(), "Show");
-    
-    let tray_menu = tauri::SystemTrayMenu::new()
-        .add_item(show)
-        .add_item(hide)
-        .add_native_item(tauri::SystemTrayMenuItem::Separator)
-        .add_item(quit);
-    
-    tauri::SystemTray::new().with_menu(tray_menu)
-}
-
-/// Handle system tray events
-fn handle_system_tray_event(app: &tauri::AppHandle, event: SystemTrayEvent) {
-    match event {
-        SystemTrayEvent::LeftClick { .. } => {
-            let window = app.get_window("main").unwrap();
-            window.show().unwrap();
-            window.set_focus().unwrap();
-        }
-        SystemTrayEvent::MenuItemClick { id, .. } => {
-            match id.as_str() {
-                "quit" => {
-                    std::process::exit(0);
-                }
-                "hide" => {
-                    let window = app.get_window("main").unwrap();
-                    window.hide().unwrap();
-                }
-                "show" => {
-                    let window = app.get_window("main").unwrap();
-                    window.show().unwrap();
-                }
-                _ => {}
-            }
-        }
-        _ => {}
-    }
 }
 
 // ============================================================================
@@ -849,7 +801,7 @@ async fn get_storage_stats_cmd(
 /// Get system information
 #[tauri::command]
 async fn get_system_info_cmd() -> Result<serde_json::Value, String> {
-    use sysinfo::{System, SystemExt};
+    use sysinfo::{System, SystemExt, CpuExt};
     
     let mut sys = System::new_all();
     sys.refresh_all();

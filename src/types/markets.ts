@@ -571,7 +571,7 @@ export interface TradeResult {
   fills?: Fill[];
   
   /** Created position (if opening trade) */
-  position?: import('./positions').Position;
+  position?: Position;
   
   /** Updated balances */
   balances?: Record<string, number>;
@@ -1046,8 +1046,80 @@ export const WS_CHANNELS: Record<MarketType, string> = {
 // DERIVED TYPES (from other slices)
 // =============================================================================
 
-// Re-export Position-related types from positions.ts for convenience
-export type { Position, ClosedPosition } from './positions';
+// Position-related types (defined inline since positions.ts doesn't exist)
+export interface Position {
+  id: string;
+  marketNodeId: string;
+  market: string;
+  side: 'buy' | 'sell';
+  size: number;
+  entryPrice: number;
+  currentPrice: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  fees: number;
+  status: PositionStatus;
+  openedAt: number;
+  orderId: string;
+  stopLoss?: number;
+  takeProfit?: number;
+}
+
+export interface ClosedPosition extends Position {
+  exitPrice: number;
+  closedAt: number;
+  holdingPeriod: number;
+}
+
+export interface OpenPositionParams {
+  market: string;
+  marketNodeId: string;
+  side: 'buy' | 'sell';
+  size: number;
+  price: number;
+  orderType?: string;
+  timeInForce?: string;
+  stopLoss?: number;
+  takeProfit?: number;
+  leverage?: number;
+  maxPositionSize?: number;
+}
+
+export interface FillDetails {
+  size: number;
+  price: number;
+}
+
+export interface PerformanceMetrics {
+  totalTrades: number;
+  winRate: number;
+  profitFactor: number;
+  sharpeRatio: number | null;
+  maxDrawdown: number;
+  averageWin: number;
+  averageLoss: number;
+  expectancy: number;
+  totalReturn: number;
+}
+
+export interface RiskAssessment {
+  positionId: string;
+  var95: number;
+  var99: number;
+  expectedShortfall: number;
+  marginRequirement: number;
+  liquidationPrice: number | null;
+  riskLevel: 'low' | 'medium' | 'high' | 'unknown';
+}
+
+export interface HistoryQueryOptions {
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export type PositionStatus = 'pending' | 'open' | 'closing' | 'closed';
 
 // =============================================================================
 // EXAMPLE USAGE

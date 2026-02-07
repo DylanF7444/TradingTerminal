@@ -211,67 +211,345 @@
 // - Cursor: Crosshair default, grabbing during pan, grab on node hover
 // ============================================================================
 
-import { Node } from "../../types/nodes";
+import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import type { Node } from "../../types/nodes";
+import NodeComponent from "./Node";
 
-interface NodeComponentProps {
-  node: Node;
-  viewport: { x: number; y: number; zoom: number };
-  isSelected: boolean;
-  isDragging: boolean;
-  onClick: () => void;
-  onMouseDown: (e: React.MouseEvent) => void;
+export interface Connection {
+  source: string;
+  target: string;
+  strength: number;
 }
 
-export default function NodeComponent({ 
-  node, 
-  viewport, 
-  isSelected, 
-  isDragging,
-  onClick, 
-  onMouseDown 
-}: NodeComponentProps) {
-  // Transform position based on viewport
-  const screenX = node.position[0] * viewport.zoom + viewport.x;
-  const screenY = node.position[1] * viewport.zoom + viewport.y;
+export interface Viewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
 
-  // Determine node style based on type
-  const isInfoSource = 'InfoSource' in node.node_type;
-  const baseColor = isInfoSource ? "bg-blue-500" : "bg-emerald-500";
-  const glowColor = isInfoSource ? "shadow-blue-500/50" : "shadow-emerald-500/50";
+export interface CanvasProps {
+  nodes: Node[];
+  connections: Connection[];
+  viewport: Viewport;
+  selectedNodeId: string | null;
+  onNodeClick: (node: Node) => void;
+  onNodeMove: (id: string, position: [number, number]) => void;
+  onBackgroundClick: () => void;
+  onViewportChange: (viewport: Viewport) => void;
+}
+
+export default function Canvas({
+  nodes,
+  connections,
+  viewport,
+  selectedNodeId,
+  onNodeClick,
+  onNodeMove,
+  onBackgroundClick,
+  onViewportChange,
+}: CanvasProps): ReactNode {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isPanning, setIsPanning] = useState(false);
+  const [draggingNode, setDraggingNode] = useState<string | null>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+
+  // Track canvas size for responsive rendering
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const { width, height } = containerRef.current.getBoundingClientRect();
+        setCanvasSize({ width, height });
+      }
+    };
+
+    updateSize();
+    window.addEventListener("resize", updateSize);
+    return () => window.removeEventListener("resize", updateSize);
+  }, []);
+
+  // Draw grid and connections on canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Handle high-DPI displays
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = canvasSize.width * dpr;
+    canvas.height = canvasSize.height * dpr;
+    canvas.style.width = `${canvasSize.width}px`;
+    canvas.style.height = `${canvasSize.height}px`;
+    ctx.scale(dpr, dpr);
+
+    // Clear canvas
+    ctx.clearRect(0, 0, canvasSize.width, canvasSize.height);
+
+    // Draw grid
+    const gridSize = 50 * viewport.zoom;
+    const gridOffsetX = viewport.x % gridSize;
+    const gridOffsetY = viewport.y % gridSize;
+
+    ctx.strokeStyle = "rgba(75, 85, 99, 0.3)";
+    ctx.lineWidth = 1;
+
+    // Vertical grid lines
+    for (let x = gridOffsetX; x < canvasSize.width; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvasSize.height);
+      ctx.stroke();
+    }
+
+    // Horizontal grid lines
+    for (let y = gridOffsetY; y < canvasSize.height; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvasSize.width, y);
+      ctx.stroke();
+    }
+
+    // Draw connections
+    ctx.save();
+    ctx.translate(viewport.x, viewport.y);
+    ctx.scale(viewport.zoom, viewport.zoom);
+
+    connections.forEach((conn) => {
+      const sourceNode = nodes.find((n) => n.id === conn.source);
+      const targetNode = nodes.find((n) => n.id === conn.target);
+
+      if (!sourceNode || !targetNode) return;
+
+      const [x1, y1] = sourceNode.position;
+      const [x2, y2] = targetNode.position;
+
+      // Calculate control points for bezier curve
+      const midX = (x1 + x2) / 2;
+      const cp1x = midX;
+      const cp1y = y1;
+      const cp2x = midX;
+      const cp2y = y2;
+
+      // Draw connection line
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+
+      // Style based on strength
+      const opacity = Math.max(0.2, conn.strength);
+      const lineWidth = 1 + conn.strength * 3;
+      ctx.strokeStyle = `rgba(59, 130, 246, ${opacity})`;
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+
+      // Draw arrow at midpoint
+      const t = 0.5;
+      const arrowX = (1 - t) * (1 - t) * (1 - t) * x1 +
+        3 * (1 - t) * (1 - t) * t * cp1x +
+        3 * (1 - t) * t * t * cp2x +
+        t * t * t * x2;
+      const arrowY = (1 - t) * (1 - t) * (1 - t) * y1 +
+        3 * (1 - t) * (1 - t) * t * cp1y +
+        3 * (1 - t) * t * t * cp2y +
+        t * t * t * y2;
+
+      // Calculate angle for arrow
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const angle = Math.atan2(dy, dx);
+
+      ctx.save();
+      ctx.translate(arrowX, arrowY);
+      ctx.rotate(angle);
+      ctx.fillStyle = `rgba(59, 130, 246, ${opacity})`;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-8, -4);
+      ctx.lineTo(-8, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    });
+
+    ctx.restore();
+  }, [nodes, connections, viewport, canvasSize]);
+
+  // Handle wheel for zoom
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault();
+
+      const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+      const newZoom = Math.max(0.1, Math.min(3, viewport.zoom * zoomFactor));
+
+      // Zoom towards mouse pointer
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const newX = mouseX - (mouseX - viewport.x) * (newZoom / viewport.zoom);
+      const newY = mouseY - (mouseY - viewport.y) * (newZoom / viewport.zoom);
+
+      onViewportChange({ x: newX, y: newY, zoom: newZoom });
+    },
+    [viewport, onViewportChange]
+  );
+
+  // Handle mouse down for pan or node drag
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      // Middle mouse button for pan
+      if (e.button === 1) {
+        setIsPanning(true);
+        setDragOffset({
+          x: e.clientX - viewport.x,
+          y: e.clientY - viewport.y,
+        });
+      }
+    },
+    [viewport]
+  );
+
+  // Handle mouse move for pan or drag
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (isPanning) {
+        onViewportChange({
+          x: e.clientX - dragOffset.x,
+          y: e.clientY - dragOffset.y,
+          zoom: viewport.zoom,
+        });
+      }
+    },
+    [isPanning, dragOffset, viewport.zoom, onViewportChange]
+  );
+
+  // Handle mouse up
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false);
+    setDraggingNode(null);
+  }, []);
+
+  // Handle node drag start
+  const handleNodeDragStart = useCallback(
+    (nodeId: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      setDraggingNode(nodeId);
+
+      const node = nodes.find((n) => n.id === nodeId);
+      if (!node) return;
+
+      // Calculate drag offset in world coordinates
+      const worldX = (e.clientX - viewport.x) / viewport.zoom;
+      const worldY = (e.clientY - viewport.y) / viewport.zoom;
+
+      setDragOffset({
+        x: worldX - node.position[0],
+        y: worldY - node.position[1],
+      });
+    },
+    [nodes, viewport]
+  );
+
+  // Handle global mouse move for node dragging
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (draggingNode) {
+        const worldX = (e.clientX - viewport.x) / viewport.zoom - dragOffset.x;
+        const worldY = (e.clientY - viewport.y) / viewport.zoom - dragOffset.y;
+        onNodeMove(draggingNode, [worldX, worldY]);
+      }
+    };
+
+    const handleGlobalMouseUp = () => {
+      setDraggingNode(null);
+    };
+
+    if (draggingNode) {
+      window.addEventListener("mousemove", handleGlobalMouseMove);
+      window.addEventListener("mouseup", handleGlobalMouseUp);
+    }
+
+    return () => {
+      window.removeEventListener("mousemove", handleGlobalMouseMove);
+      window.removeEventListener("mouseup", handleGlobalMouseUp);
+    };
+  }, [draggingNode, viewport, dragOffset, onNodeMove]);
 
   return (
     <div
-      className={`
-        absolute transform -translate-x-1/2 -translate-y-1/2 
-        w-12 h-12 rounded-full ${baseColor} 
-        border-2 ${isSelected ? "border-yellow-400" : "border-white/20"}
-        ${isDragging ? "cursor-grabbing" : "cursor-grab"}
-        ${isDragging ? "scale-110" : "hover:scale-105"}
-        transition-transform duration-150
-        shadow-lg ${glowColor}
-        flex items-center justify-center
-        select-none z-10
-      `}
-      style={{
-        left: screenX,
-        top: screenY,
-      }}
-      onClick={onClick}
-      onMouseDown={onMouseDown}
+      ref={containerRef}
+      className="relative w-full h-full overflow-hidden bg-gray-950 cursor-crosshair"
+      onWheel={handleWheel}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onClick={onBackgroundClick}
     >
-      {/* Node Icon/Label */}
-      <span className="text-white text-xs font-bold">
-        {isInfoSource ? "I" : "M"}
-      </span>
-      
-      {/* Selection indicator ring */}
-      {isSelected && (
-        <div className="absolute inset-0 rounded-full border-2 border-yellow-400 animate-ping opacity-20" />
-      )}
-      
-      {/* Connection ports (visual only) */}
-      <div className="absolute -right-1 top-1/2 w-2 h-2 bg-white rounded-full transform -translate-y-1/2" />
-      <div className="absolute -left-1 top-1/2 w-2 h-2 bg-white rounded-full transform -translate-y-1/2" />
+      {/* Canvas for grid and connections */}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 pointer-events-none"
+      />
+
+      {/* Node layer */}
+      <div
+        className="absolute inset-0"
+        style={{
+          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+          transformOrigin: "0 0",
+        }}
+      >
+        {nodes.map((node) => (
+          <NodeComponent
+            key={node.id}
+            node={node}
+            viewport={viewport}
+            isSelected={selectedNodeId === node.id}
+            isDragging={draggingNode === node.id}
+            onClick={() => onNodeClick(node)}
+            onMouseDown={(e) => handleNodeDragStart(node.id, e)}
+          />
+        ))}
+      </div>
+
+      {/* Zoom controls */}
+      <div className="absolute bottom-4 right-4 flex flex-col gap-2">
+        <button
+          onClick={() =>
+            onViewportChange({
+              ...viewport,
+              zoom: Math.min(3, viewport.zoom * 1.2),
+            })
+          }
+          className="w-10 h-10 bg-gray-800 hover:bg-gray-700 rounded-lg flex items-center justify-center text-gray-300 shadow-lg"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+          </svg>
+        </button>
+        <button
+          onClick={() =>
+            onViewportChange({
+              ...viewport,
+              zoom: Math.max(0.1, viewport.zoom / 1.2),
+            })
+          }
+          className="w-10 h-10 bg-gray-800 hover:bg-gray-700 rounded-lg flex items-center justify-center text-gray-300 shadow-lg"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+          </svg>
+        </button>
+        <div className="w-10 h-10 bg-gray-800 rounded-lg flex items-center justify-center text-gray-400 text-xs font-medium shadow-lg">
+          {Math.round(viewport.zoom * 100)}%
+        </div>
+      </div>
     </div>
   );
 }

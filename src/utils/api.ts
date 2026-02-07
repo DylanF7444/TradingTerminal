@@ -63,10 +63,10 @@
 //
 // ============================================================================
 
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import type { SourceConfig, SourceId, SourceState } from '../types/sources';
-import type { Market, Orderbook, Order, TradeResult } from '../types/markets';
-import type { Position, ClosedPosition } from '../types/positions';
+import type { Market, Orderbook, TradeResult } from '../types/markets';
+import type { Position, ClosedPosition } from '../types/markets';
 import type { Node, NodeGraph, Connection } from '../types/nodes';
 
 // =============================================================================
@@ -189,16 +189,6 @@ function createCommandError(message: string, command: string, code?: string): Ap
   };
 }
 
-function createValidationError(message: string, request?: Record<string, unknown>): ApiError {
-  return {
-    type: 'validation',
-    message,
-    request,
-    retryable: false,
-    suggestion: 'Please check your input values',
-  };
-}
-
 function createTimeoutError(command: string, timeoutMs: number): ApiError {
   return {
     type: 'timeout',
@@ -206,17 +196,6 @@ function createTimeoutError(command: string, timeoutMs: number): ApiError {
     command,
     retryable: true,
     suggestion: 'The operation is taking too long. Try again or check system load',
-  };
-}
-
-function createSerializationError(error: Error, command: string): ApiError {
-  return {
-    type: 'serialization',
-    message: `Failed to parse response from ${command}: ${error.message}`,
-    original: error,
-    command,
-    retryable: false,
-    suggestion: 'This may be a version mismatch. Please update the application',
   };
 }
 
@@ -287,9 +266,9 @@ export async function invokeCommand<T>(
       
       let apiError: ApiError;
       
-      if (error instanceof Error && 'type' in error) {
+      if (error instanceof Error && 'type' in error && 'retryable' in error) {
         // Already an ApiError (from timeout)
-        apiError = error as ApiError;
+        apiError = error as unknown as ApiError;
       } else if (error instanceof Error) {
         // Check if it's a Rust command error (structured string)
         const rustError = parseRustError(error.message);
@@ -1010,7 +989,7 @@ export async function batch<T extends Result<unknown, ApiError>[]>(
   commands: Array<() => Promise<T[number]>>
 ): Promise<T> {
   const results = await Promise.all(commands.map(cmd => cmd()));
-  return results as T;
+  return results as unknown as T;
 }
 
 /**
