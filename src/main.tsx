@@ -90,9 +90,6 @@ import './styles.css';
 // Application root component
 import App from './App';
 
-// Store hooks for initialization
-import { useStore } from './store';
-
 // =============================================================================
 // PLATFORM DETECTION
 // =============================================================================
@@ -325,7 +322,7 @@ function LoadingShell() {
       { message: 'Starting user interface...', delay: 700 },
     ];
 
-    let timeouts: NodeJS.Timeout[] = [];
+    let timeouts: ReturnType<typeof setTimeout>[] = [];
 
     steps.forEach(({ message, delay }) => {
       const timeout = setTimeout(() => setStatus(message), delay);
@@ -421,13 +418,7 @@ function Root() {
   useEffect(() => {
     if (!isReady) return;
 
-    // Hydrate store from persistence if needed
-    const store = useStore.getState();
-    
-    // Sync with backend on startup
-    store.syncPositions?.().catch((err: Error) => {
-      logger.warn('Failed to sync positions on startup:', err);
-    });
+    // Note: Backend sync is handled by the store subscription in store/index.ts
   }, [isReady]);
 
   if (!isReady) {

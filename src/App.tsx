@@ -96,10 +96,9 @@
 // ============================================================================
 
 import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react';
-import { useShallow } from 'zustand/react/shallow';
 
 // Store hooks
-import { useStore } from './store';
+import { useStore, type StoreState } from './store';
 
 // Layout components
 import Canvas from './components/Canvas/Canvas';
@@ -143,33 +142,13 @@ function App(): ReactNode {
   // Global State Selectors (Zustand)
   // -------------------------------------------------------------------------
   
-  const {
-    nodes,
-    connections,
-    selectedIds,
-    selectNode,
-    clearSelection,
-    viewport,
-    setViewport,
-  } = useStore(
-    useShallow((state: { 
-      nodes: Record<string, Node>; 
-      connections: Array<{ source: string; target: string; strength: number }>;
-      selectedIds: Set<string>;
-      selectNode: (id: string | null, multi?: boolean) => void;
-      clearSelection: () => void;
-      viewport: { x: number; y: number; zoom: number };
-      setViewport: (viewport: { x: number; y: number; zoom: number }) => void;
-    }) => ({
-      nodes: state.nodes,
-      connections: state.connections,
-      selectedIds: state.selectedIds,
-      selectNode: state.selectNode,
-      clearSelection: state.clearSelection,
-      viewport: state.viewport,
-      setViewport: state.setViewport,
-    }))
-  );
+  const nodes = useStore((state: StoreState) => state.nodes);
+  const connections = useStore((state: StoreState) => state.connections);
+  const selectedIds = useStore((state: StoreState) => state.selectedIds);
+  const selectNode = useStore((state: StoreState) => state.selectNode);
+  const clearSelection = useStore((state: StoreState) => state.clearSelection);
+  const viewport = useStore((state: StoreState) => state.viewport);
+  const setViewport = useStore((state: StoreState) => state.setViewport);
 
   // -------------------------------------------------------------------------
   // Local UI State

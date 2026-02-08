@@ -117,7 +117,7 @@
 //
 // Command Payload Structure:
 // {
-//   source_type: InfoSourceType,  // Enum variant
+//   sourceType: InfoSourceType,  // Enum variant (camelCase for Tauri)
 //   config: {
 //     // Type-specific config object
 //     // Serialized to JSON for Rust deserialization
@@ -344,9 +344,9 @@ export default function SourcePanel({
   
   // Use custom hook for backend communication
   const { execute: addSource, loading: isSubmitting, error: apiError } = useTauriCommand<Node, {
-    source_type: InfoSourceType;
+    sourceType: string;
     config: Record<string, any>;
-  }>('add_data_source');
+  }>('add_data_source_cmd');
 
   // Reset state when modal opens/closes
   useEffect(() => {
@@ -392,7 +392,7 @@ export default function SourcePanel({
       };
 
       const result = await addSource({
-        source_type: selectedType,
+        sourceType: selectedType as string,
         config: transformedConfig
       });
 
