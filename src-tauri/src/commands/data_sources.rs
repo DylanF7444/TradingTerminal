@@ -211,11 +211,33 @@ pub async fn remove_data_source(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Get all active data sources
+/// Get all active data sources and start their scrapers
 #[tauri::command]
 pub async fn get_data_sources() -> Result<Vec<Node>, String> {
-    fetch_active_nodes_from_db().await
-        .map_err(|e| format!("Failed to fetch data sources: {}", e))
+    let nodes = fetch_active_nodes_from_db().await
+        .map_err(|e| format!("Failed to fetch data sources: {}", e))?;
+    
+    // Start scrapers for each InfoSource node
+    for node in &nodes {
+        if let NodeType::InfoSource(source_type) = &node.node_type {
+            let node_id = node.id.clone();
+            let source_type = source_type.clone();
+            let config = node.metadata.clone();
+            
+            match start_scraper_service(node_id.clone(), source_type.clone(), config).await {
+                Ok(handle) => {
+                    let mut scrapers = ACTIVE_SCRAPERS.lock().await;
+                    scrapers.insert(node_id.clone(), handle);
+                    println!("Started scraper for node {}", node_id);
+                }
+                Err(e) => {
+                    eprintln!("Failed to start scraper for node {}: {}", node_id, e);
+                }
+            }
+        }
+    }
+    
+    Ok(nodes)
 }
 
 /// Update data source configuration

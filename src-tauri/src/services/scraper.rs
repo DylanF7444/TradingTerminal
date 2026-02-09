@@ -446,6 +446,30 @@ struct DataPoint {
 // SOURCE-SPECIFIC SCRAPERS
 // ============================================================================
 
+/// Map common symbols to CoinGecko IDs
+fn symbol_to_coingecko_id(symbol: &str) -> String {
+    let normalized = symbol.to_lowercase();
+    match normalized.as_str() {
+        "btc" | "bitcoin" => "bitcoin".to_string(),
+        "eth" | "ethereum" => "ethereum".to_string(),
+        "sol" | "solana" => "solana".to_string(),
+        "xrp" | "ripple" => "ripple".to_string(),
+        "ada" | "cardano" => "cardano".to_string(),
+        "dot" | "polkadot" => "polkadot".to_string(),
+        "doge" | "dogecoin" => "dogecoin".to_string(),
+        "ltc" | "litecoin" => "litecoin".to_string(),
+        "link" | "chainlink" => "chainlink".to_string(),
+        "uni" | "uniswap" => "uniswap".to_string(),
+        "matic" | "polygon" => "matic".to_string(),
+        "avax" | "avalanche-2" => "avalanche-2".to_string(),
+        "shib" | "shiba-inu" => "shiba-inu".to_string(),
+        "dai" | "dai" => "dai".to_string(),
+        "usdt" | "tether" => "tether".to_string(),
+        "usdc" | "usd-coin" => "usd-coin".to_string(),
+        _ => normalized,
+    }
+}
+
 /// Scrape cryptocurrency prices from CoinGecko
 async fn scrape_crypto(client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
     // Parse symbols from config
@@ -457,10 +481,14 @@ async fn scrape_crypto(client: &Client, config: &ScraperConfig) -> Result<Scrape
         return Err(anyhow::anyhow!("No symbols configured"));
     }
     
+    // Convert symbols to CoinGecko IDs
+    let ids: Vec<String> = symbols.iter().map(|s| symbol_to_coingecko_id(s)).collect();
+    let ids_string = ids.join(",");
+    
     // CoinGecko API: /simple/price
     let url = format!(
         "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&include_24hr_change=true",
-        symbols.join(",")
+        ids_string
     );
     
     let response = client.get(&url)
@@ -473,9 +501,16 @@ async fn scrape_crypto(client: &Client, config: &ScraperConfig) -> Result<Scrape
     
     // Parse response (format: {"bitcoin": {"usd": 50000, "usd_24h_change": 5.2}})
     for (coin, data) in response.as_object().unwrap_or(&serde_json::Map::new()) {
+        // Use the original symbol name if provided, otherwise use the coin ID
+        let original_symbol = if let Some(idx) = ids.iter().position(|id| id == coin) {
+            symbols.get(idx).unwrap_or(coin)
+        } else {
+            coin
+        };
+        
         if let Some(price) = data.get("usd").and_then(|v| v.as_f64()) {
             points.push(DataPoint {
-                metric_type: format!("price:{}", coin),
+                metric_type: format!("price:{}", original_symbol.to_lowercase()),
                 value: price,
                 metadata: Some(serde_json::json!({
                     "source": "coingecko",
@@ -484,6 +519,19 @@ async fn scrape_crypto(client: &Client, config: &ScraperConfig) -> Result<Scrape
                 })),
             });
         }
+    }
+    
+    if points.is_empty() {
+        // Return a placeholder point to show the node is working
+        points.push(DataPoint {
+            metric_type: "price:placeholder".to_string(),
+            value: 0.0,
+            metadata: Some(serde_json::json!({
+                "source": "coingecko",
+                "error": "No price data found. Check symbol names.",
+                "ids_requested": ids
+            })),
+        });
     }
     
     Ok(ScrapedData {

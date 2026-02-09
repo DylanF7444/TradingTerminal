@@ -276,8 +276,8 @@ export default function NodeComponent({
   const screenX = node.position[0] * viewport.zoom + viewport.x;
   const screenY = node.position[1] * viewport.zoom + viewport.y;
 
-  // Determine node style based on type
-  const isInfoSource = 'InfoSource' in node.node_type;
+  // Determine node style based on type (with null safety)
+  const isInfoSource = node.node_type && 'InfoSource' in node.node_type;
   const baseColor = isInfoSource ? "bg-blue-500" : "bg-emerald-500";
   const glowColor = isInfoSource ? "shadow-blue-500/50" : "shadow-emerald-500/50";
 

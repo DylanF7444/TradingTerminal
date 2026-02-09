@@ -100,6 +100,9 @@ import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react
 // Store hooks
 import { useStore, type StoreState } from './store';
 
+// Tauri imports
+import { invoke } from '@tauri-apps/api/core';
+
 // Layout components
 import Canvas from './components/Canvas/Canvas';
 import SourcePanel from './components/InfoSources/SourcePanel';
@@ -148,7 +151,39 @@ function App(): ReactNode {
   const selectNode = useStore((state: StoreState) => state.selectNode);
   const clearSelection = useStore((state: StoreState) => state.clearSelection);
   const viewport = useStore((state: StoreState) => state.viewport);
+  const addNode = useStore((state: StoreState) => state.addNode);
   const setViewport = useStore((state: StoreState) => state.setViewport);
+  const importGraph = useStore((state: StoreState) => state.importGraph);
+
+  // -------------------------------------------------------------------------
+  // Load existing nodes on app mount
+  // -------------------------------------------------------------------------
+  
+  useEffect(() => {
+    const loadExistingNodes = async () => {
+      try {
+        const result = await invoke<Node[]>('get_data_sources_cmd');
+        if (result && Array.isArray(result) && result.length > 0) {
+          // Add all nodes to the store with safe defaults for missing fields
+          const { addNode } = useStore.getState();
+          result.forEach(node => {
+            addNode({
+              ...node,
+              // Ensure required fields have defaults
+              connections: node.connections || [],
+              createdAt: node.createdAt || Date.now(),
+              updatedAt: node.updatedAt || Date.now(),
+            });
+          });
+          console.log(`Loaded ${result.length} existing nodes from backend`);
+        }
+      } catch (error) {
+        console.error('Failed to load existing nodes:', error);
+      }
+    };
+    
+    loadExistingNodes();
+  }, []);
 
   // -------------------------------------------------------------------------
   // Local UI State
@@ -359,7 +394,19 @@ function App(): ReactNode {
         {/* Scrollable content */}
         {!leftSidebarCollapsed && (
           <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            <SourcePanel />
+            <SourcePanel 
+              onAddSource={(node) => {
+                // Add node with safe defaults for missing fields
+                addNode({
+                  ...node,
+                  connections: node.connections || [],
+                  createdAt: node.createdAt || Date.now(),
+                  updatedAt: node.updatedAt || Date.now(),
+                });
+                // Center on the new node
+                selectNode(node.id, false);
+              }}
+            />
             <MarketPanel />
           </div>
         )}
@@ -461,11 +508,11 @@ function App(): ReactNode {
           </div>
           <div className="flex-1 overflow-y-auto p-4">
             <div className="text-gray-400 text-sm">
-              <p className="mb-2"><strong>ID:</strong> {selectedNode.id}</p>
-              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode.node_type)}</p>
-              <p className="mb-2"><strong>Position:</strong> [{selectedNode.position[0]}, {selectedNode.position[1]}]</p>
-              <p className="mb-2"><strong>Connections:</strong> {selectedNode.connections.length}</p>
-              <p className="mb-2"><strong>Created:</strong> {new Date(selectedNode.createdAt).toLocaleString()}</p>
+              <p className="mb-2"><strong>ID:</strong> {selectedNode?.id || 'N/A'}</p>
+              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode?.node_type || {})}</p>
+              <p className="mb-2"><strong>Position:</strong> [{selectedNode?.position?.[0] ?? 0}, {selectedNode?.position?.[1] ?? 0}]</p>
+              <p className="mb-2"><strong>Connections:</strong> {selectedNode?.connections?.length ?? 0}</p>
+              <p className="mb-2"><strong>Created:</strong> {selectedNode?.createdAt ? new Date(selectedNode.createdAt).toLocaleString() : 'N/A'}</p>
             </div>
           </div>
         </aside>
@@ -499,7 +546,17 @@ function App(): ReactNode {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            <SourcePanel />
+            <SourcePanel 
+              onAddSource={(node) => {
+                addNode({
+                  ...node,
+                  connections: node.connections || [],
+                  createdAt: node.createdAt || Date.now(),
+                  updatedAt: node.updatedAt || Date.now(),
+                });
+                selectNode(node.id, false);
+              }}
+            />
             <MarketPanel />
           </div>
         </div>
@@ -576,11 +633,11 @@ function App(): ReactNode {
             </div>
             <div className="flex-1 overflow-y-auto p-4">
               <div className="text-gray-400 text-sm">
-                <p className="mb-2"><strong>ID:</strong> {selectedNode.id}</p>
-                <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode.node_type)}</p>
-                <p className="mb-2"><strong>Position:</strong> [{selectedNode.position[0]}, {selectedNode.position[1]}]</p>
-                <p className="mb-2"><strong>Connections:</strong> {selectedNode.connections.length}</p>
-                <p className="mb-2"><strong>Created:</strong> {new Date(selectedNode.createdAt).toLocaleString()}</p>
+                <p className="mb-2"><strong>ID:</strong> {selectedNode?.id || 'N/A'}</p>
+                <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode?.node_type || {})}</p>
+                <p className="mb-2"><strong>Position:</strong> [{selectedNode?.position?.[0] ?? 0}, {selectedNode?.position?.[1] ?? 0}]</p>
+                <p className="mb-2"><strong>Connections:</strong> {selectedNode?.connections?.length ?? 0}</p>
+                <p className="mb-2"><strong>Created:</strong> {selectedNode?.createdAt ? new Date(selectedNode.createdAt).toLocaleString() : 'N/A'}</p>
               </div>
             </div>
           </aside>
@@ -639,7 +696,17 @@ function App(): ReactNode {
         
         {mobileActiveTab === 'controls' && (
           <div className="h-full overflow-y-auto p-4 space-y-6">
-            <SourcePanel />
+            <SourcePanel 
+              onAddSource={(node) => {
+                addNode({
+                  ...node,
+                  connections: node.connections || [],
+                  createdAt: node.createdAt || Date.now(),
+                  updatedAt: node.updatedAt || Date.now(),
+                });
+                selectNode(node.id, false);
+              }}
+            />
             <MarketPanel />
           </div>
         )}
@@ -647,11 +714,11 @@ function App(): ReactNode {
         {mobileActiveTab === 'details' && selectedNode ? (
           <div className="h-full overflow-y-auto p-4">
             <div className="text-gray-400 text-sm">
-              <p className="mb-2"><strong>ID:</strong> {selectedNode.id}</p>
-              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode.node_type)}</p>
-              <p className="mb-2"><strong>Position:</strong> [{selectedNode.position[0]}, {selectedNode.position[1]}]</p>
-              <p className="mb-2"><strong>Connections:</strong> {selectedNode.connections.length}</p>
-              <p className="mb-2"><strong>Created:</strong> {new Date(selectedNode.createdAt).toLocaleString()}</p>
+              <p className="mb-2"><strong>ID:</strong> {selectedNode?.id || 'N/A'}</p>
+              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode?.node_type || {})}</p>
+              <p className="mb-2"><strong>Position:</strong> [{selectedNode?.position?.[0] ?? 0}, {selectedNode?.position?.[1] ?? 0}]</p>
+              <p className="mb-2"><strong>Connections:</strong> {selectedNode?.connections?.length ?? 0}</p>
+              <p className="mb-2"><strong>Created:</strong> {selectedNode?.createdAt ? new Date(selectedNode.createdAt).toLocaleString() : 'N/A'}</p>
             </div>
           </div>
         ) : mobileActiveTab === 'details' ? (
