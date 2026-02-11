@@ -322,7 +322,7 @@ export const createMarketsSlice: StateCreator<MarketsSlice, [], [], MarketsSlice
         // Initialize empty orderbook placeholder
         orderbooks: {
           ...state.orderbooks,
-          [market.id]: { marketId: market.id, bids: [], asks: [], timestamp: Date.now(), sequence: 0, liquidity: 0 }
+          [market.id]: { marketId: market.id, bids: [], asks: [], timestamp: Date.now(), sequence: 0, liquidity: 0, spread: 0 }
         }
       };
     });

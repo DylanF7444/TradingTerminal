@@ -43,6 +43,10 @@
 // - timestamp: i64             // Unix timestamp of snapshot
 // - liquidity: f64             // Total value available (sum of bids + asks)
 // - spread: f64                // Difference between best ask and best bid
+// - last_price: Option<f64>    // Last trade price
+// - last_size: Option<f64>     // Last trade size
+// - last_trade_at: Option<i64>  // Last trade timestamp
+// - sequence: i64              // Sequence number for ordering updates
 //
 // Bids are sorted descending (highest price first - best bid)
 // Asks are sorted ascending (lowest price first - best ask)
@@ -51,7 +55,7 @@
 //   asks: [[0.53, 800], [0.54, 1200]]
 //   spread: 0.53 - 0.52 = 0.01 (1 cent)
 //
-// TradeSide (Enum):
+// OrderSide (Enum - renamed from TradeSide to match TypeScript):
 // Direction of trade relative to the outcome:
 // - Buy: Purchasing YES contracts (betting event WILL happen)
 // - Sell: Purchasing NO contracts (betting event WON'T happen)
@@ -69,12 +73,19 @@
 //   - Accepts current spread (slippage)
 //   - Guaranteed fill, uncertain price
 //
+// TimeInForce (Enum - added to match TypeScript):
+// How long order remains active:
+// - GTC: Good till cancelled
+// - GTT: Good till time
+// - IOC: Immediate or cancel
+// - FOK: Fill or kill
+//
 // TradeResult (Struct):
 // Confirmation of executed trade with actual fill details.
 // Fields:
 // - trade_id: String           // Exchange-assigned trade identifier
 // - market_id: String          // Market where trade occurred  
-// - side: TradeSide            // Direction (Buy/Sell)
+// - side: OrderSide            // Direction (Buy/Sell)
 // - order_type: OrderType      // Limit or Market
 // - requested_size: f64        // Contracts requested
 // - filled_size: f64           // Contracts actually filled (partial fills)
@@ -269,11 +280,24 @@ pub struct Orderbook {
     
     /// Bid-ask spread (best_ask - best_bid)
     pub spread: f64,
+    
+    /// Last trade price (if available)
+    pub last_price: Option<f64>,
+    
+    /// Last trade size
+    pub last_size: Option<f64>,
+    
+    /// Last trade timestamp
+    pub last_trade_at: Option<i64>,
+    
+    /// Sequence number for ordering updates
+    pub sequence: i64,
 }
 
-/// Trade direction (betting FOR or AGAINST outcome)
+/// Order direction (betting FOR or AGAINST outcome)
+/// Renamed from TradeSide to match TypeScript OrderSide naming
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum TradeSide {
+pub enum OrderSide {
     /// Buying YES contracts (betting event WILL happen)
     #[serde(rename = "buy")]
     Buy,
@@ -281,6 +305,26 @@ pub enum TradeSide {
     /// Buying NO contracts OR selling YES (betting/event WON'T happen)
     #[serde(rename = "sell")]
     Sell,
+}
+
+/// Time in force - how long order remains active
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TimeInForce {
+    /// Good till cancelled (default)
+    #[serde(rename = "GTC")]
+    GTC,
+    
+    /// Good till time (specify expiration)
+    #[serde(rename = "GTT")]
+    GTT,
+    
+    /// Immediate or cancel
+    #[serde(rename = "IOC")]
+    IOC,
+    
+    /// Fill or kill
+    #[serde(rename = "FOK")]
+    FOK,
 }
 
 /// Order execution type
@@ -305,7 +349,7 @@ pub struct TradeResult {
     pub market_id: String,
     
     /// Direction of trade
-    pub side: TradeSide,
+    pub side: OrderSide,
     
     /// Limit or Market order
     pub order_type: OrderType,
@@ -402,6 +446,10 @@ mod tests {
             timestamp: 1000,
             liquidity: 1000.0,
             spread: 0.02,
+            last_price: Some(0.51),
+            last_size: Some(50.0),
+            last_trade_at: Some(900),
+            sequence: 1,
         };
         
         assert_eq!(book.best_bid(), Some(0.50));
@@ -415,7 +463,7 @@ mod tests {
         let result = TradeResult {
             trade_id: "trade-123".to_string(),
             market_id: "market-456".to_string(),
-            side: TradeSide::Buy,
+            side: OrderSide::Buy,
             order_type: OrderType::Limit(0.52),
             requested_size: 100.0,
             filled_size: 100.0,
@@ -444,6 +492,10 @@ mod tests {
             timestamp: 1000,
             liquidity: 0.0,
             spread: -0.10,
+            last_price: None,
+            last_size: None,
+            last_trade_at: None,
+            sequence: 0,
         };
         
         assert!(!invalid.is_valid());

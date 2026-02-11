@@ -51,6 +51,7 @@
 // TYPE CATEGORIES:
 //
 // 1. Core Market Types (Market, MarketStatus, MarketCategory)
+//    - MarketType imported from types/nodes.ts (single source of truth)
 // 2. Orderbook Types (Orderbook, Level, Spread)
 // 3. Order Types (Order, OrderSide, OrderType, TimeInForce)
 // 4. Position/Trade Types (Trade, TradeResult, Fill)
@@ -61,35 +62,18 @@
 // EXTENSIBILITY:
 //
 // New prediction markets (e.g., Betfair, PredictIt) can be added by:
-//   1. Extending MarketType enum
-//   2. Adding market-specific metadata interfaces
+//   1. Extending MarketType enum in types/nodes.ts
+//   2. Adding market-specific metadata interfaces here
 //   3. Implementing corresponding scraper in backend services/scraper.rs
 //   4. Adding market-specific WebSocket event variants
 //
 // ============================================================================
 
+import { MarketType } from './nodes';
+
 // =============================================================================
 // CORE MARKET TYPES
 // =============================================================================
-
-/**
- * Supported prediction market exchanges/platforms.
- * 
- * Backend Mapping: src-tauri/src/models/node.rs MarketType enum
- * Serialization: Matches Rust enum variant names exactly
- */
-export enum MarketType {
-  /** Polymarket - Crypto-native prediction markets on Polygon */
-  Polymarket = 'Polymarket',
-  
-  /** Kalshi - Regulated US prediction markets */
-  Kalshi = 'Kalshi',
-  
-  // Future extensions:
-  // Betfair = 'Betfair',
-  // PredictIt = 'PredictIt',
-  // Smarkets = 'Smarkets',
-}
 
 /**
  * Market status lifecycle.
@@ -293,6 +277,9 @@ export interface Level {
  * 
  * Maintained in real-time via WebSocket updates.
  * Bids sorted descending (highest first), asks sorted ascending.
+ * 
+ * Mirrors Rust Orderbook struct in src-tauri/src/models/market.rs
+ * Fields: liquidity, spread added to match Rust implementation.
  */
 export interface Orderbook {
   /** Market ID this orderbook represents */
@@ -306,6 +293,12 @@ export interface Orderbook {
   
   /** Ask levels (sell orders) - sorted price ascending */
   asks: Level[];
+  
+  /** Total liquidity in market (sum of bid/ask value) */
+  liquidity: number;
+  
+  /** Bid-ask spread (best_ask - best_bid) */
+  spread: number;
   
   /** Last trade price (if available) */
   lastPrice?: number;

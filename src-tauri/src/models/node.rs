@@ -296,6 +296,12 @@ pub enum InfoSourceType {
     
     /// Live video stream monitoring (debates, press conferences)
     Livestream,
+    
+    /// Economic indicators (CPI, unemployment, GDP)
+    EconomicIndicators,
+    
+    /// On-chain metrics (transaction volume, gas fees)
+    OnChainData,
 }
 
 /// Supported prediction market platforms
