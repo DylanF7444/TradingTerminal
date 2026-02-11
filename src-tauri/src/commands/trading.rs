@@ -8,7 +8,7 @@
 // ============================================================================
 
 use crate::commands::markets::MarketState;
-use crate::models::market::{Orderbook, OrderType, TradeSide};
+use crate::models::market::{OrderType, OrderSide};
 use crate::models::node::MarketType;
 use crate::models::position::Position;
 use chrono::Utc;
@@ -124,8 +124,8 @@ struct CachedBalance {
 /// Order command for sequential processing
 type TradeCommand = (
     String,           // market_id
-    MarketType,       // platform
-    TradeSide,        // side
+    MarketType,        // platform
+    OrderSide,        // side
     i64,              // size
     OrderType,        // order_type
     String,           // idempotency_key
@@ -151,7 +151,7 @@ impl TradingState {
         // Spawn order processing task (sequential execution guarantee)
         let processor = tokio::spawn(async move {
             while let Some((market_id, platform, side, size, order_type, idempotency_key, response_tx)) = rx.recv().await {
-                let result = process_trade_command(
+                process_trade_command(
                     (market_id, platform, side, size, order_type, idempotency_key, response_tx),
                     positions_clone.clone(),
                 ).await;
@@ -179,7 +179,7 @@ impl TradingState {
 pub async fn place_order(
     market_id: String,
     platform: MarketType,
-    side: TradeSide,
+    side: OrderSide,
     size: i64,
     order_type: OrderType,
     idempotency_key: Option<String>,
@@ -297,9 +297,9 @@ pub async fn close_position(
     
     // Determine close side based on position_type
     let close_side = match position.position_type.as_str() {
-        "long" => TradeSide::Sell,
-        "short" => TradeSide::Buy,
-        _ => TradeSide::Buy,
+        "long" => OrderSide::Sell,
+        "short" => OrderSide::Buy,
+        _ => OrderSide::Buy,
     };
     
     // Convert platform string to MarketType enum
@@ -470,9 +470,9 @@ async fn process_trade_command(
     let start = Instant::now();
     
     // Mock execution
-    let result = match execute_on_platform(platform.clone(), side.clone(), size, order_type).await {
+    match execute_on_platform(platform.clone(), side.clone(), size, order_type).await {
         Ok(fill) => {
-            TradeResult {
+            let trade_result = TradeResult {
                 success: true,
                 order_id: Uuid::new_v4().to_string(),
                 position_id: None,
@@ -483,18 +483,18 @@ async fn process_trade_command(
                 status: if fill.size == size { "FILLED".to_string() } else { "PARTIAL".to_string() },
                 execution_time_ms: start.elapsed().as_millis() as u64,
                 error_message: None,
-            }
+            };
+            let _ = response_tx.send(Ok(trade_result));
         }
         Err(e) => {
             let _ = response_tx.send(Err(e));
-            return;
         }
     };
 }
 
 async fn execute_on_platform(
     platform: MarketType,
-    _side: TradeSide,
+    _side: OrderSide,
     size: i64,
     order_type: OrderType,
 ) -> Result<Fill, String> {

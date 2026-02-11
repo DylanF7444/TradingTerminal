@@ -643,6 +643,10 @@ async fn get_orderbook_cmd(
         timestamp: chrono::Utc::now().timestamp(),
         liquidity: 25000.0,
         spread: 0.01,
+        last_price: Some(0.52),
+        last_size: Some(100.0),
+        last_trade_at: Some(chrono::Utc::now().timestamp()),
+        sequence: 1,
     })
 }
 

@@ -307,6 +307,9 @@ pub enum OrderSide {
     Sell,
 }
 
+/// Alias for backward compatibility
+pub type TradeSide = OrderSide;
+
 /// Time in force - how long order remains active
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TimeInForce {

@@ -116,9 +116,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager, Runtime, State, Window};
+use tauri::{Emitter, Runtime, State, Window};
 use tokio::sync::{Mutex, RwLock};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, WebSocketStream};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use futures_util::{SinkExt, StreamExt};
 
 // ============================================================================
@@ -751,6 +751,10 @@ fn parse_polymarket_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<
         liquidity,
         spread,
         market_id: data["market_id"].as_str().unwrap_or("unknown").to_string(),
+        last_price: None,
+        last_size: None,
+        last_trade_at: None,
+        sequence: 0,
     })
 }
 
@@ -796,6 +800,10 @@ fn parse_kalshi_orderbook(data: serde_json::Value) -> Result<Orderbook, Box<dyn 
         liquidity,
         spread,
         market_id: data["market_id"].as_str().unwrap_or("unknown").to_string(),
+        last_price: None,
+        last_size: None,
+        last_trade_at: None,
+        sequence: 0,
     })
 }
 

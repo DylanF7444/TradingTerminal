@@ -390,7 +390,7 @@ impl Analyzer {
             return;
         }
 
-        let key = (event.source_id.clone(), event.source_id.clone());
+        let key = (event.source_id.clone(), event.metric_type.clone());
         let now = Utc::now().timestamp();
         
         let mut correlations = self.correlations.write().await;

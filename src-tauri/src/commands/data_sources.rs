@@ -137,8 +137,6 @@
 
 
 use crate::models::node::{Node, NodeType, InfoSourceType};
-use crate::services::scraper;
-use crate::db::sqlite;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -410,6 +408,12 @@ async fn start_scraper_service(
             InfoSourceType::CommodityPrices => {
                 println!("Scraper Task: Would poll commodity API for {:?}", config);
                 // scraper::commodities::poll_prices(node_id, config).await;
+            },
+            InfoSourceType::EconomicIndicators => {
+                println!("Scraper Task: Would poll economic indicators for {:?}", config);
+            },
+            InfoSourceType::OnChainData => {
+                println!("Scraper Task: Would poll on-chain data for {:?}", config);
             },
         }
         

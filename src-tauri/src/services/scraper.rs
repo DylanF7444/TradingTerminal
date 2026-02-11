@@ -387,26 +387,32 @@ async fn scrape_once(
     
     // Fetch data based on source type
     let data = match source_type {
-        InfoSourceType::CryptoPrices => {
+        &InfoSourceType::CryptoPrices => {
             scrape_crypto(client, config).await?
         }
-        InfoSourceType::NewsSource => {
+        &InfoSourceType::NewsSource => {
             scrape_news(client, config).await?
         }
-        InfoSourceType::Weather => {
+        &InfoSourceType::Weather => {
             scrape_weather(client, config).await?
         }
-        InfoSourceType::SocialMedia => {
+        &InfoSourceType::SocialMedia => {
             scrape_social(client, config).await?
         }
-        InfoSourceType::FinancialPrices => {
+        &InfoSourceType::FinancialPrices => {
             scrape_finance(client, config).await?
         }
-        InfoSourceType::CommodityPrices => {
+        &InfoSourceType::CommodityPrices => {
             scrape_commodities(client, config).await?
         }
-        InfoSourceType::Livestream => {
+        &InfoSourceType::Livestream => {
             scrape_livestream(client, config).await?
+        }
+        &InfoSourceType::EconomicIndicators => {
+            scrape_economic(client, config).await?
+        }
+        &InfoSourceType::OnChainData => {
+            scrape_onchain(client, config).await?
         }
     };
     
@@ -669,6 +675,62 @@ async fn scrape_livestream(client: &Client, config: &ScraperConfig) -> Result<Sc
     Ok(ScrapedData { points, metadata: serde_json::json!({}) })
 }
 
+/// Scrape economic indicators (GDP, unemployment, etc.)
+async fn scrape_economic(_client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
+    let indicator: String = serde_json::from_value(
+        config.params.get("indicator").cloned().unwrap_or(serde_json::json!("gdp"))
+    )?;
+    
+    // Mock economic data - in production, call FRED API or similar
+    let points = vec![
+        DataPoint {
+            metric_type: indicator.clone(),
+            value: match indicator.as_str() {
+                "gdp" => 25000000.0, // billions
+                "unemployment" => 3.8, // percentage
+                "inflation" => 3.2, // percentage
+                "interest_rate" => 5.25, // percentage
+                _ => 0.0,
+            },
+            metadata: Some(serde_json::json!({
+                "indicator": indicator,
+                "country": "US",
+                "frequency": "quarterly"
+            })),
+        }
+    ];
+    
+    Ok(ScrapedData { points, metadata: serde_json::json!({}) })
+}
+
+/// Scrape on-chain blockchain metrics
+async fn scrape_onchain(_client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
+    let network: String = serde_json::from_value(
+        config.params.get("network").cloned().unwrap_or(serde_json::json!("bitcoin"))
+    )?;
+    
+    // Mock on-chain data - in production, call blockchain RPC or APIs
+    let points = vec![
+        DataPoint {
+            metric_type: "hash_rate".to_string(),
+            value: 500000000.0, // EH/s for Bitcoin
+            metadata: Some(serde_json::json!({
+                "network": network,
+                "unit": "exahash per second"
+            })),
+        },
+        DataPoint {
+            metric_type: "active_addresses".to_string(),
+            value: 1000000.0,
+            metadata: Some(serde_json::json!({
+                "network": network
+            })),
+        },
+    ];
+    
+    Ok(ScrapedData { points, metadata: serde_json::json!({}) })
+}
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
@@ -679,13 +741,15 @@ fn parse_config(source_type: &InfoSourceType, config: &JsonValue) -> Result<Scra
         .get("update_interval_seconds")
         .and_then(|v| v.as_u64())
         .unwrap_or(match source_type {
-            InfoSourceType::CryptoPrices => 30,
-            InfoSourceType::NewsSource => 300,
-            InfoSourceType::Weather => 600,
-            InfoSourceType::SocialMedia => 60,
-            InfoSourceType::FinancialPrices => 30,
-            InfoSourceType::CommodityPrices => 3600,
-            InfoSourceType::Livestream => 30,
+            &InfoSourceType::CryptoPrices => 30,
+            &InfoSourceType::NewsSource => 300,
+            &InfoSourceType::Weather => 600,
+            &InfoSourceType::SocialMedia => 60,
+            &InfoSourceType::FinancialPrices => 30,
+            &InfoSourceType::CommodityPrices => 3600,
+            &InfoSourceType::Livestream => 30,
+            &InfoSourceType::EconomicIndicators => 3600,
+            &InfoSourceType::OnChainData => 60,
         });
     
     Ok(ScraperConfig {
@@ -748,13 +812,15 @@ async fn emit_scraper_error(window: &Window, node_id: &str, error: &str) {
 /// Convert source type to string for logging/events
 fn source_type_to_string(source_type: &InfoSourceType) -> String {
     match source_type {
-        InfoSourceType::CryptoPrices => "CryptoPrices",
-        InfoSourceType::NewsSource => "NewsSource",
-        InfoSourceType::Weather => "Weather",
-        InfoSourceType::SocialMedia => "SocialMedia",
-        InfoSourceType::FinancialPrices => "FinancialPrices",
-        InfoSourceType::CommodityPrices => "CommodityPrices",
-        InfoSourceType::Livestream => "Livestream",
+        &InfoSourceType::CryptoPrices => "CryptoPrices",
+        &InfoSourceType::NewsSource => "NewsSource",
+        &InfoSourceType::Weather => "Weather",
+        &InfoSourceType::SocialMedia => "SocialMedia",
+        &InfoSourceType::FinancialPrices => "FinancialPrices",
+        &InfoSourceType::CommodityPrices => "CommodityPrices",
+        &InfoSourceType::Livestream => "Livestream",
+        &InfoSourceType::EconomicIndicators => "EconomicIndicators",
+        &InfoSourceType::OnChainData => "OnChainData",
     }.to_string()
 }
 
