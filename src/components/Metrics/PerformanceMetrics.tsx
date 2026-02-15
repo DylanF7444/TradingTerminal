@@ -337,6 +337,7 @@ import {
   Wifi,
   Server
 } from 'lucide-react';
+import { getSystemInfo, type SystemInfo } from '../../utils/api';
 // Date formatting utility (replaces date-fns for smaller bundle)
 function formatTime(date: Date): string {
   return date.toLocaleTimeString('en-US', { 
@@ -611,44 +612,101 @@ export default function PerformanceMetrics({
   const [activeAlerts, setActiveAlerts] = useState<MetricAlert[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const prevMetricsRef = useRef<PerformanceMetricsData | undefined>(undefined);
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   
   const thresholds = { ...DEFAULT_THRESHOLDS, ...customThresholds };
 
+  // Fetch system info from backend
+  useEffect(() => {
+    let mounted = true;
+    let intervalId: ReturnType<typeof setInterval>;
+    
+    const fetchSystemInfo = async () => {
+      const result = await getSystemInfo();
+      if (result.ok && mounted) {
+        setSystemInfo(result.value);
+        setLastUpdate(new Date());
+      }
+    };
+    
+    // Initial fetch
+    fetchSystemInfo();
+    
+    // Poll every 2 seconds
+    intervalId = setInterval(fetchSystemInfo, 2000);
+    
+    return () => {
+      mounted = false;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  // Use provided metrics or build minimal display from system info
+  const displayMetrics = metrics || (systemInfo ? {
+    system: { 
+      cpu: { 
+        current: systemInfo.cpu_usage, 
+        previous: 0,
+        history: [] as number[],
+        unit: '%',
+        timestamp: new Date()
+      },
+      memory: { 
+        current: systemInfo.memory_used / (1024 * 1024), 
+        previous: 0,
+        history: [] as number[],
+        unit: 'MB',
+        timestamp: new Date()
+      },
+      diskWrites: { current: 0, previous: 0, history: [], unit: 'ops/s', timestamp: new Date() }
+    },
+    trading: { dailyPnl: null, totalPnl: null, winRate: null, sharpeRatio: 0, maxDrawdown: 0, currentExposure: 0 },
+    latency: { endToEnd: null, api: null, websocket: null },
+    operational: { tradesExecuted: 0, dataPointsCollected: 0, activeConnections: 0, errorRate: null }
+  } : null);
+
+  // Get CPU and memory values - prefer metrics, fallback to systemInfo
+  const cpuValue = displayMetrics?.system?.cpu?.current ?? systemInfo?.cpu_usage ?? 0;
+  const memoryValue = displayMetrics?.system?.memory?.current ?? (systemInfo?.memory_used ? systemInfo.memory_used / (1024 * 1024) : 0);
+
   // Check thresholds and trigger alerts
   useEffect(() => {
-    if (!metrics) return;
+    if (!displayMetrics) return;
     
     const newAlerts: MetricAlert[] = [];
     
-    // Latency check
-    if (metrics.latency.endToEnd.current > thresholds.latency * 2) {
-      newAlerts.push({
-        metric: 'latency',
-        value: metrics.latency.endToEnd.current,
-        threshold: thresholds.latency * 2,
-        severity: 'critical',
-        message: `Critical latency: ${metrics.latency.endToEnd.current}ms`,
-        timestamp: new Date()
-      });
-    } else if (metrics.latency.endToEnd.current > thresholds.latency) {
-      newAlerts.push({
-        metric: 'latency',
-        value: metrics.latency.endToEnd.current,
-        threshold: thresholds.latency,
-        severity: 'warning',
-        message: `High latency: ${metrics.latency.endToEnd.current}ms`,
-        timestamp: new Date()
-      });
+    // Latency check (only if we have metrics)
+    const latency = displayMetrics.latency?.endToEnd?.current;
+    if (latency !== undefined && latency !== null) {
+      if (latency > thresholds.latency * 2) {
+        newAlerts.push({
+          metric: 'latency',
+          value: latency,
+          threshold: thresholds.latency * 2,
+          severity: 'critical',
+          message: `Critical latency: ${latency}ms`,
+          timestamp: new Date()
+        });
+      } else if (latency > thresholds.latency) {
+        newAlerts.push({
+          metric: 'latency',
+          value: latency,
+          threshold: thresholds.latency,
+          severity: 'warning',
+          message: `High latency: ${latency}ms`,
+          timestamp: new Date()
+        });
+      }
     }
     
     // CPU check
-    if (metrics.system.cpu.current > thresholds.cpu) {
+    if (cpuValue > thresholds.cpu) {
       newAlerts.push({
         metric: 'cpu',
-        value: metrics.system.cpu.current,
+        value: cpuValue,
         threshold: thresholds.cpu,
-        severity: metrics.system.cpu.current > 95 ? 'critical' : 'warning',
-        message: `High CPU usage: ${metrics.system.cpu.current.toFixed(1)}%`,
+        severity: cpuValue > 95 ? 'critical' : 'warning',
+        message: `High CPU usage: ${cpuValue.toFixed(1)}%`,
         timestamp: new Date()
       });
     }
@@ -659,27 +717,19 @@ export default function PerformanceMetrics({
     
     // Update timestamp
     setLastUpdate(new Date());
-    prevMetricsRef.current = metrics;
-  }, [metrics, thresholds, onAlert]);
+  }, [displayMetrics, cpuValue, memoryValue, thresholds, onAlert]);
 
   // Calculate system health score
   const healthScore = useMemo(() => {
-    if (!metrics) return 100;
+    const cpuScore = Math.max(0, 100 - cpuValue);
+    const memoryScore = Math.max(0, 100 - (memoryValue / thresholds.memory) * 100);
+    const latencyValue = displayMetrics?.latency?.endToEnd?.current ?? 0;
+    const latencyScore = Math.max(0, 100 - (latencyValue / thresholds.latency) * 100);
+    const errorValue = displayMetrics?.operational?.errorRate?.current ?? 0;
+    const errorScore = Math.max(0, 100 - (errorValue / thresholds.errorRate) * 100);
     
-    const cpuWeight = 30;
-    const memoryWeight = 25;
-    const latencyWeight = 25;
-    const errorWeight = 20;
-    
-    const cpuScore = Math.max(0, 100 - metrics.system.cpu.current);
-    const memoryScore = Math.max(0, 100 - (metrics.system.memory.current / thresholds.memory) * 100);
-    const latencyScore = Math.max(0, 100 - (metrics.latency.endToEnd.current / thresholds.latency) * 100);
-    const errorScore = Math.max(0, 100 - (metrics.operational.errorRate.current / thresholds.errorRate) * 100);
-    
-    return Math.round(
-      (cpuScore * cpuWeight + memoryScore * memoryWeight + latencyScore * latencyWeight + errorScore * errorWeight) / 100
-    );
-  }, [metrics, thresholds]);
+    return Math.round((cpuScore * 30 + memoryScore * 25 + latencyScore * 25 + errorScore * 20) / 100);
+  }, [displayMetrics, cpuValue, memoryValue, thresholds]);
 
   // Stale data detection
   const isStale = useMemo(() => {
@@ -716,21 +766,21 @@ export default function PerformanceMetrics({
         <div className="flex items-center divide-x divide-gray-800">
           <MetricCard
             label="Latency"
-            value={metrics.latency.endToEnd.current}
-            previousValue={metrics.latency.endToEnd.previous}
+            value={displayMetrics?.latency?.endToEnd?.current ?? 0}
+            previousValue={displayMetrics?.latency?.endToEnd?.previous}
             unit="ms"
             compact
             icon={Zap}
             alertSeverity={
-              metrics.latency.endToEnd.current > thresholds.latency * 2 ? 'critical' :
-              metrics.latency.endToEnd.current > thresholds.latency ? 'warning' : null
+              (displayMetrics?.latency?.endToEnd?.current ?? 0) > thresholds.latency * 2 ? 'critical' :
+              (displayMetrics?.latency?.endToEnd?.current ?? 0) > thresholds.latency ? 'warning' : null
             }
           />
           
           <MetricCard
             label="PnL"
-            value={metrics.trading.dailyPnl.current}
-            previousValue={metrics.trading.dailyPnl.previous}
+            value={displayMetrics?.trading?.dailyPnl?.current ?? 0}
+            previousValue={displayMetrics?.trading?.dailyPnl?.previous}
             unit="$"
             compact
             icon={BarChart3}
@@ -738,16 +788,16 @@ export default function PerformanceMetrics({
           
           <MetricCard
             label="CPU"
-            value={metrics.system.cpu.current}
+            value={cpuValue}
             unit="%"
             compact
             icon={Cpu}
-            alertSeverity={metrics.system.cpu.current > thresholds.cpu ? 'warning' : null}
+            alertSeverity={cpuValue > thresholds.cpu ? 'warning' : null}
           />
           
           <MetricCard
             label="Trades"
-            value={metrics.operational.tradesExecuted}
+            value={displayMetrics?.operational?.tradesExecuted ?? 0}
             unit=""
             compact
             icon={Activity}
@@ -793,42 +843,42 @@ export default function PerformanceMetrics({
         <div className="grid grid-cols-2 gap-2">
           <MetricCard
             label="CPU Usage"
-            value={metrics.system.cpu.current}
-            previousValue={metrics.system.cpu.previous}
+            value={cpuValue}
+            previousValue={displayMetrics?.system?.cpu?.previous}
             unit="%"
             icon={Cpu}
-            sparklineData={metrics.system.cpu.history}
-            alertSeverity={metrics.system.cpu.current > thresholds.cpu ? 'warning' : null}
+            sparklineData={displayMetrics?.system?.cpu?.history}
+            alertSeverity={cpuValue > thresholds.cpu ? 'warning' : null}
           />
           
           <MetricCard
             label="Memory"
-            value={metrics.system.memory.current}
-            previousValue={metrics.system.memory.previous}
+            value={memoryValue}
+            previousValue={displayMetrics?.system?.memory?.previous}
             unit="MB"
             icon={HardDrive}
-            sparklineData={metrics.system.memory.history}
+            sparklineData={displayMetrics?.system?.memory?.history}
           />
           
           <MetricCard
             label="Latency"
-            value={metrics.latency.endToEnd.current}
-            previousValue={metrics.latency.endToEnd.previous}
+            value={displayMetrics?.latency?.endToEnd?.current ?? 0}
+            previousValue={displayMetrics?.latency?.endToEnd?.previous}
             unit="ms"
             icon={Zap}
-            sparklineData={metrics.latency.endToEnd.history}
+            sparklineData={displayMetrics?.latency?.endToEnd?.history}
             alertSeverity={
-              metrics.latency.endToEnd.current > thresholds.latency * 2 ? 'critical' :
-              metrics.latency.endToEnd.current > thresholds.latency ? 'warning' : null
+              (displayMetrics?.latency?.endToEnd?.current ?? 0) > thresholds.latency * 2 ? 'critical' :
+              (displayMetrics?.latency?.endToEnd?.current ?? 0) > thresholds.latency ? 'warning' : null
             }
           />
           
           <MetricCard
             label="WebSocket"
-            value={metrics.latency.websocket.current}
+            value={displayMetrics?.latency?.websocket?.current ?? 0}
             unit="ms"
             icon={Wifi}
-            sparklineData={metrics.latency.websocket.history}
+            sparklineData={displayMetrics?.latency?.websocket?.history}
           />
         </div>
       </div>
@@ -842,32 +892,32 @@ export default function PerformanceMetrics({
         <div className="grid grid-cols-2 gap-2">
           <MetricCard
             label="Daily P&L"
-            value={metrics.trading.dailyPnl.current}
-            previousValue={metrics.trading.dailyPnl.previous}
+            value={displayMetrics?.trading?.dailyPnl?.current ?? 0}
+            previousValue={displayMetrics?.trading?.dailyPnl?.previous}
             unit="$"
-            icon={metrics.trading.dailyPnl.current >= 0 ? TrendingUp : TrendingDown}
-            sparklineData={metrics.trading.dailyPnl.history}
-            color={metrics.trading.dailyPnl.current >= 0 ? 'text-emerald-400' : 'text-rose-400'}
+            icon={(displayMetrics?.trading?.dailyPnl?.current ?? 0) >= 0 ? TrendingUp : TrendingDown}
+            sparklineData={displayMetrics?.trading?.dailyPnl?.history}
+            color={(displayMetrics?.trading?.dailyPnl?.current ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}
           />
           
           <MetricCard
             label="Win Rate"
-            value={metrics.trading.winRate.current}
+            value={displayMetrics?.trading?.winRate?.current ?? 0}
             unit="%"
             icon={Activity}
           />
           
           <MetricCard
             label="Sharpe Ratio"
-            value={metrics.trading.sharpeRatio}
+            value={displayMetrics?.trading?.sharpeRatio ?? 0}
             unit=""
             icon={BarChart3}
-            color={metrics.trading.sharpeRatio >= 1 ? 'text-emerald-400' : 'text-amber-400'}
+            color={(displayMetrics?.trading?.sharpeRatio ?? 0) >= 1 ? 'text-emerald-400' : 'text-amber-400'}
           />
           
           <MetricCard
             label="Exposure"
-            value={metrics.trading.currentExposure}
+            value={displayMetrics?.trading?.currentExposure ?? 0}
             unit="$"
             icon={HardDrive}
           />
@@ -878,9 +928,9 @@ export default function PerformanceMetrics({
       <div className="pt-2 border-t border-gray-800">
         <div className="flex items-center justify-between text-xs text-gray-500">
           <div className="flex items-center gap-4">
-            <span>Trades: <span className="text-gray-300">{metrics.operational.tradesExecuted}</span></span>
-            <span>Connections: <span className="text-gray-300">{metrics.operational.activeConnections}</span></span>
-            <span>Data Points: <span className="text-gray-300">{metrics.operational.dataPointsCollected.toLocaleString()}</span></span>
+            <span>Trades: <span className="text-gray-300">{displayMetrics?.operational?.tradesExecuted ?? 0}</span></span>
+            <span>Connections: <span className="text-gray-300">{displayMetrics?.operational?.activeConnections ?? 0}</span></span>
+            <span>Data Points: <span className="text-gray-300">{(displayMetrics?.operational?.dataPointsCollected ?? 0).toLocaleString()}</span></span>
           </div>
           <div className="flex items-center gap-1" title={`Last updated: ${lastUpdate.toISOString()}`}>
             <Clock className="w-3 h-3" />

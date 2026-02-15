@@ -175,9 +175,24 @@ use crate::commands::{
     markets,
     trading,
     storage,
+    update_node_position_cmd,
 };
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
 use crate::services::{scraper};
+use sysinfo::SystemExt;
+
+/// System monitor for CPU/memory metrics
+
+/// Global system monitor (initialized once)
+static SYSTEM_MONITOR: std::sync::Mutex<Option<sysinfo::System>> = std::sync::Mutex::new(None);
+
+fn get_system_monitor() -> std::sync::MutexGuard<'static, Option<sysinfo::System>> {
+    let mut guard = SYSTEM_MONITOR.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(sysinfo::System::new_all());
+    }
+    guard
+}
 
 /// Application state shared across all commands and services
 /// 
@@ -263,6 +278,7 @@ fn main() {
             get_data_sources_cmd,
             update_data_source_cmd,
             get_data_source_status_cmd,
+            update_node_position_cmd,
             
             // Market commands
             add_market_cmd,
@@ -805,18 +821,22 @@ async fn get_storage_stats_cmd(
 /// Get system information
 #[tauri::command]
 async fn get_system_info_cmd() -> Result<serde_json::Value, String> {
-    use sysinfo::{System, SystemExt, CpuExt};
+    use sysinfo::CpuExt;
     
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    let mut guard = get_system_monitor();
+    if let Some(ref mut sys) = *guard {
+        sys.refresh_all();
+        
+        return Ok(serde_json::json!({
+            "hostname": sys.host_name().unwrap_or_else(|| "unknown".to_string()),
+            "os": sys.name().unwrap_or_else(|| "unknown".to_string()),
+            "cpu_usage": sys.global_cpu_info().cpu_usage(),
+            "memory_used": sys.used_memory(),
+            "memory_total": sys.total_memory(),
+        }));
+    }
     
-    Ok(serde_json::json!({
-        "hostname": sys.host_name().unwrap_or_else(|| "unknown".to_string()),
-        "os": sys.name().unwrap_or_else(|| "unknown".to_string()),
-        "cpu_usage": sys.global_cpu_info().cpu_usage(),
-        "memory_used": sys.used_memory(),
-        "memory_total": sys.total_memory(),
-    }))
+    Err("System monitor not initialized".to_string())
 }
 
 /// Get database statistics

@@ -967,6 +967,32 @@ export async function openDialog(
 }
 
 // =============================================================================
+// SYSTEM INFO
+// =============================================================================
+
+/**
+ * System information returned from the backend.
+ */
+export interface SystemInfo {
+  hostname: string;
+  os: string;
+  cpu_usage: number;
+  memory_used: number;
+  memory_total: number;
+}
+
+/**
+ * Get system information including CPU and memory usage.
+ * 
+ * Backend: main::get_system_info_cmd
+ * 
+ * @returns System information (CPU usage %, memory used/total in bytes)
+ */
+export async function getSystemInfo(): Promise<Result<SystemInfo, ApiError>> {
+  return invokeCommand<SystemInfo>('get_system_info_cmd', {});
+}
+
+// =============================================================================
 // BATCH OPERATIONS
 // =============================================================================
 

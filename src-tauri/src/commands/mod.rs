@@ -27,7 +27,7 @@ pub mod trading;
 pub mod storage;
 
 // Re-export all commands for main.rs invoke_handler registration
-pub use data_sources::{add_data_source, remove_data_source, get_data_sources};
+pub use data_sources::{add_data_source, remove_data_source, get_data_sources, update_node_position_cmd};
 
 // Markets: includes state initializer for main.rs
 pub use markets::{

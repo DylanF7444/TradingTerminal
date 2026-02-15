@@ -485,7 +485,7 @@ export default function Canvas({
     <div
       ref={containerRef}
       className="relative w-full h-full overflow-hidden bg-gray-950 cursor-crosshair"
-      onWheel={handleWheel}
+      onWheelCapture={handleWheel}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}

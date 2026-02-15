@@ -136,6 +136,7 @@
 // ============================================================================
 
 
+use crate::db::get_connection;
 use crate::models::node::{Node, NodeType, InfoSourceType};
 use serde_json::json;
 use std::collections::HashMap;
@@ -288,6 +289,34 @@ pub async fn get_data_source_status(id: String) -> Result<serde_json::Value, Str
         "data_points_collected": status.data_points_collected,
         "uptime_seconds": status.uptime_seconds,
     }))
+}
+
+/// Update the position of a node on the canvas
+/// This is called during drag operations to persist position changes
+#[tauri::command]
+pub async fn update_node_position_cmd(
+    id: String,
+    position: [f64; 2],
+) -> Result<(), String> {
+    // Get database connection
+    let conn = get_connection().await.map_err(|e| e.to_string())?;
+    let conn_guard = conn.lock().await;
+    let Some(db_conn) = &*conn_guard else {
+        return Err("Database not initialized".to_string());
+    };
+
+    // Fetch existing node
+    let mut node = crate::db::get_node_by_id(db_conn, &id)
+        .map_err(|e| format!("Failed to get node: {}", e))?;
+
+    // Update position
+    node.position = (position[0], position[1]);
+
+    // Save to database
+    crate::db::update_node(db_conn, &node)
+        .map_err(|e| format!("Failed to update node position: {}", e))?;
+
+    Ok(())
 }
 
 // ============================================================================
