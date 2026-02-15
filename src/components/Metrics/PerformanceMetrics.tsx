@@ -614,7 +614,11 @@ export default function PerformanceMetrics({
   const prevMetricsRef = useRef<PerformanceMetricsData | undefined>(undefined);
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   
-  const thresholds = { ...DEFAULT_THRESHOLDS, ...customThresholds };
+  // Memoize thresholds to prevent unnecessary re-renders
+  const thresholds = useMemo(
+    () => ({ ...DEFAULT_THRESHOLDS, ...customThresholds }),
+    [customThresholds]
+  );
 
   // Fetch system info from backend
   useEffect(() => {
@@ -642,58 +646,76 @@ export default function PerformanceMetrics({
   }, []);
 
   // Use provided metrics or build minimal display from system info
-  const displayMetrics = metrics || (systemInfo ? {
-    system: { 
-      cpu: { 
-        current: systemInfo.cpu_usage, 
-        previous: 0,
-        history: [] as number[],
-        unit: '%',
-        timestamp: new Date()
+  // Memoize to prevent creating new object references on every render
+  const displayMetrics = useMemo(() => {
+    if (metrics) return metrics;
+    if (!systemInfo) return null;
+    return {
+      system: { 
+        cpu: { 
+          current: systemInfo.cpu_usage, 
+          previous: 0,
+          history: [] as number[],
+          unit: '%',
+          timestamp: new Date()
+        },
+        memory: { 
+          current: systemInfo.memory_used / (1024 * 1024), 
+          previous: 0,
+          history: [] as number[],
+          unit: 'MB',
+          timestamp: new Date()
+        },
+        diskWrites: { current: 0, previous: 0, history: [], unit: 'ops/s', timestamp: new Date() }
       },
-      memory: { 
-        current: systemInfo.memory_used / (1024 * 1024), 
-        previous: 0,
-        history: [] as number[],
-        unit: 'MB',
-        timestamp: new Date()
-      },
-      diskWrites: { current: 0, previous: 0, history: [], unit: 'ops/s', timestamp: new Date() }
-    },
-    trading: { dailyPnl: null, totalPnl: null, winRate: null, sharpeRatio: 0, maxDrawdown: 0, currentExposure: 0 },
-    latency: { endToEnd: null, api: null, websocket: null },
-    operational: { tradesExecuted: 0, dataPointsCollected: 0, activeConnections: 0, errorRate: null }
-  } : null);
+      trading: { dailyPnl: null, totalPnl: null, winRate: null, sharpeRatio: 0, maxDrawdown: 0, currentExposure: 0 },
+      latency: { endToEnd: null, api: null, websocket: null },
+      operational: { tradesExecuted: 0, dataPointsCollected: 0, activeConnections: 0, errorRate: null }
+    };
+  }, [metrics, systemInfo]);
 
-  // Get CPU and memory values - prefer metrics, fallback to systemInfo
-  const cpuValue = displayMetrics?.system?.cpu?.current ?? systemInfo?.cpu_usage ?? 0;
-  const memoryValue = displayMetrics?.system?.memory?.current ?? (systemInfo?.memory_used ? systemInfo.memory_used / (1024 * 1024) : 0);
+  // Memoize CPU and memory values to prevent unnecessary recalculations
+  const cpuValue = useMemo(() => 
+    displayMetrics?.system?.cpu?.current ?? 0, 
+  [displayMetrics?.system?.cpu?.current]);
+  
+  const memoryValue = useMemo(() => 
+    displayMetrics?.system?.memory?.current ?? 0, 
+  [displayMetrics?.system?.memory?.current]);
+  
+  const latencyValue = useMemo(() => 
+    displayMetrics?.latency?.endToEnd?.current ?? 0,
+  [displayMetrics?.latency?.endToEnd?.current]);
 
-  // Check thresholds and trigger alerts
+  // Store onAlert in ref to prevent infinite loop from prop changes
+  const onAlertRef = useRef(onAlert);
+  onAlertRef.current = onAlert;
+
+  // Track previous alerts to avoid unnecessary updates
+  const prevAlertsRef = useRef<string>('');
+
+  // Check thresholds and trigger alerts - only when alerts actually change
   useEffect(() => {
-    if (!displayMetrics) return;
-    
     const newAlerts: MetricAlert[] = [];
     
-    // Latency check (only if we have metrics)
-    const latency = displayMetrics.latency?.endToEnd?.current;
-    if (latency !== undefined && latency !== null) {
-      if (latency > thresholds.latency * 2) {
+    // Latency check
+    if (latencyValue > 0) {
+      if (latencyValue > thresholds.latency * 2) {
         newAlerts.push({
           metric: 'latency',
-          value: latency,
+          value: latencyValue,
           threshold: thresholds.latency * 2,
           severity: 'critical',
-          message: `Critical latency: ${latency}ms`,
+          message: `Critical latency: ${latencyValue.toFixed(0)}ms`,
           timestamp: new Date()
         });
-      } else if (latency > thresholds.latency) {
+      } else if (latencyValue > thresholds.latency) {
         newAlerts.push({
           metric: 'latency',
-          value: latency,
+          value: latencyValue,
           threshold: thresholds.latency,
           severity: 'warning',
-          message: `High latency: ${latency}ms`,
+          message: `High latency: ${latencyValue.toFixed(0)}ms`,
           timestamp: new Date()
         });
       }
@@ -711,13 +733,17 @@ export default function PerformanceMetrics({
       });
     }
     
-    // Update alerts and notify parent
-    setActiveAlerts(newAlerts);
-    newAlerts.forEach(alert => onAlert?.(alert));
+    // Create a string signature of alerts to compare
+    const alertSignature = newAlerts.map(a => `${a.metric}:${a.severity}:${a.value.toFixed(1)}`).join('|');
     
-    // Update timestamp
-    setLastUpdate(new Date());
-  }, [displayMetrics, cpuValue, memoryValue, thresholds, onAlert]);
+    // Only update if alerts have actually changed
+    if (prevAlertsRef.current !== alertSignature) {
+      prevAlertsRef.current = alertSignature;
+      setActiveAlerts(newAlerts);
+      newAlerts.forEach(alert => onAlertRef.current?.(alert));
+      setLastUpdate(new Date());
+    }
+  }, [cpuValue, memoryValue, latencyValue, thresholds]);
 
   // Calculate system health score
   const healthScore = useMemo(() => {
