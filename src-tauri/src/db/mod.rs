@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::LazyLock;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 // Global database connection pool
 // In a real implementation, consider using r2d2 for connection pooling
@@ -27,7 +27,7 @@ pub async fn init_db(db_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to apply database optimizations: {}", e))?;
     
     // Store connection globally
-    let mut db = DB_CONNECTION.lock().await;
+    let mut db = DB_CONNECTION.lock().unwrap();
     *db = Some(conn);
     
     println!("Database initialized successfully at: {}", db_path.display());
@@ -43,7 +43,7 @@ pub async fn get_connection() -> Result<Arc<Mutex<Option<Connection>>>, String> 
 
 /// Close database connection gracefully
 pub async fn close_db() -> Result<(), String> {
-    let mut db = DB_CONNECTION.lock().await;
+    let mut db = DB_CONNECTION.lock().unwrap();
     if let Some(conn) = db.take() {
         // Connection will be closed when dropped
         drop(conn);
@@ -52,9 +52,16 @@ pub async fn close_db() -> Result<(), String> {
     Ok(())
 }
 
+/// Set the global database connection (called from main.rs after initialization)
+/// This allows commands using get_connection() to access the initialized database
+pub fn set_connection(conn: Connection) {
+    let mut db = DB_CONNECTION.lock().unwrap();
+    *db = Some(conn);
+}
+
 /// Database health check
 pub async fn health_check() -> Result<DatabaseHealth, String> {
-    let db = DB_CONNECTION.lock().await;
+    let db = DB_CONNECTION.lock().unwrap();
     
     if db.is_none() {
         return Err("Database not initialized".to_string());

@@ -762,13 +762,27 @@ export default function PerformanceMetrics({
     return Date.now() - lastUpdate.getTime() > 5000;
   }, [lastUpdate]);
 
-  // Loading state
-  if (!metrics) {
+  // Loading state - show when no metrics prop and no systemInfo available
+  const isLoading = !metrics && !systemInfo;
+  
+  if (isLoading) {
     return (
       <div className={`${compact ? 'flex items-center gap-4' : 'p-4'} ${className}`}>
         <div className="animate-pulse flex items-center gap-2">
           <Activity className="w-4 h-4 text-gray-600" />
           <span className="text-sm text-gray-500">Loading metrics...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Handle case where displayMetrics is null even after loading
+  if (!displayMetrics) {
+    return (
+      <div className={`${compact ? 'flex items-center gap-4' : 'p-4'} ${className}`}>
+        <div className="flex items-center gap-2">
+          <Activity className="w-4 h-4 text-gray-600" />
+          <span className="text-sm text-gray-500">No metrics available</span>
         </div>
       </div>
     );

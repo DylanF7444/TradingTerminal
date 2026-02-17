@@ -189,7 +189,12 @@ static SYSTEM_MONITOR: std::sync::Mutex<Option<sysinfo::System>> = std::sync::Mu
 fn get_system_monitor() -> std::sync::MutexGuard<'static, Option<sysinfo::System>> {
     let mut guard = SYSTEM_MONITOR.lock().unwrap();
     if guard.is_none() {
-        *guard = Some(sysinfo::System::new_all());
+        let mut sys = sysinfo::System::new_all();
+        // First refresh initializes CPU tracking baseline
+        sys.refresh_all();
+        // Second refresh provides actual CPU usage reading
+        sys.refresh_all();
+        *guard = Some(sys);
     }
     guard
 }
@@ -328,6 +333,12 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     
     // 2. Initialize database
     let db_path = app_dir.join("terminal.db");
+    
+    // Initialize the global database connection (for commands using get_connection())
+    let rt = tokio::runtime::Handle::current();
+    rt.block_on(db::init_db(&db_path)).map_err(|e| format!("Database init failed: {}", e))?;
+    
+    // Also create a connection for AppState
     let conn = create_connection(&db_path)?;
     setup_schema(&conn)?;
     apply_optimizations(&conn)?;
@@ -825,6 +836,9 @@ async fn get_system_info_cmd() -> Result<serde_json::Value, String> {
     
     let mut guard = get_system_monitor();
     if let Some(ref mut sys) = *guard {
+        // First refresh initializes CPU tracking baseline
+        sys.refresh_all();
+        // Second refresh provides actual CPU usage reading
         sys.refresh_all();
         
         return Ok(serde_json::json!({

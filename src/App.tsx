@@ -113,7 +113,7 @@ import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
 import { Modal } from './components/UI/Modal';
 
 // Types
-import type { Node } from './types/nodes';
+import { Node, NodeId, InfoSourceType, MarketType } from './types/nodes';
 
 // =============================================================================
 // LAYOUT CONSTANTS
@@ -158,31 +158,128 @@ function App(): ReactNode {
   // -------------------------------------------------------------------------
   // Load existing nodes on app mount
   // -------------------------------------------------------------------------
-  
+
+  // Helper to transform backend node format to frontend format
+  const transformNodeFromBackend = (node: any): any => {
+    // Handle node_type transformation: { type: "InfoSource", subtype: "CryptoPrices" } -> { InfoSource: "CryptoPrices" }
+    let nodeType: any = node.node_type;
+    if (nodeType && nodeType.type && nodeType.subtype) {
+      // Convert from backend format to frontend format
+      if (nodeType.type === 'InfoSource') {
+        nodeType = { InfoSource: nodeType.subtype };
+      } else if (nodeType.type === 'Market') {
+        nodeType = { Market: nodeType.subtype };
+      }
+    }
+
+    return {
+      ...node,
+      node_type: nodeType,
+      // Ensure required fields have defaults (backend doesn't include these)
+      connections: node.connections || [],
+      createdAt: node.createdAt || Date.now(),
+      updatedAt: node.updatedAt || Date.now(),
+    };
+  };
+
   useEffect(() => {
     const loadExistingNodes = async () => {
       try {
-        const result = await invoke<Node[]>('get_data_sources_cmd');
+        const result = await invoke<any[]>('get_data_sources_cmd');
+        
+        // Get addNode from store for adding loaded nodes
+        const { addNode } = useStore.getState();
+        
         if (result && Array.isArray(result) && result.length > 0) {
-          // Add all nodes to the store with safe defaults for missing fields
-          const { addNode } = useStore.getState();
+          // Add all nodes from backend with transformed format
           result.forEach(node => {
-            addNode({
-              ...node,
-              // Ensure required fields have defaults
-              connections: node.connections || [],
-              createdAt: node.createdAt || Date.now(),
-              updatedAt: node.updatedAt || Date.now(),
-            });
+            addNode(transformNodeFromBackend(node));
           });
+          
           console.log(`Loaded ${result.length} existing nodes from backend`);
+        } else {
+          // No nodes in database - create demo nodes for first-time users
+          console.log('No existing nodes found, creating demo nodes...');
+          createDemoNodes();
         }
       } catch (error) {
         console.error('Failed to load existing nodes:', error);
+        // Create demo nodes as fallback on error
+        createDemoNodes();
       }
     };
     
     loadExistingNodes();
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Create demo nodes for first-time users
+  // -------------------------------------------------------------------------
+  
+  const createDemoNodes = useCallback(() => {
+    const { addNode, addConnection } = useStore.getState();
+    const now = Date.now();
+    
+    // Demo crypto price source node
+    const cryptoSourceId = 'demo-crypto-source' as NodeId;
+    addNode({
+      id: cryptoSourceId,
+      node_type: { InfoSource: InfoSourceType.CryptoPrices },
+      position: [150, 200],
+      connections: [],
+      metadata: {
+        symbols: ['BTC', 'ETH', 'SOL'],
+        updateIntervalSeconds: 5,
+        exchange: 'binance',
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    
+    // Demo polymarket node
+    const polymarketId = 'demo-polymarket' as NodeId;
+    addNode({
+      id: polymarketId,
+      node_type: { Market: MarketType.Polymarket },
+      position: [450, 200],
+      connections: [],
+      metadata: {
+        autoTrade: false,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    
+    // Create connection between source and market
+    addConnection({
+      source: cryptoSourceId,
+      target: polymarketId,
+      strength: 0.8,
+    });
+    
+    // Demo news source node
+    const newsSourceId = 'demo-news-source' as NodeId;
+    addNode({
+      id: newsSourceId,
+      node_type: { InfoSource: InfoSourceType.NewsSource },
+      position: [150, 400],
+      connections: [],
+      metadata: {
+        feeds: ['reuters', 'ap'],
+        keywords: ['election', 'bitcoin', 'crypto'],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    
+    // Connect news to polymarket
+    addConnection({
+      source: newsSourceId,
+      target: polymarketId,
+      strength: 0.6,
+    });
+    
+    console.log('Demo nodes created successfully');
   }, []);
 
   // -------------------------------------------------------------------------

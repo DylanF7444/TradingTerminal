@@ -508,7 +508,7 @@ export async function testSource(
 /**
  * Add a node to the visual graph.
  * 
- * Backend: commands::nodes::add_node
+ * Backend: commands::data_sources::add_data_source
  * 
  * @param node Node to add (ID will be generated if not provided)
  * @returns Created node with assigned ID
@@ -522,7 +522,7 @@ export async function addNode(
 /**
  * Remove a node from the graph.
  * 
- * Backend: commands::nodes::remove_node
+ * Backend: commands::data_sources::remove_data_source
  * 
  * @param id Node ID to remove
  * @param cascade Whether to remove connected nodes
@@ -537,7 +537,7 @@ export async function removeNode(
 /**
  * Update node position (called during drag operations).
  * 
- * Backend: commands::nodes::update_node_position
+ * Backend: commands::data_sources::update_node_position_cmd
  * 
  * @param id Node ID
  * @param position New [x, y] coordinates
@@ -547,7 +547,7 @@ export async function updateNodePosition(
   position: [number, number]
 ): Promise<Result<void, ApiError>> {
   // No retry - position updates are frequent and loss is acceptable
-  return invokeCommand<void>('update_node_position', { id, position }, { 
+  return invokeCommand<void>('update_node_position_cmd', { id, position }, { 
     logCall: false,
     timeoutMs: 5000,
   });
@@ -556,7 +556,7 @@ export async function updateNodePosition(
 /**
  * Add connection between nodes.
  * 
- * Backend: commands::nodes::add_connection
+ * Backend: commands::data_sources::add_connection
  * 
  * @param connection Connection definition
  */
@@ -571,7 +571,7 @@ export async function addConnection(
 /**
  * Remove connection between nodes.
  * 
- * Backend: commands::nodes::remove_connection
+ * Backend: commands::data_sources::remove_connection
  * 
  * @param source Source node ID
  * @param target Target node ID
@@ -586,7 +586,7 @@ export async function removeConnection(
 /**
  * Save complete graph state.
  * 
- * Backend: commands::nodes::save_graph
+ * Backend: commands::storage::store_graph
  * 
  * @param graph Complete graph state
  * @param name Optional save name
@@ -601,7 +601,7 @@ export async function saveGraph(
 /**
  * Load graph state.
  * 
- * Backend: commands::nodes::load_graph
+ * Backend: commands::storage::load_graph
  * 
  * @param name Save name (omit for most recent)
  */
@@ -614,7 +614,7 @@ export async function loadGraph(
 /**
  * Calculate correlation between two nodes.
  * 
- * Backend: commands::nodes::calculate_correlation
+ * Backend: commands::data_sources::calculate_correlation
  * 
  * @param sourceId Source node ID
  * @param targetId Target node ID

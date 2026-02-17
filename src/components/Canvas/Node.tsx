@@ -272,9 +272,16 @@ export default function NodeComponent({
   onClick, 
   onMouseDown 
 }: NodeComponentProps) {
-  // Transform position based on viewport
-  const screenX = node.position[0] * viewport.zoom + viewport.x;
-  const screenY = node.position[1] * viewport.zoom + viewport.y;
+  // Transform position based on viewport - with fallback for missing/invalid position
+  const nodePosition = node.position && Array.isArray(node.position) && node.position.length >= 2 
+    ? node.position 
+    : [100, 100]; // Default position if invalid
+  
+  const screenX = nodePosition[0] * viewport.zoom + viewport.x;
+  const screenY = nodePosition[1] * viewport.zoom + viewport.y;
+
+  // Clamp node scale based on zoom to prevent too small/large nodes
+  const nodeScale = Math.max(0.5, Math.min(1.5, viewport.zoom));
 
   // Determine node style based on type (with null safety)
   const isInfoSource = node.node_type && 'InfoSource' in node.node_type;
@@ -297,6 +304,7 @@ export default function NodeComponent({
       style={{
         left: screenX,
         top: screenY,
+        transform: `translate(-50%, -50%) scale(${nodeScale})`,
       }}
       onClick={onClick}
       onMouseDown={onMouseDown}

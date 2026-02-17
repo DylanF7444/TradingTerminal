@@ -420,7 +420,7 @@ if (typeof window !== 'undefined') {
         // Sync to SQLite via Tauri - lazy import
         void import('@tauri-apps/api/core').then(({ invoke }) => {
           Object.values(nodes).forEach((node) => {
-            void invoke('update_node_position', {
+            void invoke('update_node_position_cmd', {
               id: node.id,
               position: node.position,
             }).catch(console.error);

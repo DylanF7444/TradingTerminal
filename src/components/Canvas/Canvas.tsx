@@ -16,6 +16,27 @@
 // dozens of connected nodes. It handles real-time visualization of connection
 // strengths (correlations) through dynamic line rendering.
 //
+// DIMENSION BOUNDS:
+// The canvas supports configurable dimension bounds that constrain both node
+// positions and viewport panning within a defined rectangular region. This
+// prevents nodes from being dragged off-screen and ensures users don't get
+// lost in infinite canvas space.
+//
+// Bounds Configuration:
+//   - bounds.minX: Minimum X coordinate (left edge of workspace)
+//   - bounds.maxX: Maximum X coordinate (right edge of workspace)
+//   - bounds.minY: Minimum Y coordinate (top edge of workspace)
+//   - bounds.maxY: Maximum Y coordinate (bottom edge of workspace)
+//
+// Default bounds are set to -10000 to 10000 on both axes, providing a large
+// working area while preventing nodes from being positioned at extreme
+// coordinates that could cause rendering or navigation issues.
+//
+// Bounds Behavior:
+//   - Node dragging: Position is clamped to bounds when mouse is released
+//   - Viewport panning: Optional clamping to keep viewport within bounds
+//   - Zoom: Works independently of bounds (zoom can exceed visible area)
+//
 // Architecture Pattern:
 // React State (viewport, nodes) 
 //   → Canvas API (background grid, bezier curves, arrow heads)
@@ -47,20 +68,30 @@
 //    - strength: 0.0-1.0 determines line thickness and opacity
 //    - Rendered as bezier curves with directional arrows
 //
-// 3. onNodeClick: (node: Node) => void
+// 3. bounds?: CanvasBounds
+//    - Optional dimension bounds for the canvas workspace
+//    - Constrains node positions and optionally viewport panning
+//    - Format: { minX, maxX, minY, maxY } in world coordinates
+//    - Default: { minX: -10000, maxX: 10000, minY: -10000, maxY: 10000 }
+//
+// 4. clampViewportToBounds?: boolean
+//    - When true, viewport panning is constrained to bounds
+//    - Default: false (allows free panning)
+//
+// 5. onNodeClick: (node: Node) => void
 //    - Callback when user clicks a node (selection)
 //    - Triggers right sidebar detail panel via App.tsx
 //
-// 4. onNodeMove: (id: string, position: [number, number]) => void
+// 6. onNodeMove: (id: string, position: [number, number]) => void
 //    - Callback during node drag operations
 //    - Updates node position in global state (Zustand store)
 //    - Triggers connection redraw (canvas re-render)
 //
-// 5. onConnectionClick?: (conn: Connection) => void
+// 7. onConnectionClick?: (conn: Connection) => void
 //    - Optional callback for edge selection
 //    - Used to show correlation details or delete connections
 //
-// 6. selectedNodeId?: string | null
+// 8. selectedNodeId?: string | null
 //    - Highlights selected node with ring indicator
 //    - Filters connections to show only relevant edges
 //
@@ -71,6 +102,11 @@
 //   - x, y: Pan offset in pixels
 //   - zoom: Scale factor (0.1 = 10%, 3.0 = 300%)
 //   - Applied to both canvas context and node container via CSS
+//
+// bounds: CanvasBounds
+//   - Defines the rectangular workspace boundaries
+//   - Clamped to default values if not provided
+//   - Applied to node positions during drag operations
 //
 // isPanning: boolean
 //   - Active while user is middle-click dragging or holding Space
@@ -97,6 +133,7 @@
 //   - Node positions stored as [x, y] in arbitrary units
 //   - Independent of screen resolution or zoom level
 //   - Example: [100, 200] means 100 units right, 200 units down from origin
+//   - Constrained by bounds.minX/maxX and bounds.minY/maxY
 //
 // Screen Coordinates (Display):
 //   - Actual pixels on the monitor
@@ -126,11 +163,13 @@
 //   - If isPanning: Update viewport.x/y based on mouse movement
 //   - If draggingNode: Calculate new world position and call onNodeMove
 //   - Uses requestAnimationFrame implicitly via React state updates
+//   - Position clamped to bounds if bounds are defined
 //
 // Global Window Events:
 //   - Mouse move/up handlers attached to window during node drag
 //   - Ensures drag continues even if cursor leaves canvas bounds
 //   - Prevents "stuck" drag state when mouse released outside window
+//   - Final position clamped to canvas bounds on mouseup
 //
 // RENDERING PIPELINE:
 //
@@ -171,18 +210,22 @@
 // - Bezier curves hardware accelerated via Canvas API
 // - Node dragging uses CSS transforms (GPU accelerated)
 // - Only re-renders when nodes/connections/viewport change
+// - Bounds clamping adds minimal overhead (simple math operations)
 //
 // MEMORY CONSIDERATIONS:
 //
 // - Canvas context reset between frames prevents state leakage
 // - No off-screen canvases or double buffering needed (React handles)
 // - Event listeners cleaned up on unmount
+// - Bounds state stored in component (not duplicated)
 //
 // USAGE EXAMPLE:
 // ```tsx
 // <Canvas
 //   nodes={store.nodes}
 //   connections={store.connections}
+//   bounds={{ minX: -5000, maxX: 5000, minY: -3000, maxY: 3000 }}
+//   clampViewportToBounds={true}
 //   onNodeClick={(node) => setSelectedNode(node)}
 //   onNodeMove={(id, pos) => store.updateNodePosition(id, pos)}
 //   selectedNodeId={selectedNode?.id}
@@ -198,9 +241,11 @@
 // - WebGL rendering for 500+ nodes (switch from Canvas 2D)
 // - Snap-to-grid alignment assistance
 // - Connection routing around obstacles (force-directed)
+// - Dynamic bounds (expand as nodes are added near edges)
+// - Bounds visualization (show boundary lines on canvas)
 //
 // DEPENDENCIES:
-// - React (hooks: useState, useEffect, useRef, useCallback)
+// - React (hooks: useState, useEffect, useRef, useCallback, useMemo)
 // - NodeComponent (child component for individual nodes)
 // - ../../types/nodes (TypeScript interfaces)
 // - CSS transforms for GPU acceleration
@@ -209,9 +254,10 @@
 // - Container: Full size of parent, overflow hidden, dark background
 // - Canvas: Pointer-events none (lets clicks pass to nodes)
 // - Cursor: Crosshair default, grabbing during pan, grab on node hover
+// - Bounds: Visual indicators could be added (dashed border at boundaries)
 // ============================================================================
 
-import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import type { Node } from "../../types/nodes";
 import NodeComponent from "./Node";
 
@@ -219,6 +265,13 @@ export interface Connection {
   source: string;
   target: string;
   strength: number;
+}
+
+export interface CanvasBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
 }
 
 export interface Viewport {
@@ -230,6 +283,8 @@ export interface Viewport {
 export interface CanvasProps {
   nodes: Node[];
   connections: Connection[];
+  bounds?: CanvasBounds;
+  clampViewportToBounds?: boolean;
   viewport: Viewport;
   selectedNodeId: string | null;
   onNodeClick: (node: Node) => void;
@@ -241,6 +296,8 @@ export interface CanvasProps {
 export default function Canvas({
   nodes,
   connections,
+  bounds,
+  clampViewportToBounds = false,
   viewport,
   selectedNodeId,
   onNodeClick,
@@ -254,8 +311,53 @@ export default function Canvas({
   const [draggingNode, setDraggingNode] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const didPanRef = useRef(false);
 
-  // Track canvas size for responsive rendering
+  // Default bounds if not provided (large canvas area)
+  const defaultBounds: CanvasBounds = {
+    minX: -10000,
+    maxX: 10000,
+    minY: -10000,
+    maxY: 10000,
+  };
+
+  // Use provided bounds or default
+  const effectiveBounds = bounds ?? defaultBounds;
+
+  // Helper function to clamp position within bounds
+  const clampToBounds = useCallback(
+    (x: number, y: number): [number, number] => {
+      return [
+        Math.max(effectiveBounds.minX, Math.min(effectiveBounds.maxX, x)),
+        Math.max(effectiveBounds.minY, Math.min(effectiveBounds.maxY, y)),
+      ];
+    },
+    [effectiveBounds]
+  );
+
+  // Calculate visible nodes based on viewport (culling optimization)
+  const visibleNodes = useMemo(() => {
+    // Always return all nodes when canvas size is 0 to ensure initial render
+    if (canvasSize.width === 0 || canvasSize.height === 0 || !nodes.length) {
+      return nodes;
+    }
+    
+    // Add padding to ensure nodes near edges are not prematurely hidden
+    const padding = 100;
+    const minX = Math.max(effectiveBounds.minX, -viewport.x / viewport.zoom - padding);
+    const maxX = Math.min(effectiveBounds.maxX, (canvasSize.width - viewport.x) / viewport.zoom + padding);
+    const minY = Math.max(effectiveBounds.minY, -viewport.y / viewport.zoom - padding);
+    const maxY = Math.min(effectiveBounds.maxY, (canvasSize.height - viewport.y) / viewport.zoom + padding);
+    
+    return nodes.filter((node) => {
+      // Ensure node has valid position
+      if (!node.position || !Array.isArray(node.position) || node.position.length < 2) {
+        return true; // Include nodes without position (will use default)
+      }
+      const [x, y] = node.position;
+      return x >= minX && x <= maxX && y >= minY && y <= maxY;
+    });
+  }, [nodes, viewport, canvasSize, effectiveBounds]);
   useEffect(() => {
     const updateSize = () => {
       if (containerRef.current) {
@@ -379,7 +481,7 @@ export default function Canvas({
 
   // Handle wheel for zoom
   const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
+    (e: WheelEvent) => {
       e.preventDefault();
 
       const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
@@ -400,11 +502,24 @@ export default function Canvas({
     [viewport, onViewportChange]
   );
 
+  // Attach wheel event listener with passive: false to allow preventDefault
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    container.addEventListener("wheel", handleWheel, { passive: false });
+
+    return () => {
+      container.removeEventListener("wheel", handleWheel);
+    };
+  }, [handleWheel]);
+
   // Handle mouse down for pan or node drag
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      // Middle mouse button for pan
-      if (e.button === 1) {
+      // Left click (button 0) or middle mouse (button 1) for pan
+      if (e.button === 0 || e.button === 1) {
+        didPanRef.current = false;
         setIsPanning(true);
         setDragOffset({
           x: e.clientX - viewport.x,
@@ -419,14 +534,32 @@ export default function Canvas({
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
       if (isPanning) {
+        didPanRef.current = true;
+        
+        let newX = e.clientX - dragOffset.x;
+        let newY = e.clientY - dragOffset.y;
+        
+        // Optionally clamp viewport to bounds
+        if (clampViewportToBounds && canvasSize.width > 0 && canvasSize.height > 0) {
+          // Clamp X: viewport can show from bounds.minX to bounds.maxX
+          const minViewportX = canvasSize.width - effectiveBounds.maxX * viewport.zoom;
+          const maxViewportX = -effectiveBounds.minX * viewport.zoom;
+          newX = Math.max(minViewportX, Math.min(maxViewportX, newX));
+          
+          // Clamp Y: viewport can show from bounds.minY to bounds.maxY
+          const minViewportY = canvasSize.height - effectiveBounds.maxY * viewport.zoom;
+          const maxViewportY = -effectiveBounds.minY * viewport.zoom;
+          newY = Math.max(minViewportY, Math.min(maxViewportY, newY));
+        }
+        
         onViewportChange({
-          x: e.clientX - dragOffset.x,
-          y: e.clientY - dragOffset.y,
+          x: newX,
+          y: newY,
           zoom: viewport.zoom,
         });
       }
     },
-    [isPanning, dragOffset, viewport.zoom, onViewportChange]
+    [isPanning, dragOffset, viewport.zoom, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds]
   );
 
   // Handle mouse up
@@ -434,6 +567,20 @@ export default function Canvas({
     setIsPanning(false);
     setDraggingNode(null);
   }, []);
+
+  // Handle click - prevent background click if we were panning
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (didPanRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        didPanRef.current = false;
+        return;
+      }
+      onBackgroundClick();
+    },
+    [onBackgroundClick]
+  );
 
   // Handle node drag start
   const handleNodeDragStart = useCallback(
@@ -460,9 +607,12 @@ export default function Canvas({
   useEffect(() => {
     const handleGlobalMouseMove = (e: MouseEvent) => {
       if (draggingNode) {
-        const worldX = (e.clientX - viewport.x) / viewport.zoom - dragOffset.x;
-        const worldY = (e.clientY - viewport.y) / viewport.zoom - dragOffset.y;
-        onNodeMove(draggingNode, [worldX, worldY]);
+        const rawX = (e.clientX - viewport.x) / viewport.zoom - dragOffset.x;
+        const rawY = (e.clientY - viewport.y) / viewport.zoom - dragOffset.y;
+        
+        // Clamp position to bounds
+        const [clampedX, clampedY] = clampToBounds(rawX, rawY);
+        onNodeMove(draggingNode, [clampedX, clampedY]);
       }
     };
 
@@ -479,17 +629,18 @@ export default function Canvas({
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [draggingNode, viewport, dragOffset, onNodeMove]);
+  }, [draggingNode, viewport, dragOffset, onNodeMove, clampToBounds]);
 
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full overflow-hidden bg-gray-950 cursor-crosshair"
-      onWheelCapture={handleWheel}
+      className={`relative w-full h-full overflow-hidden bg-gray-950 ${
+        isPanning ? "cursor-grabbing" : "cursor-crosshair"
+      }`}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
-      onClick={onBackgroundClick}
+      onClick={handleClick}
     >
       {/* Canvas for grid and connections */}
       <canvas
@@ -497,15 +648,9 @@ export default function Canvas({
         className="absolute inset-0 pointer-events-none"
       />
 
-      {/* Node layer */}
-      <div
-        className="absolute inset-0"
-        style={{
-          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
-          transformOrigin: "0 0",
-        }}
-      >
-        {nodes.map((node) => (
+      {/* Node layer - positions handled individually by each NodeComponent */}
+      <div className="absolute inset-0">
+        {visibleNodes.map((node) => (
           <NodeComponent
             key={node.id}
             node={node}

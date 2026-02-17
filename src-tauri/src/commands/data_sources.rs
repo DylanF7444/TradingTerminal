@@ -136,8 +136,9 @@
 // ============================================================================
 
 
-use crate::db::get_connection;
 use crate::models::node::{Node, NodeType, InfoSourceType};
+use crate::AppState;
+use tauri::State;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -297,23 +298,20 @@ pub async fn get_data_source_status(id: String) -> Result<serde_json::Value, Str
 pub async fn update_node_position_cmd(
     id: String,
     position: [f64; 2],
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Get database connection
-    let conn = get_connection().await.map_err(|e| e.to_string())?;
-    let conn_guard = conn.lock().await;
-    let Some(db_conn) = &*conn_guard else {
-        return Err("Database not initialized".to_string());
-    };
+    // Get database connection from app state
+    let conn = state.db.lock().await;
 
     // Fetch existing node
-    let mut node = crate::db::get_node_by_id(db_conn, &id)
+    let mut node = crate::db::get_node_by_id(&conn, &id)
         .map_err(|e| format!("Failed to get node: {}", e))?;
 
     // Update position
     node.position = (position[0], position[1]);
 
     // Save to database
-    crate::db::update_node(db_conn, &node)
+    crate::db::update_node(&conn, &node)
         .map_err(|e| format!("Failed to update node position: {}", e))?;
 
     Ok(())

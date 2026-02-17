@@ -214,6 +214,7 @@
 // Backend (Tauri):
 //   - addNode triggers commands::data_sources::add_data_source
 //   - removeNode triggers commands::data_sources::remove_data_source
+//   - updateNodePosition triggers commands::data_sources::update_node_position_cmd
 //   - Connection changes notify analyzer to recalculate correlations
 //
 // Other Slices:

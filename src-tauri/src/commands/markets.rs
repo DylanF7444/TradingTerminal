@@ -239,7 +239,7 @@ pub async fn add_market<R: Runtime>(
     
     // Store in database
     let conn = get_connection().await.map_err(|e| e.to_string())?;
-    let conn_guard = conn.lock().await;
+    let conn_guard = conn.lock().unwrap();
     let Some(db_conn) = &*conn_guard else {
         return Err("Database not initialized".to_string());
     };
@@ -298,7 +298,7 @@ pub async fn remove_market(
         
         // Archive in database instead of hard delete (preserve history)
         let db_conn_result = get_connection().await.map_err(|e| e.to_string())?;
-        let conn_guard = db_conn_result.lock().await;
+        let conn_guard = db_conn_result.lock().unwrap();
         let Some(db_conn) = &*conn_guard else {
             return Err("Database not initialized".to_string());
         };
@@ -323,7 +323,7 @@ pub async fn remove_market(
 #[tauri::command]
 pub async fn get_markets() -> Result<Vec<Node>, String> {
     let conn = get_connection().await.map_err(|e| e.to_string())?;
-    let conn_guard = conn.lock().await;
+    let conn_guard = conn.lock().unwrap();
     let Some(db_conn) = &*conn_guard else {
         return Err("Database not initialized".to_string());
     };
