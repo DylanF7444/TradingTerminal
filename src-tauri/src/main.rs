@@ -335,8 +335,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     let db_path = app_dir.join("terminal.db");
     
     // Initialize the global database connection (for commands using get_connection())
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(db::init_db(&db_path)).map_err(|e| format!("Database init failed: {}", e))?;
+    db::init_db(&db_path).map_err(|e| format!("Database init failed: {}", e))?;
     
     // Also create a connection for AppState
     let conn = create_connection(&db_path)?;

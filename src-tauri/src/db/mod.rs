@@ -16,7 +16,7 @@ static DB_CONNECTION: LazyLock<Arc<Mutex<Option<Connection>>>> =
 
 /// Initialize the database with schema and optimizations
 /// Called once during application startup from main.rs
-pub async fn init_db(db_path: &Path) -> Result<(), String> {
+pub fn init_db(db_path: &Path) -> Result<(), String> {
     let conn = sqlite::create_connection(db_path)
         .map_err(|e| format!("Failed to create database connection: {}", e))?;
     
@@ -113,12 +113,12 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_init_db() {
+    #[test]
+    fn test_init_db() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         
-        let result = init_db(&db_path).await;
+        let result = init_db(&db_path);
         assert!(result.is_ok());
         assert!(db_path.exists());
     }
@@ -127,7 +127,7 @@ mod tests {
     async fn test_health_check() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        init_db(&db_path).await.unwrap();
+        init_db(&db_path).unwrap();
         
         let health = health_check().await.unwrap();
         assert!(health.connected);
