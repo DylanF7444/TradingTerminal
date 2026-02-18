@@ -113,7 +113,7 @@ import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
 import { Modal } from './components/UI/Modal';
 
 // Types
-import { Node, NodeId, InfoSourceType, MarketType } from './types/nodes';
+import { Node, NodeId, NodeType, InfoSourceType, MarketType } from './types/nodes';
 
 // =============================================================================
 // LAYOUT CONSTANTS
@@ -187,8 +187,14 @@ function App(): ReactNode {
       try {
         const result = await invoke<any[]>('get_data_sources_cmd');
         
-        // Get addNode from store for adding loaded nodes
-        const { addNode } = useStore.getState();
+        // Get current nodes from store to avoid duplicates
+        const { addNode, nodes } = useStore.getState();
+        
+        // Skip if nodes already exist (prevents duplicate from React StrictMode)
+        if (Object.keys(nodes).length > 0) {
+          console.log('Nodes already loaded, skipping...');
+          return;
+        }
         
         if (result && Array.isArray(result) && result.length > 0) {
           // Add all nodes from backend with transformed format
@@ -216,16 +222,16 @@ function App(): ReactNode {
   // Create demo nodes for first-time users
   // -------------------------------------------------------------------------
   
-  const createDemoNodes = useCallback(() => {
+  const createDemoNodes = useCallback(async () => {
     const { addNode, addConnection } = useStore.getState();
     const now = Date.now();
     
     // Demo crypto price source node
     const cryptoSourceId = 'demo-crypto-source' as NodeId;
-    addNode({
+    const cryptoNode = {
       id: cryptoSourceId,
-      node_type: { InfoSource: InfoSourceType.CryptoPrices },
-      position: [150, 200],
+      node_type: { InfoSource: InfoSourceType.CryptoPrices } as NodeType,
+      position: [150, 200] as [number, number],
       connections: [],
       metadata: {
         symbols: ['BTC', 'ETH', 'SOL'],
@@ -234,21 +240,53 @@ function App(): ReactNode {
       },
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    
+    // Save to backend database for persistence
+    try {
+      await invoke('add_node_cmd', { 
+        nodeId: cryptoSourceId, 
+        nodeType: 'InfoSource', 
+        nodeSubtype: 'CryptoPrices',
+        positionX: 150,
+        positionY: 200,
+        metadata: JSON.stringify(cryptoNode.metadata)
+      });
+    } catch (e) {
+      console.warn('Could not persist crypto node (backend may not have command):', e);
+    }
+    
+    addNode(cryptoNode);
     
     // Demo polymarket node
     const polymarketId = 'demo-polymarket' as NodeId;
-    addNode({
+    const polymarketNode = {
       id: polymarketId,
-      node_type: { Market: MarketType.Polymarket },
-      position: [450, 200],
+      node_type: { Market: MarketType.Polymarket } as NodeType,
+      position: [450, 200] as [number, number],
       connections: [],
       metadata: {
         autoTrade: false,
       },
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    
+    // Save polymarket to backend
+    try {
+      await invoke('add_node_cmd', { 
+        nodeId: polymarketId, 
+        nodeType: 'Market', 
+        nodeSubtype: 'Polymarket',
+        positionX: 450,
+        positionY: 200,
+        metadata: JSON.stringify(polymarketNode.metadata)
+      });
+    } catch (e) {
+      console.warn('Could not persist polymarket node:', e);
+    }
+    
+    addNode(polymarketNode);
     
     // Create connection between source and market
     addConnection({
@@ -259,10 +297,10 @@ function App(): ReactNode {
     
     // Demo news source node
     const newsSourceId = 'demo-news-source' as NodeId;
-    addNode({
+    const newsNode = {
       id: newsSourceId,
-      node_type: { InfoSource: InfoSourceType.NewsSource },
-      position: [150, 400],
+      node_type: { InfoSource: InfoSourceType.NewsSource } as NodeType,
+      position: [150, 400] as [number, number],
       connections: [],
       metadata: {
         feeds: ['reuters', 'ap'],
@@ -270,7 +308,23 @@ function App(): ReactNode {
       },
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    
+    // Save news source to backend
+    try {
+      await invoke('add_node_cmd', { 
+        nodeId: newsSourceId, 
+        nodeType: 'InfoSource', 
+        nodeSubtype: 'NewsSource',
+        positionX: 150,
+        positionY: 400,
+        metadata: JSON.stringify(newsNode.metadata)
+      });
+    } catch (e) {
+      console.warn('Could not persist news node:', e);
+    }
+    
+    addNode(newsNode);
     
     // Connect news to polymarket
     addConnection({
@@ -318,8 +372,11 @@ function App(): ReactNode {
     return nodes[selectedId] || null;
   }, [selectedIds, nodes]);
 
-  /** Convert nodes record to array for Canvas */
-  const nodesArray = useMemo(() => Object.values(nodes), [nodes]);
+  /** Convert nodes record to array for Canvas (filter out invalid nodes) */
+  const nodesArray = useMemo(() => 
+    Object.values(nodes).filter((node) => node?.id), 
+    [nodes]
+  );
 
   /** Convert connections to array */
   const connectionsArray = useMemo(() => connections, [connections]);

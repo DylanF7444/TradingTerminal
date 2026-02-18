@@ -339,7 +339,7 @@ export default function Canvas({
   const visibleNodes = useMemo(() => {
     // Always return all nodes when canvas size is 0 to ensure initial render
     if (canvasSize.width === 0 || canvasSize.height === 0 || !nodes.length) {
-      return nodes;
+      return nodes.filter((node) => node?.id); // Filter out nodes without id
     }
     
     // Add padding to ensure nodes near edges are not prematurely hidden
@@ -350,6 +350,10 @@ export default function Canvas({
     const maxY = Math.min(effectiveBounds.maxY, (canvasSize.height - viewport.y) / viewport.zoom + padding);
     
     return nodes.filter((node) => {
+      // Skip nodes without valid id (React key requirement)
+      if (!node?.id) {
+        return false;
+      }
       // Ensure node has valid position
       if (!node.position || !Array.isArray(node.position) || node.position.length < 2) {
         return true; // Include nodes without position (will use default)

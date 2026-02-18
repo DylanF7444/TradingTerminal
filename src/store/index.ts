@@ -420,6 +420,10 @@ if (typeof window !== 'undefined') {
         // Sync to SQLite via Tauri - lazy import
         void import('@tauri-apps/api/core').then(({ invoke }) => {
           Object.values(nodes).forEach((node) => {
+            // Skip nodes without valid id or position
+            if (!node?.id || !node?.position || !Array.isArray(node.position) || node.position.length < 2) {
+              return;
+            }
             void invoke('update_node_position_cmd', {
               id: node.id,
               position: node.position,

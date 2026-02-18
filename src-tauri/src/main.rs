@@ -284,6 +284,7 @@ fn main() {
             update_data_source_cmd,
             get_data_source_status_cmd,
             update_node_position_cmd,
+            add_node_cmd,
             
             // Market commands
             add_market_cmd,
@@ -609,6 +610,74 @@ async fn get_data_source_status_cmd(
         "active": true,
         "last_update": chrono::Utc::now().timestamp(),
         "data_points_collected": 1234,
+    }))
+}
+
+/// Add a generic node to the database (for demo nodes and persistence)
+/// This command saves a node without starting any scraper
+#[tauri::command]
+async fn add_node_cmd(
+    node_id: String,
+    node_type: String,
+    node_subtype: String,
+    position_x: f64,
+    position_y: f64,
+    metadata: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    info!("Adding node: {} ({}/{})", node_id, node_type, node_subtype);
+    
+    // Parse node type
+    let node_type = match node_type.as_str() {
+        "InfoSource" => {
+            let info_type = match node_subtype.as_str() {
+                "CryptoPrices" => models::node::InfoSourceType::CryptoPrices,
+                "NewsSource" => models::node::InfoSourceType::NewsSource,
+                "Weather" => models::node::InfoSourceType::Weather,
+                "SocialMedia" => models::node::InfoSourceType::SocialMedia,
+                "FinancialPrices" => models::node::InfoSourceType::FinancialPrices,
+                "CommodityPrices" => models::node::InfoSourceType::CommodityPrices,
+                "Livestream" => models::node::InfoSourceType::Livestream,
+                _ => return Err(format!("Unknown InfoSource type: {}", node_subtype)),
+            };
+            models::node::NodeType::InfoSource(info_type)
+        }
+        "Market" => {
+            let market_type = match node_subtype.as_str() {
+                "Polymarket" => models::node::MarketType::Polymarket,
+                "Kalshi" => models::node::MarketType::Kalshi,
+                _ => return Err(format!("Unknown Market type: {}", node_subtype)),
+            };
+            models::node::NodeType::Market(market_type)
+        }
+        _ => return Err(format!("Unknown node type: {}", node_type)),
+    };
+    
+    // Parse metadata JSON
+    let metadata: serde_json::Value = serde_json::from_str(&metadata)
+        .unwrap_or(serde_json::json!({}));
+    
+    // Create node
+    let node = models::node::Node {
+        id: node_id.clone(),
+        node_type,
+        position: (position_x, position_y),
+        connections: vec![],
+        metadata,
+    };
+    
+    // Save to database
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::insert_node(&conn, &node)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    info!("Node saved to database: {}", node_id);
+    
+    Ok(serde_json::json!({
+        "success": true,
+        "node_id": node_id
     }))
 }
 
