@@ -55,6 +55,7 @@
 //   - Event handling (click, drag, hover)
 //   - Status indicators and animations
 //   - Tooltip/label overlays
+//   - Coordinate display (shows world coordinates on hover)
 //
 // PROPS:
 //
@@ -127,6 +128,12 @@
 //   - Updates on window resize
 //   - Used for DPR (device pixel ratio) scaling for Retina displays
 //
+// mousePosition: { x, y } | null
+//   - Current mouse position in world coordinates
+//   - Converted from screen coordinates: world = (screen - viewportOffset) / zoom
+//   - null when mouse is outside canvas bounds
+//   - Displayed in coordinate overlay for user reference
+//
 // COORDINATE SYSTEMS:
 //
 // World Coordinates (Data):
@@ -159,11 +166,21 @@
 //   - Space key + left click also initiates pan (not shown in snippet)
 //   - Records dragOffset = mouse - viewport (to maintain relative position)
 //
-// handleMouseMove (Pan/Drag):
+// handleMouseMove (Pan/Drag/Coordinates):
 //   - If isPanning: Update viewport.x/y based on mouse movement
 //   - If draggingNode: Calculate new world position and call onNodeMove
+//   - Always: Update mousePosition with current world coordinates
 //   - Uses requestAnimationFrame implicitly via React state updates
 //   - Position clamped to bounds if bounds are defined
+//
+// handleMouseEnter:
+//   - Initializes coordinate display when mouse enters canvas
+//   - Converts initial position to world coordinates
+//   - Enables coordinate overlay visibility
+//
+// handleMouseLeave:
+//   - Hides coordinate display when mouse leaves canvas
+//   - Sets mousePosition to null
 //
 // Global Window Events:
 //   - Mouse move/up handlers attached to window during node drag
@@ -255,6 +272,7 @@
 // - Canvas: Pointer-events none (lets clicks pass to nodes)
 // - Cursor: Crosshair default, grabbing during pan, grab on node hover
 // - Bounds: Visual indicators could be added (dashed border at boundaries)
+// - Coordinate Display: Top-left overlay showing X/Y in world units
 // ============================================================================
 
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
@@ -297,7 +315,7 @@ export default function Canvas({
   nodes,
   connections,
   bounds,
-  clampViewportToBounds = false,
+  clampViewportToBounds = true,
   viewport,
   selectedNodeId,
   onNodeClick,
@@ -312,6 +330,7 @@ export default function Canvas({
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const didPanRef = useRef(false);
+  const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
 
   // Default bounds if not provided (large canvas area)
   const defaultBounds: CanvasBounds = {
@@ -537,6 +556,17 @@ export default function Canvas({
   // Handle mouse move for pan or drag
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      // Update mouse position for coordinate display
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const screenX = e.clientX - rect.left;
+        const screenY = e.clientY - rect.top;
+        // Convert screen coordinates to world coordinates
+        const worldX = Math.round((screenX - viewport.x) / viewport.zoom);
+        const worldY = Math.round((screenY - viewport.y) / viewport.zoom);
+        setMousePosition({ x: worldX, y: worldY });
+      }
+
       if (isPanning) {
         didPanRef.current = true;
         
@@ -571,6 +601,26 @@ export default function Canvas({
     setIsPanning(false);
     setDraggingNode(null);
   }, []);
+
+  // Handle mouse leave - hide coordinates
+  const handleMouseLeave = useCallback(() => {
+    setMousePosition(null);
+  }, []);
+
+  // Handle mouse enter - initialize coordinates
+  const handleMouseEnter = useCallback(
+    (e: React.MouseEvent) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const screenX = e.clientX - rect.left;
+        const screenY = e.clientY - rect.top;
+        const worldX = Math.round((screenX - viewport.x) / viewport.zoom);
+        const worldY = Math.round((screenY - viewport.y) / viewport.zoom);
+        setMousePosition({ x: worldX, y: worldY });
+      }
+    },
+    [viewport]
+  );
 
   // Handle click - prevent background click if we were panning
   const handleClick = useCallback(
@@ -645,6 +695,8 @@ export default function Canvas({
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onClick={handleClick}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
       {/* Canvas for grid and connections */}
       <canvas
@@ -699,6 +751,24 @@ export default function Canvas({
           {Math.round(viewport.zoom * 100)}%
         </div>
       </div>
+
+      {/* Coordinate display */}
+      {mousePosition && (
+        <div className="absolute top-4 left-4 flex gap-4 bg-gray-900/90 backdrop-blur-sm px-3 py-2 rounded-lg shadow-lg border border-gray-700">
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400 text-xs">X:</span>
+            <span className="text-cyan-400 font-mono text-sm font-medium">
+              {mousePosition.x}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400 text-xs">Y:</span>
+            <span className="text-cyan-400 font-mono text-sm font-medium">
+              {mousePosition.y}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
