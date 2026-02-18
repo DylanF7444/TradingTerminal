@@ -502,13 +502,36 @@ export default function Canvas({
     ctx.restore();
   }, [nodes, connections, viewport, canvasSize]);
 
+  // Calculate zoom limits based on canvas size and bounds
+  const zoomLimits = useMemo(() => {
+    if (canvasSize.width === 0 || canvasSize.height === 0) {
+      return { minZoom: 0.1, maxZoom: 3 };
+    }
+    
+    // Calculate the minimum zoom needed to fit the entire bounds in view
+    const boundsWidth = effectiveBounds.maxX - effectiveBounds.minX;
+    const boundsHeight = effectiveBounds.maxY - effectiveBounds.minY;
+    
+    // Add some padding (10%) so bounds aren't flush with edges
+    const minZoomX = canvasSize.width / boundsWidth / 1.1;
+    const minZoomY = canvasSize.height / boundsHeight / 1.1;
+    
+    // Minimum zoom should fit the larger dimension, with a reasonable minimum
+    const minZoom = Math.max(0.05, Math.min(minZoomX, minZoomY));
+    
+    // Maximum zoom prevents losing context (300% is reasonable)
+    const maxZoom = 3;
+    
+    return { minZoom, maxZoom };
+  }, [canvasSize, effectiveBounds]);
+
   // Handle wheel for zoom
   const handleWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
 
       const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-      const newZoom = Math.max(0.1, Math.min(3, viewport.zoom * zoomFactor));
+      const newZoom = Math.max(zoomLimits.minZoom, Math.min(zoomLimits.maxZoom, viewport.zoom * zoomFactor));
 
       // Zoom towards mouse pointer
       const rect = containerRef.current?.getBoundingClientRect();
@@ -520,9 +543,22 @@ export default function Canvas({
       const newX = mouseX - (mouseX - viewport.x) * (newZoom / viewport.zoom);
       const newY = mouseY - (mouseY - viewport.y) * (newZoom / viewport.zoom);
 
-      onViewportChange({ x: newX, y: newY, zoom: newZoom });
+      // Clamp viewport position to bounds after zoom
+      let clampedX = newX;
+      let clampedY = newY;
+      if (clampViewportToBounds && canvasSize.width > 0 && canvasSize.height > 0) {
+        const minViewportX = canvasSize.width - effectiveBounds.maxX * newZoom;
+        const maxViewportX = -effectiveBounds.minX * newZoom;
+        clampedX = Math.max(minViewportX, Math.min(maxViewportX, newX));
+        
+        const minViewportY = canvasSize.height - effectiveBounds.maxY * newZoom;
+        const maxViewportY = -effectiveBounds.minY * newZoom;
+        clampedY = Math.max(minViewportY, Math.min(maxViewportY, newY));
+      }
+
+      onViewportChange({ x: clampedX, y: clampedY, zoom: newZoom });
     },
-    [viewport, onViewportChange]
+    [viewport, onViewportChange, zoomLimits, clampViewportToBounds, canvasSize, effectiveBounds]
   );
 
   // Attach wheel event listener with passive: false to allow preventDefault
@@ -722,12 +758,22 @@ export default function Canvas({
       {/* Zoom controls */}
       <div className="absolute bottom-4 right-4 flex flex-col gap-2">
         <button
-          onClick={() =>
-            onViewportChange({
-              ...viewport,
-              zoom: Math.min(3, viewport.zoom * 1.2),
-            })
-          }
+          onClick={() => {
+            const newZoom = Math.min(zoomLimits.maxZoom, viewport.zoom * 1.2);
+            // Clamp viewport position to bounds after zoom
+            let clampedX = viewport.x;
+            let clampedY = viewport.y;
+            if (clampViewportToBounds && canvasSize.width > 0 && canvasSize.height > 0) {
+              const minViewportX = canvasSize.width - effectiveBounds.maxX * newZoom;
+              const maxViewportX = -effectiveBounds.minX * newZoom;
+              clampedX = Math.max(minViewportX, Math.min(maxViewportX, viewport.x));
+              
+              const minViewportY = canvasSize.height - effectiveBounds.maxY * newZoom;
+              const maxViewportY = -effectiveBounds.minY * newZoom;
+              clampedY = Math.max(minViewportY, Math.min(maxViewportY, viewport.y));
+            }
+            onViewportChange({ x: clampedX, y: clampedY, zoom: newZoom });
+          }}
           className="w-10 h-10 bg-gray-800 hover:bg-gray-700 rounded-lg flex items-center justify-center text-gray-300 shadow-lg"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -735,12 +781,22 @@ export default function Canvas({
           </svg>
         </button>
         <button
-          onClick={() =>
-            onViewportChange({
-              ...viewport,
-              zoom: Math.max(0.1, viewport.zoom / 1.2),
-            })
-          }
+          onClick={() => {
+            const newZoom = Math.max(zoomLimits.minZoom, viewport.zoom / 1.2);
+            // Clamp viewport position to bounds after zoom
+            let clampedX = viewport.x;
+            let clampedY = viewport.y;
+            if (clampViewportToBounds && canvasSize.width > 0 && canvasSize.height > 0) {
+              const minViewportX = canvasSize.width - effectiveBounds.maxX * newZoom;
+              const maxViewportX = -effectiveBounds.minX * newZoom;
+              clampedX = Math.max(minViewportX, Math.min(maxViewportX, viewport.x));
+              
+              const minViewportY = canvasSize.height - effectiveBounds.maxY * newZoom;
+              const maxViewportY = -effectiveBounds.minY * newZoom;
+              clampedY = Math.max(minViewportY, Math.min(maxViewportY, viewport.y));
+            }
+            onViewportChange({ x: clampedX, y: clampedY, zoom: newZoom });
+          }}
           className="w-10 h-10 bg-gray-800 hover:bg-gray-700 rounded-lg flex items-center justify-center text-gray-300 shadow-lg"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

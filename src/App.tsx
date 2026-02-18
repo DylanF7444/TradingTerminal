@@ -95,7 +95,7 @@
 //
 // ============================================================================
 
-import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 
 // Store hooks
 import { useStore, type StoreState } from './store';
@@ -153,7 +153,7 @@ function App(): ReactNode {
   const viewport = useStore((state: StoreState) => state.viewport);
   const addNode = useStore((state: StoreState) => state.addNode);
   const setViewport = useStore((state: StoreState) => state.setViewport);
-  const importGraph = useStore((state: StoreState) => state.importGraph);
+
 
   // -------------------------------------------------------------------------
   // Load existing nodes on app mount
@@ -172,9 +172,19 @@ function App(): ReactNode {
       }
     }
 
+    // Handle position - backend sends as array [x, y] from Rust tuple serialization
+    let position = node.position;
+    if (position && Array.isArray(position) && position.length >= 2) {
+      position = [position[0], position[1]] as [number, number];
+    } else if (!position || !Array.isArray(position)) {
+      // Default position if missing
+      position = [100, 100] as [number, number];
+    }
+
     return {
       ...node,
       node_type: nodeType,
+      position: position,
       // Ensure required fields have defaults (backend doesn't include these)
       connections: node.connections || [],
       createdAt: node.createdAt || Date.now(),
@@ -182,13 +192,22 @@ function App(): ReactNode {
     };
   };
 
+  // Create ref for createDemoNodes to avoid circular dependency in useEffect
+  const createDemoNodesRef = useRef<() => Promise<void> | void>(() => {});
+
   useEffect(() => {
+    let isMounted = true;
+    
     const loadExistingNodes = async () => {
       try {
         const result = await invoke<any[]>('get_data_sources_cmd');
         
+        // Ensure component is still mounted before updating state
+        if (!isMounted) return;
+        
         // Get current nodes from store to avoid duplicates
-        const { addNode, nodes } = useStore.getState();
+        const storeState = useStore.getState();
+        const { addNode, nodes } = storeState;
         
         // Skip if nodes already exist (prevents duplicate from React StrictMode)
         if (Object.keys(nodes).length > 0) {
@@ -202,20 +221,31 @@ function App(): ReactNode {
             addNode(transformNodeFromBackend(node));
           });
           
+          // Output node coordinates to console on startup
+          const transformedNodes = result.map(n => transformNodeFromBackend(n));
+          console.log('Node coordinates on startup:', transformedNodes.map(n => ({ id: n.id, position: n.position, type: n.node_type })));
+          
           console.log(`Loaded ${result.length} existing nodes from backend`);
         } else {
           // No nodes in database - create demo nodes for first-time users
           console.log('No existing nodes found, creating demo nodes...');
-          createDemoNodes();
+          createDemoNodesRef.current();
         }
       } catch (error) {
         console.error('Failed to load existing nodes:', error);
         // Create demo nodes as fallback on error
-        createDemoNodes();
+        if (isMounted) {
+          createDemoNodesRef.current();
+        }
       }
     };
     
     loadExistingNodes();
+    
+    // Cleanup flag on unmount
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // -------------------------------------------------------------------------
@@ -223,6 +253,9 @@ function App(): ReactNode {
   // -------------------------------------------------------------------------
   
   const createDemoNodes = useCallback(async () => {
+    // Set the ref so the useEffect can call it
+    createDemoNodesRef.current = createDemoNodes;
+    
     const { addNode, addConnection } = useStore.getState();
     const now = Date.now();
     
@@ -332,6 +365,11 @@ function App(): ReactNode {
       target: polymarketId,
       strength: 0.6,
     });
+    
+    // Output node coordinates to console on startup (demo nodes)
+    const { nodes } = useStore.getState();
+    const allNodes = Object.values(nodes).map(n => ({ id: n.id, position: n.position, type: n.node_type }));
+    console.log('Node coordinates on startup:', allNodes);
     
     console.log('Demo nodes created successfully');
   }, []);
