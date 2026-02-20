@@ -291,7 +291,7 @@ export default function NodeComponent({
   return (
     <div
       className={`
-        absolute transform -translate-x-1/2 -translate-y-1/2 
+        absolute pointer-events-auto
         w-12 h-12 rounded-full ${baseColor} 
         border-2 ${isSelected ? "border-yellow-400" : "border-white/20"}
         ${isDragging ? "cursor-grabbing" : "cursor-grab"}

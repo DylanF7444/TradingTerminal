@@ -724,7 +724,7 @@ export default function Canvas({
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-full overflow-hidden bg-gray-950 ${
+      className={`absolute inset-0 overflow-hidden bg-gray-950 ${
         isPanning ? "cursor-grabbing" : "cursor-crosshair"
       }`}
       onMouseDown={handleMouseDown}
@@ -741,7 +741,7 @@ export default function Canvas({
       />
 
       {/* Node layer - positions handled individually by each NodeComponent */}
-      <div className="absolute inset-0">
+      <div className="absolute inset-0 pointer-events-none z-10">
         {visibleNodes.map((node) => (
           <NodeComponent
             key={node.id}

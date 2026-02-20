@@ -1,10 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { WebSocketServer } from 'ws';
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent vite from obscuring rust errors
