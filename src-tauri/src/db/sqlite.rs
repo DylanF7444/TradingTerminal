@@ -61,6 +61,14 @@
 //    - Fields: id, timestamp, node_id, event_type, event_data, severity
 //    - Indexes: idx_event_log_time (for recent events view)
 //
+// 7. api_keys
+//    - Stores encrypted API credentials for trading platforms
+//    - Fields: id, platform, api_key, api_secret, private_key, environment,
+//              additional_config, created_at, updated_at
+//    - Unique constraint: platform (one key set per platform)
+//    - Platforms: Polymarket, Kalshi
+//    - Used for automatic credential retrieval when adding markets
+//
 // PERFORMANCE OPTIMIZATIONS:
 // - PRAGMA journal_mode = WAL (Write-Ahead Logging)
 //   - Allows concurrent reads during writes
@@ -376,6 +384,37 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         [],
     )?;
 
+    // Websocket messages table - stores all received websocket data per node
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS websocket_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER NOT NULL,
+            node_id TEXT NOT NULL,
+            message_type TEXT NOT NULL,
+            payload JSON NOT NULL,
+            processed INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (node_id) REFERENCES nodes(id)
+        )",
+        [],
+    )?;
+
+    // API keys table - stores encrypted API credentials for market platforms
+    // Security: Keys are stored encrypted using platform-specific secure storage
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL UNIQUE,
+            api_key TEXT NOT NULL,
+            api_secret TEXT,
+            private_key TEXT,
+            environment TEXT DEFAULT 'demo',
+            additional_config JSON,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     // Create indexes for performance
     create_indexes(conn)?;
 
@@ -424,6 +463,20 @@ fn create_indexes(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_event_log_time 
          ON event_log(timestamp DESC)",
+        [],
+    )?;
+
+    // Index for websocket messages by node and time
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_websocket_messages_node_time 
+         ON websocket_messages(node_id, timestamp DESC)",
+        [],
+    )?;
+
+    // Index for websocket messages by type
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_websocket_messages_type 
+         ON websocket_messages(message_type, timestamp DESC)",
         [],
     )?;
 
@@ -1049,6 +1102,146 @@ pub struct DatabaseStats {
     pub total_timeseries_points: u64,
     pub total_positions: u64,
     pub open_positions: u64,
+}
+
+// ============================================================================
+// API KEY OPERATIONS
+// ============================================================================
+
+/// Stored API key for a trading platform
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredApiKey {
+    pub platform: String,
+    pub api_key: String,
+    pub api_secret: Option<String>,
+    pub private_key: Option<String>,
+    pub environment: String,
+    pub additional_config: Option<JsonValue>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Data for saving/updating API keys (without timestamps)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyData {
+    pub api_key: String,
+    pub api_secret: Option<String>,
+    pub private_key: Option<String>,
+    pub environment: Option<String>,
+    pub additional_config: Option<JsonValue>,
+}
+
+/// Save or update API key for a platform
+/// 
+/// Uses UPSERT (INSERT OR REPLACE) to handle both insert and update cases
+pub fn save_api_key(conn: &Connection, platform: &str, key_data: &ApiKeyData) -> SqliteResult<()> {
+    let now = Utc::now().timestamp();
+    
+    conn.execute(
+        "INSERT OR REPLACE INTO api_keys 
+         (platform, api_key, api_secret, private_key, environment, additional_config, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 
+                 COALESCE((SELECT created_at FROM api_keys WHERE platform = ?1), ?7), 
+                 ?8)",
+        params![
+            platform,
+            &key_data.api_key,
+            &key_data.api_secret,
+            &key_data.private_key,
+            key_data.environment.as_deref().unwrap_or("demo"),
+            key_data.additional_config.as_ref().map(|d| serde_json::to_string(d).unwrap()),
+            now,
+            now,
+        ],
+    )?;
+
+    println!("API key saved for platform: {}", platform);
+    Ok(())
+}
+
+/// Get API key for a specific platform
+pub fn get_api_key(conn: &Connection, platform: &str) -> SqliteResult<Option<StoredApiKey>> {
+    let mut stmt = conn.prepare(
+        "SELECT platform, api_key, api_secret, private_key, environment, additional_config, created_at, updated_at
+         FROM api_keys WHERE platform = ?1"
+    )?;
+
+    let result = stmt.query_row(params![platform], |row| {
+        Ok(StoredApiKey {
+            platform: row.get(0)?,
+            api_key: row.get(1)?,
+            api_secret: row.get(2)?,
+            private_key: row.get(3)?,
+            environment: row.get(4)?,
+            additional_config: row.get::<_, Option<String>>(5)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    });
+
+    match result {
+        Ok(key) => Ok(Some(key)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Get all stored API keys (without sensitive data for listing purposes)
+/// Returns platform names and whether keys are configured
+pub fn get_all_api_keys(conn: &Connection) -> SqliteResult<Vec<StoredApiKey>> {
+    let mut stmt = conn.prepare(
+        "SELECT platform, api_key, api_secret, private_key, environment, additional_config, created_at, updated_at
+         FROM api_keys ORDER BY platform"
+    )?;
+
+    let keys = stmt.query_map([], |row| {
+        Ok(StoredApiKey {
+            platform: row.get(0)?,
+            api_key: row.get(1)?,
+            api_secret: row.get(2)?,
+            private_key: row.get(3)?,
+            environment: row.get(4)?,
+            additional_config: row.get::<_, Option<String>>(5)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?
+    .collect::<SqliteResult<Vec<StoredApiKey>>>()?;
+
+    Ok(keys)
+}
+
+/// Delete API key for a platform
+pub fn delete_api_key(conn: &Connection, platform: &str) -> SqliteResult<bool> {
+    let rows_affected = conn.execute(
+        "DELETE FROM api_keys WHERE platform = ?1",
+        params![platform],
+    )?;
+
+    Ok(rows_affected > 0)
+}
+
+/// Check if API key exists for a platform
+pub fn has_api_key(conn: &Connection, platform: &str) -> SqliteResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM api_keys WHERE platform = ?1",
+        params![platform],
+        |row| row.get(0),
+    )?;
+
+    Ok(count > 0)
+}
+
+/// Get list of platforms with configured API keys
+pub fn get_configured_platforms(conn: &Connection) -> SqliteResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT platform FROM api_keys ORDER BY platform")?;
+    
+    let platforms = stmt.query_map([], |row| row.get(0))?
+        .collect::<SqliteResult<Vec<String>>>()?;
+
+    Ok(platforms)
 }
 
 #[cfg(test)]

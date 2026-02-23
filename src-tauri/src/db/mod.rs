@@ -106,6 +106,15 @@ pub use sqlite::{
     get_positions,
     insert_connection,
     get_connections_for_node,
+    // API key operations (stored credentials for trading platforms)
+    save_api_key,
+    get_api_key,
+    get_all_api_keys,
+    delete_api_key,
+    has_api_key,
+    get_configured_platforms,
+    StoredApiKey,
+    ApiKeyData,
 };
 
 #[cfg(test)]

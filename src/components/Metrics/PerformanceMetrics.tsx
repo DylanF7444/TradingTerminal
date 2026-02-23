@@ -611,7 +611,6 @@ export default function PerformanceMetrics({
 }: PerformanceMetricsProps) {
   const [activeAlerts, setActiveAlerts] = useState<MetricAlert[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const prevMetricsRef = useRef<PerformanceMetricsData | undefined>(undefined);
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   
   // Memoize thresholds to prevent unnecessary re-renders

@@ -17,7 +17,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 reqwest = { version = "0.11", features = ["json"] }
 rusqlite = { version = "0.30", features = ["bundled"] }
 r2d2 = "0.8"
@@ -31,6 +31,11 @@ env_logger = "0.10"
 log = "0.4"
 sysinfo = "0.29"  # For get_system_info_cmd
 lru = "0.11"
+rsa = { version = "0.9", features = ["pem"] }
+sha2 = "0.10"
+base64 = "0.21"
+pkcs8 = { version = "0.10", features = ["pem"] }
+pkcs1 = { version = "0.7", features = ["pem"] }
 
 [features]
 default = ["custom-protocol"]

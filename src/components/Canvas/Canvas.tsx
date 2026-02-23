@@ -307,8 +307,11 @@ export interface CanvasProps {
   selectedNodeId: string | null;
   onNodeClick: (node: Node) => void;
   onNodeMove: (id: string, position: [number, number]) => void;
+  onNodeDelete: (id: string) => void;
   onBackgroundClick: () => void;
   onViewportChange: (viewport: Viewport) => void;
+  /** Callback to open orderbook overlay for market nodes */
+  onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
 }
 
 export default function Canvas({
@@ -320,8 +323,10 @@ export default function Canvas({
   selectedNodeId,
   onNodeClick,
   onNodeMove,
+  onNodeDelete,
   onBackgroundClick,
   onViewportChange,
+  onOpenOrderbook,
 }: CanvasProps): ReactNode {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -721,6 +726,30 @@ export default function Canvas({
     };
   }, [draggingNode, viewport, dragOffset, onNodeMove, clampToBounds]);
 
+  // Handle keyboard delete for selected node
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Delete or Backspace key
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNodeId) {
+        // Prevent default browser behavior (like going back in history)
+        e.preventDefault();
+        // Only delete if we're not editing an input field
+        const activeElement = document.activeElement;
+        const isEditing = activeElement && (
+          activeElement.tagName === 'INPUT' ||
+          activeElement.tagName === 'TEXTAREA' ||
+          (activeElement as HTMLElement).isContentEditable
+        );
+        if (!isEditing) {
+          onNodeDelete(selectedNodeId);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedNodeId, onNodeDelete]);
+
   return (
     <div
       ref={containerRef}
@@ -751,6 +780,8 @@ export default function Canvas({
             isDragging={draggingNode === node.id}
             onClick={() => onNodeClick(node)}
             onMouseDown={(e) => handleNodeDragStart(node.id, e)}
+            onDelete={() => onNodeDelete(node.id)}
+            onOpenOrderbook={onOpenOrderbook}
           />
         ))}
       </div>

@@ -15,11 +15,14 @@
 // User clicks "Add Market"
 //   → Modal opens with platform selection (Polymarket vs Kalshi cards)
 //   → User selects platform
+//   → CHECK FOR STORED API KEYS (new feature)
+//       * If stored keys found, pre-populate credentials
+//       * User can toggle between stored and new credentials
 //   → Configuration form appears (API credentials, market selection)
 //   → Frontend validates input format (not empty, URL format, etc.)
 //   → Tauri invoke 'add_market' with credentials
 //   → Rust backend:
-//       * Stores API keys in OS secure storage (keyring)
+//       * Stores API keys in local SQLite database (api_keys table)
 //       * Validates credentials against platform auth endpoint
 //       * Establishes WebSocket connection for real-time orderbook
 //       * Creates Market node in database
@@ -30,13 +33,20 @@
 //   → Right sidebar shows orderbook depth, position exposure, P&L
 //   → WebSocket streams live orderbook updates to OrderbookView component
 //
+// Stored API Keys Feature:
+// - API keys are stored in local SQLite database (api_keys table)
+// - When user selects a platform, stored keys are automatically retrieved
+// - User sees "Stored credentials found" indicator with checkbox to use them
+// - Can toggle between stored credentials and entering new ones
+// - Keys are persisted across sessions, no need to re-enter
+// - Manage stored keys via Settings modal (gear icon in toolbar)
+//
 // Security Model:
-// - API keys entered here are IMMEDIATELY passed to backend
-// - Frontend NEVER stores keys in localStorage, Redux, or React state after submit
-// - Backend stores in platform secure storage (macOS Keychain, Windows Credential Manager, Linux libsecret)
+// - API keys stored in local SQLite database (encrypted at rest recommended for production)
 // - Keys transmitted over Tauri IPC (secure, not HTTP)
+// - Frontend never persists keys in localStorage or sessionStorage
 // - Input fields use type="password" with visibility toggle
-// - Keys never appear in browser DevTools after submission
+// - Stored keys can be deleted via Settings UI
 //
 // Component Hierarchy:
 // MarketPanel (main)
@@ -292,11 +302,28 @@ import {
   EyeOff,
   RefreshCw,
   Unplug,
-  Shield
+  Shield,
+  Key
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
+
+// ============================================================================
+// API KEY TYPES
+// ============================================================================
+
+interface ApiKeyResponse {
+  platform: string;
+  has_key: boolean;
+  api_key: string | null;
+  api_secret: string | null;
+  private_key: string | null;
+  environment: string | null;
+  additional_config: Record<string, unknown> | null;
+  created_at: number | null;
+  updated_at: number | null;
+}
 
 // Platform-specific configuration metadata
 interface PlatformConfig {
@@ -322,24 +349,24 @@ const PLATFORM_CONFIGS: Record<MarketType, PlatformConfig> = {
     color: 'text-purple-400',
     bgColor: 'bg-purple-500',
     icon: Wallet,
-    description: 'Polygon-based prediction market. Trade on crypto, politics, sports outcomes.',
+    description: 'Polygon-based prediction market. Trade on crypto, politics, sports outcomes. Market data is public - API keys only needed for trading.',
     testNetAvailable: true,
     fields: [
       {
         key: 'api_key',
-        label: 'API Key',
+        label: 'API Key (Optional)',
         type: 'password',
         placeholder: 'pm_...',
-        required: true,
-        helpText: 'From Polymarket API settings page'
+        required: false,
+        helpText: 'Only needed for trading. Leave empty for read-only market data.'
       },
       {
         key: 'private_key',
-        label: 'Proxy Wallet Private Key',
+        label: 'Proxy Wallet Private Key (Optional)',
         type: 'password',
         placeholder: '0x...',
         required: false,
-        helpText: 'Optional. Required for signing transactions on-chain'
+        helpText: 'Only needed for on-chain transactions.'
       }
     ]
   },
@@ -400,6 +427,11 @@ export default function MarketPanel({
   const [environment, setEnvironment] = useState<'demo' | 'production'>('demo');
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
   
+  // Stored API key state
+  const [hasStoredKey, setHasStoredKey] = useState(false);
+  const [useStoredKey, setUseStoredKey] = useState(true);
+  const [isLoadingKey, setIsLoadingKey] = useState(false);
+  
   // UI state
   const [localError, setLocalError] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
@@ -410,10 +442,10 @@ export default function MarketPanel({
     loading: isConnecting, 
     error: apiError 
   } = useTauriCommand<Node, {
-    market_type: MarketType;
-    api_credentials: Record<string, any>;
-    market_id: string;
-  }>('add_market');
+    marketType: MarketType;
+    apiCredentials: Record<string, any>;
+    marketConfig: Record<string, any>;
+  }>('add_market_cmd');
 
   // Cleanup sensitive data on unmount or modal close
   const clearSensitiveData = useCallback(() => {
@@ -423,6 +455,8 @@ export default function MarketPanel({
     setSelectedPlatform(null);
     setStep('select');
     setShowPasswords({});
+    setHasStoredKey(false);
+    setUseStoredKey(true);
   }, []);
 
   useEffect(() => {
@@ -431,16 +465,51 @@ export default function MarketPanel({
     }
   }, [isModalOpen, clearSensitiveData]);
 
-  // Handle platform selection
-  const handlePlatformSelect = (platform: MarketType) => {
+  // Handle platform selection - check for stored keys
+  const handlePlatformSelect = async (platform: MarketType) => {
     setSelectedPlatform(platform);
     setStep('configure');
+    setIsLoadingKey(true);
+    
     // Pre-populate with empty strings for required fields
     const emptyCreds: Record<string, string> = {};
     PLATFORM_CONFIGS[platform].fields.forEach(f => {
       if (f.key !== 'environment') emptyCreds[f.key] = '';
     });
     setCredentials(emptyCreds);
+    
+    // Check for stored API key
+    try {
+      const platformName = platform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
+      const keyResponse = await invoke<ApiKeyResponse>('get_api_key_cmd', { 
+        platform: platformName 
+      });
+      
+      if (keyResponse.has_key) {
+        setHasStoredKey(true);
+        setUseStoredKey(true);
+        
+        // Pre-populate credentials from stored key
+        const storedCreds: Record<string, string> = {};
+        if (keyResponse.api_key) storedCreds.api_key = keyResponse.api_key;
+        if (keyResponse.api_secret) storedCreds.api_secret = keyResponse.api_secret;
+        if (keyResponse.private_key) storedCreds.private_key = keyResponse.private_key;
+        setCredentials(storedCreds);
+        
+        if (keyResponse.environment) {
+          setEnvironment(keyResponse.environment as 'demo' | 'production');
+        }
+      } else {
+        setHasStoredKey(false);
+        setUseStoredKey(false);
+      }
+    } catch (err) {
+      console.error('Failed to check stored API key:', err);
+      setHasStoredKey(false);
+      setUseStoredKey(false);
+    } finally {
+      setIsLoadingKey(false);
+    }
   };
 
   // Toggle password visibility for specific field
@@ -477,8 +546,24 @@ export default function MarketPanel({
 
   // Validate credentials format client-side
   const validateCredentials = (platform: MarketType, creds: Record<string, string>): boolean => {
+    // If using stored key, skip credential validation
+    if (hasStoredKey && useStoredKey) {
+      if (!marketId.trim()) {
+        setLocalError('Market ID is required');
+        return false;
+      }
+      return true;
+    }
+    
     const config = PLATFORM_CONFIGS[platform];
     for (const field of config.fields) {
+      // Skip environment field - it's validated separately from the credentials object
+      if (field.key === 'environment') {
+        // For Kalshi, environment is always set via the separate state variable
+        continue;
+      }
+      // Polymarket doesn't require API keys for market data (read-only)
+      // Only validate required fields
       if (field.required && !creds[field.key]) {
         setLocalError(`${field.label} is required`);
         return false;
@@ -506,9 +591,9 @@ export default function MarketPanel({
       };
 
       const result = await addMarket({
-        market_type: selectedPlatform,
-        api_credentials: credPayload,
-        market_id: marketId.trim()
+        marketType: selectedPlatform,
+        apiCredentials: credPayload,
+        marketConfig: { market_id: marketId.trim() }
       });
 
       if (result) {
@@ -529,7 +614,7 @@ export default function MarketPanel({
     }
     
     try {
-      await invoke('remove_market', { id: nodeId });
+      await invoke('remove_market_cmd', { nodeId });
       // Parent should refresh existingMarkets prop
     } catch (err) {
       console.error('Failed to remove market:', err);
@@ -540,7 +625,7 @@ export default function MarketPanel({
   // Refresh connection (re-establish WebSocket)
   const handleRefresh = async (nodeId: string) => {
     try {
-      await invoke('refresh_market_connection', { id: nodeId });
+      await invoke('refresh_market_connection_cmd', { nodeId });
     } catch (err) {
       console.error('Failed to refresh:', err);
     }
@@ -707,6 +792,37 @@ export default function MarketPanel({
                     ← Back to platforms
                   </button>
 
+                  {/* Stored Key Indicator */}
+                  {isLoadingKey ? (
+                    <div className="flex items-center gap-2 p-3 bg-gray-800/50 rounded-lg">
+                      <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+                      <span className="text-sm text-gray-400">Checking for stored credentials...</span>
+                    </div>
+                  ) : hasStoredKey ? (
+                    <div className="flex items-center justify-between p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
+                      <div className="flex items-center gap-2">
+                        <Key className="w-4 h-4 text-emerald-400" />
+                        <span className="text-sm text-emerald-300">Stored credentials found</span>
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={useStoredKey}
+                          onChange={(e) => setUseStoredKey(e.target.checked)}
+                          className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-gray-900"
+                        />
+                        <span className="text-sm text-gray-300">Use stored</span>
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 p-3 bg-gray-800/50 rounded-lg">
+                      <Key className="w-4 h-4 text-gray-500" />
+                      <span className="text-sm text-gray-400">
+                        No stored credentials. Enter your API keys below.
+                      </span>
+                    </div>
+                  )}
+
                   {/* Market ID Input */}
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">
@@ -724,51 +840,64 @@ export default function MarketPanel({
                     </p>
                   </div>
 
-                  {/* Credential Fields */}
-                  <div className="space-y-4">
-                    {PLATFORM_CONFIGS[selectedPlatform].fields.map((field) => (
-                      <div key={field.key}>
-                        <label className="block text-sm font-medium text-gray-300 mb-2">
-                          {field.label}
-                          {field.required && <span className="text-red-400 ml-1">*</span>}
-                        </label>
-                        
-                        {field.type === 'select' ? (
-                          <select
-                            value={environment}
-                            onChange={(e) => setEnvironment(e.target.value as 'demo' | 'production')}
-                            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors"
+                  {/* Credential Fields - show if no stored key or user wants to enter new */}
+                  {(!hasStoredKey || !useStoredKey) && (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-sm font-medium text-gray-300">API Credentials</h4>
+                        {hasStoredKey && (
+                          <button
+                            onClick={() => setUseStoredKey(true)}
+                            className="text-xs text-emerald-400 hover:text-emerald-300"
                           >
-                            <option value="demo">Demo (Paper Trading)</option>
-                            <option value="production">Production (Real Money)</option>
-                          </select>
-                        ) : (
-                          <div className="relative">
-                            <input
-                              type={field.type === 'password' && !showPasswords[field.key] ? 'password' : 'text'}
-                              value={credentials[field.key] || ''}
-                              onChange={(e) => handleCredentialChange(field.key, e.target.value)}
-                              placeholder={field.placeholder}
-                              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors pr-10"
-                            />
-                            {field.type === 'password' && (
-                              <button
-                                type="button"
-                                onClick={() => togglePasswordVisibility(field.key)}
-                                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
-                              >
-                                {showPasswords[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                              </button>
-                            )}
-                          </div>
-                        )}
-                        
-                        {field.helpText && (
-                          <p className="mt-1.5 text-xs text-gray-500">{field.helpText}</p>
+                            Use stored instead
+                          </button>
                         )}
                       </div>
-                    ))}
-                  </div>
+                      {PLATFORM_CONFIGS[selectedPlatform].fields.map((field) => (
+                        <div key={field.key}>
+                          <label className="block text-sm font-medium text-gray-300 mb-2">
+                            {field.label}
+                            {field.required && <span className="text-red-400 ml-1">*</span>}
+                          </label>
+                          
+                          {field.type === 'select' ? (
+                            <select
+                              value={environment}
+                              onChange={(e) => setEnvironment(e.target.value as 'demo' | 'production')}
+                              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors"
+                            >
+                              <option value="demo">Demo (Paper Trading)</option>
+                              <option value="production">Production (Real Money)</option>
+                            </select>
+                          ) : (
+                            <div className="relative">
+                              <input
+                                type={field.type === 'password' && !showPasswords[field.key] ? 'password' : 'text'}
+                                value={credentials[field.key] || ''}
+                                onChange={(e) => handleCredentialChange(field.key, e.target.value)}
+                                placeholder={field.placeholder}
+                                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors pr-10"
+                              />
+                              {field.type === 'password' && (
+                                <button
+                                  type="button"
+                                  onClick={() => togglePasswordVisibility(field.key)}
+                                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                                >
+                                  {showPasswords[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          
+                          {field.helpText && (
+                            <p className="mt-1.5 text-xs text-gray-500">{field.helpText}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Error Display */}
                   {(localError || apiError) && (

@@ -30,14 +30,46 @@
 // │                 │                          │  collapsible    │
 // │  • SourcePanel  │      Node Graph          │                 │
 // │  • MarketPanel  │      Visualization       │  • NodeDetails  │
-// │  • QuickActions │                          │  • Orderbook    │
-// │                 │                          │  • Analytics    │
+// │  • QuickActions │                          │  • RawStream    │
+// │                 │                          │  • Orderbook    │
 // ├─────────────────┴──────────────────────────┴─────────────────┤
 // │                    Bottom Panel (200-300px)                   │
 // │                                                               │
 // │  • PositionMonitor    • PerformanceMetrics    • SystemStatus  │
 // │                                                               │
 // └───────────────────────────────────────────────────────────────┘
+//
+// RIGHT SIDEBAR - NODE DETAIL PANEL:
+//
+// The right sidebar displays detailed information about the selected node
+// with a tabbed interface:
+//
+// Tabs:
+//   - Details: Shows node ID, type, position, connections, and metadata
+//   - Raw Stream: Shows real-time input data stream for debugging
+//
+// SETTINGS MODAL:
+//
+// The settings modal (gear icon in toolbar) provides access to:
+//   - API Key Management: Store credentials for Polymarket and Kalshi
+//   - Stored keys are automatically retrieved when adding markets
+//   - Keys are persisted in local SQLite database
+//
+// TOOLBAR:
+//
+// The toolbar contains:
+//   - Details button: Toggle right sidebar visibility
+//   - Positions button: Toggle bottom panel visibility
+//   - Settings button (gear): Open settings modal for API key management
+//   - Help button (?): Show help overlay
+//
+// Raw Stream Tab (RawStreamTab component):
+//   - Displays connection status indicator (green = connected, gray = none)
+//   - Shows count of incoming/outgoing connections
+//   - Lists recent raw data entries received by the node
+//   - Each entry shows: timestamp, source, status, and JSON payload
+//   - Useful for verifying node connectivity and debugging data flow
+//   - Data stored in nodesSlice.rawDataStreams (capped at 50 entries/node)
 //
 // RESPONSIVE BEHAVIOR:
 //
@@ -50,12 +82,14 @@
 // Local UI State (useState):
 //   - Panel visibility toggles
 //   - Selected node for detail view
+//   - Active tab in detail panel ('details' | 'raw-stream')
 //   - Canvas viewport state (if not in global store)
 //   - Modal/dialog open states
 //
 // Global State (Zustand store):
 //   - nodes: All graph nodes from nodesSlice
 //   - connections: All graph edges from nodesSlice
+//   - rawDataStreams: Raw input stream data per node
 //   - openPositions: Trading positions from positionsSlice
 //   - markets: Connected exchanges from marketsSlice
 //
@@ -103,17 +137,24 @@ import { useStore, type StoreState } from './store';
 // Tauri imports
 import { invoke } from '@tauri-apps/api/core';
 
+// API utilities
+import { removeNode as removeNodeFromDb } from './utils/api';
+
 // Layout components
 import Canvas from './components/Canvas/Canvas';
 import SourcePanel from './components/InfoSources/SourcePanel';
 import MarketPanel from './components/Markets/MarketPanel';
+import GlobalOrderbookOverlay from './components/Markets/GlobalOrderbookOverlay';
 import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
+import ApiKeySettings from './components/Settings/ApiKeySettings';
+import { NodeDataPanel } from './components/Nodes/NodeDataPanel';
 
 // UI components
 import { Modal } from './components/UI/Modal';
 
 // Types
 import { Node, NodeId, NodeType, InfoSourceType, MarketType } from './types/nodes';
+import type { RawStreamEntry } from './store/nodesSlice';
 
 // =============================================================================
 // LAYOUT CONSTANTS
@@ -132,6 +173,570 @@ const BREAKPOINTS = {
   tablet: 1024,
   desktop: 1400,
 };
+
+// =============================================================================
+// NODE DETAILS PANEL COMPONENT
+// =============================================================================
+
+/**
+ * Component to display detailed information about a selected node.
+ * Shows monitoring sources/markets, connections, and metadata in a user-friendly format.
+ */
+function NodeDetailsPanel({ 
+  node, 
+  connections, 
+  nodes 
+}: { 
+  node: Node | null; 
+  connections: { source: string; target: string; strength?: number }[];
+  nodes: Record<string, Node>;
+}): ReactNode {
+  if (!node) {
+    return (
+      <div className="text-gray-500 text-center py-8">
+        <p>No node selected</p>
+      </div>
+    );
+  }
+
+  // Cast metadata to flexible type for accessing various properties
+  const metadata = node.metadata as Record<string, any>;
+  
+  // Determine node type information
+  const isInfoSource = node.node_type && 'InfoSource' in node.node_type;
+  const isMarket = node.node_type && 'Market' in node.node_type;
+  const isAnalyzer = node.node_type && 'Analyzer' in node.node_type;
+  const isAlert = node.node_type && 'Alert' in node.node_type;
+
+  // Get the subtype
+  const nodeSubtype = isInfoSource 
+    ? (node.node_type as { InfoSource: string }).InfoSource
+    : isMarket 
+    ? (node.node_type as { Market: string }).Market
+    : isAnalyzer
+    ? (node.node_type as { Analyzer: string }).Analyzer
+    : isAlert
+    ? (node.node_type as { Alert: string }).Alert
+    : 'Unknown';
+
+  // Get human-readable type name
+  const getTypeDisplayName = (type: string): string => {
+    const typeNames: Record<string, string> = {
+      // Info Sources
+      'CryptoPrices': 'Cryptocurrency Prices',
+      'FinancialPrices': 'Financial Markets',
+      'CommodityPrices': 'Commodity Prices',
+      'NewsSource': 'News Feed',
+      'SocialMedia': 'Social Media',
+      'Weather': 'Weather Data',
+      'Livestream': 'Livestream Metrics',
+      'EconomicIndicators': 'Economic Indicators',
+      'OnChainData': 'On-Chain Data',
+      'CustomAPI': 'Custom API',
+      // Markets
+      'Polymarket': 'Polymarket',
+      'Kalshi': 'Kalshi',
+      // Analyzers
+      'Correlation': 'Correlation Analyzer',
+      'MovingAverage': 'Moving Average',
+      'Sentiment': 'Sentiment Analyzer',
+      'Arbitrage': 'Arbitrage Detector',
+      'Custom': 'Custom Analyzer',
+      // Alerts
+      'PriceThreshold': 'Price Threshold Alert',
+      'CorrelationChange': 'Correlation Change Alert',
+      'Webhook': 'Webhook Alert',
+      'Desktop': 'Desktop Notification',
+    };
+    return typeNames[type] || type;
+  };
+
+  // Get monitoring targets based on node type and metadata
+  const getMonitoringInfo = (): { label: string; items: string[] } | null => {
+    if (isInfoSource) {
+      // Info Source nodes monitor specific data sources
+      const subtype = (node.node_type as { InfoSource: string }).InfoSource;
+      
+      switch (subtype) {
+        case 'CryptoPrices':
+          return {
+            label: 'Monitoring Cryptos',
+            items: metadata.symbols || ['BTC', 'ETH', 'SOL'],
+          };
+        case 'FinancialPrices':
+          return {
+            label: 'Monitoring Stocks',
+            items: metadata.symbols || metadata.tickers || ['SPY', 'QQQ'],
+          };
+        case 'CommodityPrices':
+          return {
+            label: 'Monitoring Commodities',
+            items: metadata.symbols || ['Gold', 'Oil', 'Silver'],
+          };
+        case 'NewsSource':
+          return {
+            label: 'News Sources',
+            items: metadata.feeds || metadata.sources || ['Reuters', 'AP', 'Bloomberg'],
+          };
+        case 'SocialMedia':
+          return {
+            label: 'Social Platforms',
+            items: metadata.platforms || ['Twitter/X', 'Reddit'],
+          };
+        case 'Weather':
+          return {
+            label: 'Locations',
+            items: metadata.locations || metadata.symbols || ['NYC', 'London'],
+          };
+        case 'Livestream':
+          return {
+            label: 'Platforms',
+            items: metadata.platforms || ['YouTube', 'Twitch'],
+          };
+        case 'EconomicIndicators':
+          return {
+            label: 'Indicators',
+            items: metadata.indicators || ['CPI', 'Unemployment', 'GDP'],
+          };
+        case 'OnChainData':
+          return {
+            label: 'Metrics',
+            items: metadata.metrics || ['Transaction Volume', 'Gas Fees'],
+          };
+        case 'CustomAPI':
+          return {
+            label: 'Endpoints',
+            items: metadata.endpoints || [metadata.endpoint || 'Custom API'],
+          };
+        default:
+          return {
+            label: 'Data Sources',
+            items: metadata.symbols || metadata.sources || ['Unknown'],
+          };
+      }
+    }
+    
+    if (isMarket) {
+      // Market nodes monitor specific markets on exchanges
+      const subtype = (node.node_type as { Market: string }).Market;
+      const marketId = metadata.marketId || metadata.market_id;
+      const question = metadata.question || metadata.marketQuestion;
+      
+      const items: string[] = [];
+      
+      if (question) {
+        items.push(question);
+      }
+      if (marketId) {
+        items.push(`Market ID: ${marketId}`);
+      }
+      if (metadata.symbols) {
+        items.push(...metadata.symbols);
+      }
+      
+      // If no specific market info, show exchange name
+      if (items.length === 0) {
+        items.push(subtype === 'Polymarket' ? 'Prediction Markets' : 'Event Contracts');
+      }
+      
+      return {
+        label: subtype === 'Polymarket' ? 'Polymarket Markets' : 'Kalshi Markets',
+        items,
+      };
+    }
+    
+    if (isAnalyzer) {
+      // Analyzer nodes process data from connected sources
+      const inputs = metadata.inputs || [];
+      const inputNodes = inputs.map((id: string) => {
+        const inputNode = nodes[id];
+        const inputMeta = inputNode?.metadata as Record<string, any> | undefined;
+        return inputMeta?.name || inputNode?.name || inputNode?.id || id;
+      });
+      
+      return {
+        label: 'Analyzing From',
+        items: inputNodes.length > 0 ? inputNodes : ['No inputs configured'],
+      };
+    }
+    
+    if (isAlert) {
+      // Alert nodes monitor specific conditions
+      const condition = metadata.condition;
+      if (condition) {
+        const sourceNode = nodes[condition.sourceId];
+        const sourceMeta = sourceNode?.metadata as Record<string, any> | undefined;
+        return {
+          label: 'Watching',
+          items: [
+            sourceMeta?.name || sourceNode?.name || sourceNode?.id || condition.sourceId || 'Unknown source',
+            `Condition: ${condition.operator} ${condition.threshold}`,
+          ],
+        };
+      }
+      return {
+        label: 'Alert Status',
+        items: ['Not configured'],
+      };
+    }
+    
+    return null;
+  };
+
+  // Get connected nodes info
+  const incomingConnections = connections.filter(conn => conn.target === node.id);
+  const outgoingConnections = connections.filter(conn => conn.source === node.id);
+  
+  const incomingNodes = incomingConnections.map(conn => ({
+    node: nodes[conn.source],
+    strength: conn.strength,
+  })).filter(c => c.node);
+  
+  const outgoingNodes = outgoingConnections.map(conn => ({
+    node: nodes[conn.target],
+    strength: conn.strength,
+  })).filter(c => c.node);
+
+  const monitoringInfo = getMonitoringInfo();
+
+  return (
+    <div className="text-gray-300 text-sm space-y-4">
+      {/* Node Type Header */}
+      <div className="pb-3 border-b border-gray-700">
+        <div className="flex items-center gap-2 mb-1">
+          <div className={`w-3 h-3 rounded-full ${isInfoSource ? 'bg-blue-500' : isMarket ? 'bg-emerald-500' : 'bg-purple-500'}`} />
+          <span className="font-semibold text-white">{metadata?.name || node.name || node.id?.slice(0, 12) || 'Unknown'}</span>
+        </div>
+        <p className="text-xs text-gray-500">
+          {isInfoSource ? '📊 Information Source' : isMarket ? '📈 Prediction Market' : isAnalyzer ? '🔍 Analyzer' : isAlert ? '🔔 Alert' : 'Node'}
+        </p>
+      </div>
+
+      {/* Monitoring Info - The key new feature */}
+      {monitoringInfo && (
+        <div className="bg-gray-800/50 rounded-lg p-3">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">{monitoringInfo.label}</h3>
+          <div className="flex flex-wrap gap-1.5">
+            {monitoringInfo.items.map((item, idx) => (
+              <span 
+                key={idx}
+                className={`px-2 py-1 rounded text-xs font-medium ${
+                  isInfoSource 
+                    ? 'bg-blue-900/50 text-blue-300 border border-blue-700/50' 
+                    : isMarket 
+                    ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-700/50'
+                    : 'bg-purple-900/50 text-purple-300 border border-purple-700/50'
+                }`}
+              >
+                {item}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Connection Info */}
+      <div className="bg-gray-800/50 rounded-lg p-3">
+        <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Connections</h3>
+        
+        {incomingNodes.length > 0 && (
+          <div className="mb-2">
+            <p className="text-xs text-gray-500 mb-1">Receiving from:</p>
+            <div className="space-y-1">
+              {incomingNodes.map(({ node: n, strength }, idx) => {
+                const nMeta = n?.metadata as Record<string, any> | undefined;
+                return (
+                  <div key={idx} className="flex items-center gap-2 text-xs">
+                    <div className="w-2 h-2 rounded-full bg-blue-500" />
+                    <span className="text-blue-300">{nMeta?.name || n?.name || n?.id?.slice(0, 8)}</span>
+                    {strength && (
+                      <span className="text-gray-600">({Math.round(strength * 100)}%)</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        
+        {outgoingNodes.length > 0 && (
+          <div>
+            <p className="text-xs text-gray-500 mb-1">Sending to:</p>
+            <div className="space-y-1">
+              {outgoingNodes.map(({ node: n, strength }, idx) => {
+                const nMeta = n?.metadata as Record<string, any> | undefined;
+                return (
+                  <div key={idx} className="flex items-center gap-2 text-xs">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span className="text-emerald-300">{nMeta?.name || n?.name || n?.id?.slice(0, 8)}</span>
+                    {strength && (
+                      <span className="text-gray-600">({Math.round(strength * 100)}%)</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        
+        {incomingNodes.length === 0 && outgoingNodes.length === 0 && (
+          <p className="text-xs text-gray-500">No connections</p>
+        )}
+      </div>
+
+      {/* Configuration Details */}
+      <div className="bg-gray-800/50 rounded-lg p-3">
+        <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Configuration</h3>
+        <div className="space-y-1 text-xs">
+          <div className="flex justify-between">
+            <span className="text-gray-500">Type:</span>
+            <span className="text-gray-300">{getTypeDisplayName(nodeSubtype)}</span>
+          </div>
+          {metadata?.updateIntervalSeconds && (
+            <div className="flex justify-between">
+              <span className="text-gray-500">Update Interval:</span>
+              <span className="text-gray-300">{metadata.updateIntervalSeconds}s</span>
+            </div>
+          )}
+          {metadata?.exchange && (
+            <div className="flex justify-between">
+              <span className="text-gray-500">Exchange:</span>
+              <span className="text-gray-300">{metadata.exchange}</span>
+            </div>
+          )}
+          {metadata?.autoTrade !== undefined && (
+            <div className="flex justify-between">
+              <span className="text-gray-500">Auto Trade:</span>
+              <span className={metadata.autoTrade ? 'text-green-400' : 'text-gray-400'}>
+                {metadata.autoTrade ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
+          )}
+          {metadata?.trading?.maxPositionSize && (
+            <div className="flex justify-between">
+              <span className="text-gray-500">Max Position:</span>
+              <span className="text-gray-300">{metadata.trading.maxPositionSize} contracts</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Technical Details (collapsible) */}
+      <details className="bg-gray-800/30 rounded-lg">
+        <summary className="p-3 cursor-pointer text-xs font-semibold text-gray-400 uppercase hover:bg-gray-800/50 rounded-lg">
+          Technical Details
+        </summary>
+        <div className="px-3 pb-3 space-y-1 text-xs">
+          <div className="flex justify-between">
+            <span className="text-gray-500">ID:</span>
+            <span className="text-gray-400 font-mono">{node.id}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-500">Position:</span>
+            <span className="text-gray-400">[{node.position?.[0]?.toFixed(0) ?? 0}, {node.position?.[1]?.toFixed(0) ?? 0}]</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-500">Created:</span>
+            <span className="text-gray-400">{node.createdAt ? new Date(node.createdAt).toLocaleString() : 'N/A'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-500">Updated:</span>
+            <span className="text-gray-400">{node.updatedAt ? new Date(node.updatedAt).toLocaleString() : 'N/A'}</span>
+          </div>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+// =============================================================================
+// RAW STREAM TAB COMPONENT
+// =============================================================================
+
+/**
+ * Component to display raw input stream data for a node.
+ * Shows recent data entries to verify node connectivity and data flow.
+ */
+function RawStreamTab({ nodeId }: { nodeId: string | undefined }): ReactNode {
+  const rawDataStreams = useStore((state: StoreState) => state.rawDataStreams);
+  const appendRawDataEntry = useStore((state: StoreState) => state.appendRawDataEntry);
+  const clearRawDataStream = useStore((state: StoreState) => state.clearRawDataStream);
+  const connections = useStore((state: StoreState) => state.connections);
+  const nodes = useStore((state: StoreState) => state.nodes);
+  
+  // Get stream data for this node
+  const streamData = nodeId ? (rawDataStreams[nodeId] || []) : [];
+  
+  // Check if node has incoming connections (is receiving data)
+  const incomingConnections = connections.filter(conn => conn.target === nodeId);
+  const outgoingConnections = connections.filter(conn => conn.source === nodeId);
+  
+  // Get the current node to check its type
+  const node = nodeId ? nodes[nodeId] : null;
+  const isInfoSource = node?.node_type && 'InfoSource' in node.node_type;
+  const isMarket = node?.node_type && 'Market' in node.node_type;
+  
+  // Simulate data for demo purposes
+  // InfoSource nodes always generate data (they are data sources)
+  // Market nodes only show data when they have incoming connections
+  useEffect(() => {
+    if (!nodeId || !node) return;
+    
+    // InfoSource nodes always generate their own data stream
+    // Market nodes need incoming connections to receive data
+    const shouldSimulateData = isInfoSource || (isMarket && incomingConnections.length > 0);
+    
+    if (shouldSimulateData) {
+      const interval = setInterval(() => {
+        if (isInfoSource && node.node_type && 'InfoSource' in node.node_type) {
+          // Info sources generate data - simulate based on source subtype
+          const subtype = (node.node_type as { InfoSource: string }).InfoSource;
+          
+          if (subtype === 'CryptoPrices') {
+            appendRawDataEntry(nodeId, {
+              data: {
+                type: 'price_update',
+                symbol: ['BTC', 'ETH', 'SOL'][Math.floor(Math.random() * 3)],
+                price: Math.random() * 50000 + 20000,
+                change: (Math.random() - 0.5) * 5,
+                volume: Math.floor(Math.random() * 1000000),
+              },
+              source: 'binance_websocket',
+              status: 'success',
+            });
+          } else if (subtype === 'NewsSource') {
+            appendRawDataEntry(nodeId, {
+              data: {
+                type: 'news_article',
+                title: ['Market Update', 'Fed Decision', 'Crypto News'][Math.floor(Math.random() * 3)],
+                source: ['Reuters', 'Bloomberg', 'CNBC'][Math.floor(Math.random() * 3)],
+                sentiment: Math.random() > 0.5 ? 'bullish' : 'bearish',
+              },
+              source: 'news_feed',
+              status: 'success',
+            });
+          } else {
+            // Generic info source data
+            appendRawDataEntry(nodeId, {
+              data: {
+                type: 'data_update',
+                value: Math.random() * 100,
+                timestamp: Date.now(),
+              },
+              source: 'polling',
+              status: 'success',
+            });
+          }
+        } else if (isMarket) {
+          // Markets receive data from connected sources
+          appendRawDataEntry(nodeId, {
+            data: {
+              type: 'market_data',
+              bestBid: Math.random() * 0.5 + 0.25,
+              bestAsk: Math.random() * 0.5 + 0.5,
+              volume: Math.floor(Math.random() * 10000),
+            },
+            source: 'connected_sources',
+            status: 'success',
+          });
+        }
+      }, 2000); // Every 2 seconds
+      
+      return () => clearInterval(interval);
+    }
+  }, [nodeId, node, isInfoSource, isMarket, incomingConnections.length, appendRawDataEntry]);
+  
+  const handleClearStream = () => {
+    if (nodeId) {
+      clearRawDataStream(nodeId);
+    }
+  };
+  
+  return (
+    <div className="text-sm">
+      {/* Connection Status */}
+      <div className="mb-4 p-3 bg-gray-800/50 rounded-lg">
+        <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Connection Status</h3>
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${
+            incomingConnections.length > 0 || outgoingConnections.length > 0
+              ? 'bg-green-500 animate-pulse'
+              : 'bg-gray-500'
+          }`} />
+          <span className="text-gray-300">
+            {incomingConnections.length > 0 || outgoingConnections.length > 0
+              ? 'Connected'
+              : 'No connections'}
+          </span>
+        </div>
+        <div className="mt-2 text-xs text-gray-500">
+          <span className="text-blue-400">{incomingConnections.length}</span> incoming ·{' '}
+          <span className="text-emerald-400">{outgoingConnections.length}</span> outgoing
+        </div>
+      </div>
+      
+      {/* Stream Header */}
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-gray-400 uppercase">
+          Raw Input Stream ({streamData.length} entries)
+        </h3>
+        {streamData.length > 0 && (
+          <button
+            onClick={handleClearStream}
+            className="text-xs text-red-400 hover:text-red-300 transition-colors"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      
+      {/* Stream Entries */}
+      <div className="space-y-2 max-h-80 overflow-y-auto">
+        {streamData.length === 0 ? (
+          <div className="text-gray-500 text-center py-8">
+            <svg className="w-8 h-8 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <p>No data received yet</p>
+            <p className="text-xs mt-1">Connect nodes to see data flow</p>
+          </div>
+        ) : (
+          streamData.map((entry: RawStreamEntry, index: number) => (
+            <div
+              key={`${entry.timestamp}-${index}`}
+              className="p-2 bg-gray-800/30 rounded border border-gray-700/50"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-gray-500">
+                  {new Date(entry.timestamp).toLocaleTimeString()}
+                </span>
+                <div className="flex items-center gap-2">
+                  {entry.source && (
+                    <span className="text-xs px-1.5 py-0.5 bg-gray-700 rounded text-gray-400">
+                      {entry.source}
+                    </span>
+                  )}
+                  {entry.status && (
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      entry.status === 'success' ? 'bg-green-900/50 text-green-400' :
+                      entry.status === 'error' ? 'bg-red-900/50 text-red-400' :
+                      'bg-yellow-900/50 text-yellow-400'
+                    }`}>
+                      {entry.status}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <pre className="text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-all">
+                {JSON.stringify(entry.data, null, 2)}
+              </pre>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
 
 // =============================================================================
 // MAIN APPLICATION COMPONENT
@@ -393,6 +998,19 @@ function App(): ReactNode {
   /** Help modal visibility */
   const [showHelp, setShowHelp] = useState(false);
   
+  /** Settings modal visibility */
+  const [showSettings, setShowSettings] = useState(false);
+  
+  /** Orderbook overlay state */
+  const [orderbookOverlay, setOrderbookOverlay] = useState<{
+    marketId: string;
+    platform: 'polymarket' | 'kalshi';
+    marketQuestion?: string;
+  } | null>(null);
+  
+  /** Active tab in node detail panel */
+  const [detailPanelTab, setDetailPanelTab] = useState<'details' | 'raw-stream' | 'stored-data'>('details');
+  
   /** Window size for responsive behavior */
   const [windowSize, setWindowSize] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1200,
@@ -519,6 +1137,25 @@ function App(): ReactNode {
     updateNodePosition(id, position);
   }, []);
 
+  /** Handle node deletion from Canvas */
+  const handleNodeDelete = useCallback(async (id: string) => {
+    // First, remove from local state
+    const { removeNode } = useStore.getState();
+    removeNode(id);
+    
+    // Then, persist to database
+    try {
+      const result = await removeNodeFromDb(id);
+      if (!result.ok) {
+        console.error('Failed to delete node from database:', result.error);
+        // Note: Node is already removed from local state
+        // On app reload, it would reappear if DB delete failed
+      }
+    } catch (error) {
+      console.error('Error deleting node from database:', error);
+    }
+  }, []);
+
   /** Handle canvas background click (deselect) */
   const handleCanvasBackgroundClick = useCallback(() => {
     clearSelection();
@@ -528,6 +1165,16 @@ function App(): ReactNode {
   const handleViewportChange = useCallback((newViewport: { x: number; y: number; zoom: number }) => {
     setViewport(newViewport);
   }, [setViewport]);
+
+  /** Handle opening orderbook overlay for market nodes */
+  const handleOpenOrderbook = useCallback((marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => {
+    setOrderbookOverlay({ marketId, platform, marketQuestion });
+  }, []);
+
+  /** Handle closing orderbook overlay */
+  const handleCloseOrderbook = useCallback(() => {
+    setOrderbookOverlay(null);
+  }, []);
 
   /** Toggle right sidebar */
   const toggleRightSidebar = useCallback(() => {
@@ -587,19 +1234,29 @@ function App(): ReactNode {
         {!leftSidebarCollapsed && (
           <div className="flex-1 overflow-y-auto p-4 space-y-6">
             <SourcePanel 
-              onAddSource={(node) => {
-                // Add node with safe defaults for missing fields
-                addNode({
-                  ...node,
-                  connections: node.connections || [],
-                  createdAt: node.createdAt || Date.now(),
-                  updatedAt: node.updatedAt || Date.now(),
-                });
-                // Center on the new node
+              onAddSource={(result: any) => {
+                // Backend returns { node: Node, success: boolean } - extract the actual node
+                const rawNode = result.node || result;
+                // Transform node type format from backend to frontend format
+                const node = transformNodeFromBackend(rawNode);
+                // Add node to store
+                addNode(node);
+                // Select the new node
                 selectNode(node.id, false);
               }}
             />
-            <MarketPanel />
+            <MarketPanel 
+              onAddMarket={(result: any) => {
+                // Backend returns { node: Node, success: boolean } - extract the actual node
+                const rawNode = result.node || result;
+                // Transform node type format from backend to frontend format
+                const node = transformNodeFromBackend(rawNode);
+                // Add node to store
+                addNode(node);
+                // Select the new node
+                selectNode(node.id, false);
+              }}
+            />
           </div>
         )}
 
@@ -633,6 +1290,16 @@ function App(): ReactNode {
           </button>
           <div className="flex-1" />
           <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 hover:bg-gray-800 rounded-lg text-gray-400"
+            title="Settings"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+          <button
             onClick={() => setShowHelp(true)}
             className="p-2 hover:bg-gray-800 rounded-lg text-gray-400"
             title="Help"
@@ -652,8 +1319,10 @@ function App(): ReactNode {
             selectedNodeId={selectedNode?.id || null}
             onNodeClick={handleNodeClick}
             onNodeMove={handleNodeMove}
+            onNodeDelete={handleNodeDelete}
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
+            onOpenOrderbook={handleOpenOrderbook}
           />
         </div>
 
@@ -698,14 +1367,57 @@ function App(): ReactNode {
               </svg>
             </button>
           </div>
+          
+          {/* Tab Navigation */}
+          <div className="flex border-b border-gray-800">
+            <button
+              onClick={() => setDetailPanelTab('details')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
+                detailPanelTab === 'details'
+                  ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/30'
+              }`}
+            >
+              Details
+            </button>
+            <button
+              onClick={() => setDetailPanelTab('raw-stream')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
+                detailPanelTab === 'raw-stream'
+                  ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/30'
+              }`}
+            >
+              Raw Stream
+            </button>
+            <button
+              onClick={() => setDetailPanelTab('stored-data')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
+                detailPanelTab === 'stored-data'
+                  ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/30'
+              }`}
+            >
+              Stored Data
+            </button>
+          </div>
+          
+          {/* Tab Content */}
           <div className="flex-1 overflow-y-auto p-4">
-            <div className="text-gray-400 text-sm">
-              <p className="mb-2"><strong>ID:</strong> {selectedNode?.id || 'N/A'}</p>
-              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode?.node_type || {})}</p>
-              <p className="mb-2"><strong>Position:</strong> [{selectedNode?.position?.[0] ?? 0}, {selectedNode?.position?.[1] ?? 0}]</p>
-              <p className="mb-2"><strong>Connections:</strong> {selectedNode?.connections?.length ?? 0}</p>
-              <p className="mb-2"><strong>Created:</strong> {selectedNode?.createdAt ? new Date(selectedNode.createdAt).toLocaleString() : 'N/A'}</p>
-            </div>
+            {detailPanelTab === 'details' ? (
+              <NodeDetailsPanel 
+                node={selectedNode} 
+                connections={connections}
+                nodes={nodes}
+              />
+            ) : detailPanelTab === 'raw-stream' ? (
+              <RawStreamTab nodeId={selectedNode?.id} />
+            ) : (
+              <NodeDataPanel 
+                nodeId={selectedNode.id} 
+                nodeType={selectedNode.node_type && 'InfoSource' in selectedNode.node_type ? 'InfoSource' : 'Market'}
+              />
+            )}
           </div>
         </aside>
       )}
@@ -715,6 +1427,41 @@ function App(): ReactNode {
         <span>Ready</span>
         <span className="ml-auto">{layoutMode} mode</span>
       </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-900 rounded-xl border border-gray-800 shadow-2xl w-full max-w-lg max-h-[80vh] overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-white">Settings</h2>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="text-gray-400 hover:text-white transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            {/* Modal Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              <ApiKeySettings />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Global Orderbook Overlay */}
+      {orderbookOverlay && (
+        <GlobalOrderbookOverlay
+          marketId={orderbookOverlay.marketId}
+          platform={orderbookOverlay.platform}
+          marketQuestion={orderbookOverlay.marketQuestion}
+          onClose={handleCloseOrderbook}
+        />
+      )}
     </div>
   );
 
@@ -739,17 +1486,21 @@ function App(): ReactNode {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-6">
             <SourcePanel 
-              onAddSource={(node) => {
-                addNode({
-                  ...node,
-                  connections: node.connections || [],
-                  createdAt: node.createdAt || Date.now(),
-                  updatedAt: node.updatedAt || Date.now(),
-                });
+              onAddSource={(result: any) => {
+                const rawNode = result.node || result;
+                const node = transformNodeFromBackend(rawNode);
+                addNode(node);
                 selectNode(node.id, false);
               }}
             />
-            <MarketPanel />
+            <MarketPanel 
+              onAddMarket={(result: any) => {
+                const rawNode = result.node || result;
+                const node = transformNodeFromBackend(rawNode);
+                addNode(node);
+                selectNode(node.id, false);
+              }}
+            />
           </div>
         </div>
       </aside>
@@ -778,6 +1529,7 @@ function App(): ReactNode {
             selectedNodeId={selectedNode?.id || null}
             onNodeClick={handleNodeClick}
             onNodeMove={handleNodeMove}
+            onNodeDelete={handleNodeDelete}
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
           />
@@ -824,13 +1576,11 @@ function App(): ReactNode {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4">
-              <div className="text-gray-400 text-sm">
-                <p className="mb-2"><strong>ID:</strong> {selectedNode?.id || 'N/A'}</p>
-                <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode?.node_type || {})}</p>
-                <p className="mb-2"><strong>Position:</strong> [{selectedNode?.position?.[0] ?? 0}, {selectedNode?.position?.[1] ?? 0}]</p>
-                <p className="mb-2"><strong>Connections:</strong> {selectedNode?.connections?.length ?? 0}</p>
-                <p className="mb-2"><strong>Created:</strong> {selectedNode?.createdAt ? new Date(selectedNode.createdAt).toLocaleString() : 'N/A'}</p>
-              </div>
+              <NodeDetailsPanel 
+                node={selectedNode} 
+                connections={connections}
+                nodes={nodes}
+              />
             </div>
           </aside>
         </div>
@@ -881,6 +1631,7 @@ function App(): ReactNode {
               setMobileActiveTab('details');
             }}
             onNodeMove={handleNodeMove}
+            onNodeDelete={handleNodeDelete}
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
           />
@@ -889,29 +1640,31 @@ function App(): ReactNode {
         {mobileActiveTab === 'controls' && (
           <div className="h-full overflow-y-auto p-4 space-y-6">
             <SourcePanel 
-              onAddSource={(node) => {
-                addNode({
-                  ...node,
-                  connections: node.connections || [],
-                  createdAt: node.createdAt || Date.now(),
-                  updatedAt: node.updatedAt || Date.now(),
-                });
+              onAddSource={(result: any) => {
+                const rawNode = result.node || result;
+                const node = transformNodeFromBackend(rawNode);
+                addNode(node);
                 selectNode(node.id, false);
               }}
             />
-            <MarketPanel />
+            <MarketPanel 
+              onAddMarket={(result: any) => {
+                const rawNode = result.node || result;
+                const node = transformNodeFromBackend(rawNode);
+                addNode(node);
+                selectNode(node.id, false);
+              }}
+            />
           </div>
         )}
         
         {mobileActiveTab === 'details' && selectedNode ? (
           <div className="h-full overflow-y-auto p-4">
-            <div className="text-gray-400 text-sm">
-              <p className="mb-2"><strong>ID:</strong> {selectedNode?.id || 'N/A'}</p>
-              <p className="mb-2"><strong>Type:</strong> {JSON.stringify(selectedNode?.node_type || {})}</p>
-              <p className="mb-2"><strong>Position:</strong> [{selectedNode?.position?.[0] ?? 0}, {selectedNode?.position?.[1] ?? 0}]</p>
-              <p className="mb-2"><strong>Connections:</strong> {selectedNode?.connections?.length ?? 0}</p>
-              <p className="mb-2"><strong>Created:</strong> {selectedNode?.createdAt ? new Date(selectedNode.createdAt).toLocaleString() : 'N/A'}</p>
-            </div>
+            <NodeDetailsPanel 
+              node={selectedNode} 
+              connections={connections}
+              nodes={nodes}
+            />
           </div>
         ) : mobileActiveTab === 'details' ? (
           <div className="h-full flex items-center justify-center text-gray-500">

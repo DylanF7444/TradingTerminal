@@ -22,6 +22,7 @@
 //   connections: Connection[]         // Array of edges (source → target)
 //   selectedIds: Set<string>          // Multi-selection support
 //   viewport: { x, y, zoom }          // Canvas transform state
+//   rawDataStreams: { [id: string]: RawStreamEntry[] } // Debug data streams
 //
 // STATE NORMALIZATION:
 // Instead of storing nodes as an array (Node[]), we use a dictionary object
@@ -36,6 +37,15 @@
 // The actual line rendering calculates coordinates by looking up node positions
 // in the normalized nodes dictionary. This prevents data duplication and
 // ensures connections always reflect current node positions.
+//
+// RAW DATA STREAMS:
+// Each node can have an associated raw input stream that stores recent data
+// entries for debugging and connectivity verification. This allows users to:
+//   - Verify that nodes are receiving data from connected sources
+//   - Inspect the raw JSON payloads being processed
+//   - Debug connection issues by viewing the data flow history
+// The stream is capped at MAX_STREAM_ENTRIES_PER_NODE (50) to prevent memory
+// exhaustion from high-frequency data sources.
 //
 // INTER-SLICE COMMUNICATION:
 // This slice exposes actions that other slices (marketsSlice, positionsSlice)
@@ -68,6 +78,11 @@
 //   lastInteraction: number
 //     - Timestamp of last user interaction
 //     - Used for auto-save debouncing and activity detection
+//
+//   rawDataStreams: Record<string, RawStreamEntry[]>
+//     - Raw input stream data per node for debugging
+//     - Key: node ID, Value: array of recent raw data entries
+//     - Used by RawStreamTab component in App.tsx
 //
 // Actions:
 //
@@ -271,6 +286,31 @@ import { Node, Connection } from '../types/nodes';
 import { calculateForceLayout } from '../utils/graphLayout';
 
 // =============================================================================
+// RAW INPUT STREAM TYPES
+// =============================================================================
+
+/**
+ * Raw input stream entry representing a single data point received by a node.
+ * Used for debugging connection status and verifying data flow.
+ */
+export interface RawStreamEntry {
+  /** Timestamp when the data was received */
+  timestamp: number;
+  /** Raw data payload (can be any JSON-serializable value) */
+  data: unknown;
+  /** Source of the data (e.g., 'websocket', 'polling', 'user') */
+  source?: string;
+  /** Optional status indicator (e.g., 'success', 'error') */
+  status?: 'success' | 'error' | 'pending';
+}
+
+/**
+ * Maximum number of entries to keep per node's raw input stream history.
+ * Prevents memory exhaustion from high-frequency data streams.
+ */
+const MAX_STREAM_ENTRIES_PER_NODE = 50;
+
+// =============================================================================
 // SLICE STATE INTERFACE
 // =============================================================================
 
@@ -297,6 +337,12 @@ export interface NodesSlice {
   
   /** Timestamp of last user interaction for debouncing */
   lastInteraction: number;
+  
+  /** 
+   * Raw input stream data per node for debugging connection status.
+   * Key: node ID, Value: array of recent raw data entries.
+   */
+  rawDataStreams: Record<string, RawStreamEntry[]>;
 
   // -------------------------------------------------------------------------
   // Node Lifecycle Actions
@@ -405,6 +451,22 @@ export interface NodesSlice {
   
   /** Calculate bounding box of all nodes */
   getGraphBounds: () => { minX: number; minY: number; maxX: number; maxY: number } | null;
+
+  // -------------------------------------------------------------------------
+  // Raw Data Stream Actions
+  // -------------------------------------------------------------------------
+  
+  /** Add a raw data entry to a node's input stream history */
+  appendRawDataEntry: (nodeId: string, entry: Omit<RawStreamEntry, 'timestamp'>) => void;
+  
+  /** Get raw data stream for a specific node */
+  getRawDataStream: (nodeId: string) => RawStreamEntry[];
+  
+  /** Clear raw data stream history for a specific node */
+  clearRawDataStream: (nodeId: string) => void;
+  
+  /** Clear all raw data streams */
+  clearAllRawDataStreams: () => void;
 }
 
 // =============================================================================
@@ -425,6 +487,7 @@ export const createNodesSlice: StateCreator<NodesSlice> = (set, get) => ({
     zoom: 1,
   },
   lastInteraction: Date.now(),
+  rawDataStreams: {},
 
   // -------------------------------------------------------------------------
   // Node Lifecycle Implementation
@@ -805,5 +868,44 @@ export const createNodesSlice: StateCreator<NodesSlice> = (set, get) => ({
     });
     
     return { minX, minY, maxX, maxY };
+  },
+
+  // -------------------------------------------------------------------------
+  // Raw Data Stream Implementation
+  // -------------------------------------------------------------------------
+  
+  appendRawDataEntry: (nodeId: string, entry: Omit<RawStreamEntry, 'timestamp'>) => {
+    set((state) => {
+      const currentStream = state.rawDataStreams[nodeId] || [];
+      const newEntry: RawStreamEntry = {
+        ...entry,
+        timestamp: Date.now(),
+      };
+      
+      // Keep only the last N entries to prevent memory issues
+      const newStream = [newEntry, ...currentStream].slice(0, MAX_STREAM_ENTRIES_PER_NODE);
+      
+      return {
+        rawDataStreams: {
+          ...state.rawDataStreams,
+          [nodeId]: newStream,
+        },
+      };
+    });
+  },
+  
+  getRawDataStream: (nodeId: string) => {
+    return get().rawDataStreams[nodeId] || [];
+  },
+  
+  clearRawDataStream: (nodeId: string) => {
+    set((state) => {
+      const { [nodeId]: _, ...remaining } = state.rawDataStreams;
+      return { rawDataStreams: remaining };
+    });
+  },
+  
+  clearAllRawDataStreams: () => {
+    set({ rawDataStreams: {} });
   },
 });

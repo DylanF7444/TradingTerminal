@@ -11,6 +11,16 @@
 // and integrated order entry controls. It supports both Polymarket and Kalshi
 // market formats with normalized display.
 //
+// LIVE DATA INTEGRATION:
+// The component now uses the useMarketOrderbook hook to subscribe to real-time
+// WebSocket data from the backend. Data flows as follows:
+//   1. Component mounts with market prop (contains platform and id)
+//   2. useMarketOrderbook hook invokes Tauri command to start subscription
+//   3. Backend connects to exchange WebSocket (Polymarket/Kalshi)
+//   4. Backend emits 'orderbook:update' events
+//   5. Hook updates orderbook state
+//   6. Component re-renders with live data
+//
 // The component implements several visualization modes:
 //   - Standard: Traditional bid/ask columns
 //   - Depth: Cumulative volume histogram
@@ -19,7 +29,7 @@
 //
 // Architecture Pattern:
 // Container/Presenter with Real-time Data Stream
-//   Container: Manages WebSocket connection, data normalization
+//   Container: Manages WebSocket connection via useMarketOrderbook hook
 //   Presenter: Pure rendering of orderbook state
 //   Integration: Direct order placement via trading API
 //
@@ -90,7 +100,7 @@
 //
 // ============================================================================
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 
 // Store hooks
 import { useStore } from '../../store';
@@ -98,9 +108,13 @@ import { useStore } from '../../store';
 // API utilities
 import { placeOrder } from '../../utils/api';
 
+// Orderbook hook
+import { useMarketOrderbook, type OrderbookLevel } from '../../hooks/useOrderbook';
+
 // Types
 import type { Orderbook, Level, Market } from '../../types/markets';
-import { OrderSide, MarketType, OrderType, TimeInForce } from '../../types/markets';
+import { OrderSide, OrderType, TimeInForce } from '../../types/markets';
+import { MarketType } from '../../types/nodes';
 
 // =============================================================================
 // COMPONENT PROPS
@@ -410,24 +424,28 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
   // State
   // -------------------------------------------------------------------------
   
-  /** Current orderbook data */
-  const [orderbook, setOrderbook] = useState<Orderbook | null>(null);
-  
-  /** Connection status */
-  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'stale'>('disconnected');
-  
-  /** Recent trades */
-  const [recentTrades] = useState<Array<{ price: number; size: number; side: 'buy' | 'sell'; time: number }>>([]);
-  
   /** Selected price level (for highlighting) */
   const [selectedLevel, setSelectedLevel] = useState<{ side: 'bid' | 'ask'; price: number } | null>(null);
   
-  /** Last update timestamp */
-  const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
+  // -------------------------------------------------------------------------
+  // Real-time Orderbook Subscription
+  // -------------------------------------------------------------------------
   
-  // Refs for throttling
-  const updateQueue = useRef<Partial<Orderbook>>({});
-  const rafId = useRef<number | null>(null);
+  // Determine platform from market type
+  const platform = useMemo((): 'polymarket' | 'kalshi' | null => {
+    if (!market.type) return null;
+    const typeStr = String(market.type).toLowerCase();
+    if (typeStr.includes('polymarket')) return 'polymarket';
+    if (typeStr.includes('kalshi')) return 'kalshi';
+    return null;
+  }, [market.type]);
+  
+  // Subscribe to real-time orderbook updates
+  const {
+    orderbook: liveOrderbook,
+    status: connectionStatus,
+    recentTrades,
+  } = useMarketOrderbook(platform, market.id);
   
   // -------------------------------------------------------------------------
   // Global State
@@ -443,78 +461,50 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
   }, [getPositionsByMarket, market.nodeId]);
   
   // -------------------------------------------------------------------------
-  // Data Fetching
+  // Convert live orderbook to display format
   // -------------------------------------------------------------------------
   
-  // Subscribe to orderbook updates via WebSocket
-  useEffect(() => {
-    setConnectionStatus('disconnected');
+  const orderbook = useMemo((): Orderbook | null => {
+    if (!liveOrderbook) return null;
     
-    // TODO: Replace with actual WebSocket subscription
-    // const unsubscribe = subscribeToOrderbook(market.id, handleOrderbookUpdate);
+    // Convert OrderbookLevel[] to Level[]
+    const bids: Level[] = liveOrderbook.bids.map((level: OrderbookLevel) => ({
+      price: level.price,
+      size: level.size,
+      orderCount: level.order_count || 1,
+      value: level.price * level.size,
+    }));
     
-    // Mock data for demonstration
-    const mockOrderbook: Orderbook = {
-      marketId: market.id,
-      timestamp: Date.now(),
-      bids: [
-        { price: 0.52, size: 1500, orderCount: 5, value: 780 },
-        { price: 0.51, size: 2300, orderCount: 8, value: 1173 },
-        { price: 0.50, size: 3100, orderCount: 12, value: 1550 },
-        { price: 0.49, size: 1200, orderCount: 4, value: 588 },
-        { price: 0.48, size: 4500, orderCount: 15, value: 2160 },
-      ],
-      asks: [
-        { price: 0.53, size: 2000, orderCount: 6, value: 1060 },
-        { price: 0.54, size: 1800, orderCount: 7, value: 972 },
-        { price: 0.55, size: 2500, orderCount: 9, value: 1375 },
-        { price: 0.56, size: 900, orderCount: 3, value: 504 },
-        { price: 0.57, size: 3200, orderCount: 11, value: 1824 },
-      ],
-      lastPrice: 0.525,
-      lastSize: 500,
-      lastTradeAt: Date.now() - 5000,
-      sequence: 1,
+    const asks: Level[] = liveOrderbook.asks.map((level: OrderbookLevel) => ({
+      price: level.price,
+      size: level.size,
+      orderCount: level.order_count || 1,
+      value: level.price * level.size,
+    }));
+    
+    // Calculate spread
+    const bestBid = bids[0]?.price || 0;
+    const bestAsk = asks[0]?.price || 0;
+    const spread = bestAsk - bestBid;
+    
+    // Calculate total liquidity
+    const totalBidValue = bids.reduce((sum, b) => sum + b.value, 0);
+    const totalAskValue = asks.reduce((sum, a) => sum + a.value, 0);
+    const liquidity = totalBidValue + totalAskValue;
+    
+    return {
+      marketId: liveOrderbook.market_id,
+      timestamp: liveOrderbook.timestamp,
+      bids,
+      asks,
+      lastPrice: liveOrderbook.last_price,
+      lastSize: liveOrderbook.last_size,
+      lastTradeAt: liveOrderbook.timestamp,
+      sequence: liveOrderbook.sequence,
+      liquidity,
+      spread,
     };
-    
-    setOrderbook(mockOrderbook);
-    setConnectionStatus('connected');
-    
-    return () => {
-      // unsubscribe();
-      if (rafId.current) cancelAnimationFrame(rafId.current);
-    };
-  }, [market.id]);
-  
-  // Handle orderbook updates with throttling
-  // TODO: Will be used when WebSocket integration is implemented
-  // @ts-expect-error - Function reserved for future WebSocket integration
-  const _handleOrderbookUpdate = useCallback((update: Partial<Orderbook>) => {
-    updateQueue.current = { ...updateQueue.current, ...update };
-    
-    if (rafId.current) return;
-    
-    rafId.current = requestAnimationFrame(() => {
-      setOrderbook(prev => prev ? { ...prev, ...updateQueue.current } : null);
-      updateQueue.current = {};
-      setLastUpdate(Date.now());
-      rafId.current = null;
-    });
-  }, []);
-  
-  // Staleness detection
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const stalenessMs = Date.now() - lastUpdate;
-      if (stalenessMs > 5000 && connectionStatus === 'connected') {
-        setConnectionStatus('stale');
-      } else if (stalenessMs < 1000 && connectionStatus === 'stale') {
-        setConnectionStatus('connected');
-      }
-    }, 1000);
-    
-    return () => clearInterval(interval);
-  }, [lastUpdate, connectionStatus]);
+  }, [liveOrderbook]);
   
   // -------------------------------------------------------------------------
   // Derived Data

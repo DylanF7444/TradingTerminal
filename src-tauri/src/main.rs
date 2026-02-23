@@ -176,10 +176,14 @@ use crate::commands::{
     trading,
     storage,
     update_node_position_cmd,
+    orderbook::{self, OrderbookState},
+    api_keys,
 };
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
-use crate::services::{scraper};
+use crate::services::{scraper, startup};
+use crate::services::websocket_manager::{WebSocketManager, create_websocket_manager};
 use sysinfo::SystemExt;
+use rusqlite::params;
 
 /// System monitor for CPU/memory metrics
 
@@ -226,6 +230,9 @@ pub struct AppState {
     
     /// Application configuration (hot-reloadable)
     pub config: Arc<Mutex<AppConfig>>,
+    
+    /// WebSocket manager for market data streams
+    pub ws_manager: Arc<WebSocketManager>,
 }
 
 /// Application configuration structure
@@ -276,6 +283,21 @@ fn main() {
         
         // Register all IPC command handlers
         // These functions can be called from frontend via @tauri-apps/api/tauri
+        //
+        // NAMING CONVENTION (CRITICAL):
+        // All commands registered here MUST use the `_cmd` suffix.
+        // This matches the frontend invoke() calls which use the same suffix.
+        //
+        // Example:
+        //   Backend: fn get_positions_cmd(...) -> Result<Vec<Position>, String>
+        //   Frontend: invoke('get_positions_cmd', { ... })
+        //
+        // When adding a new command:
+        //   1. Define the logic in commands/*.rs (e.g., pub async fn get_positions(...))
+        //   2. Create a wrapper here with #[tauri::command] and `_cmd` suffix
+        //   3. Register it in this generate_handler![] macro
+        //   4. Frontend invokes using the exact `_cmd` name
+        //
         .invoke_handler(tauri::generate_handler![
             // Data source commands
             add_data_source_cmd,
@@ -304,11 +326,59 @@ fn main() {
             query_timeseries_cmd,
             get_correlation_data_cmd,
             get_storage_stats_cmd,
+            get_node_stored_data_cmd,
+            delete_node_stored_data_cmd,
             
             // System commands
             get_system_info_cmd,
             get_database_stats_cmd,
             vacuum_database_cmd,
+            
+            // Orderbook commands (legacy)
+            subscribe_orderbook_cmd,
+            subscribe_polymarket_market_cmd,
+            unsubscribe_orderbook_cmd,
+            get_orderbook_subscriptions_cmd,
+            unsubscribe_all_orderbooks_cmd,
+            reconnect_orderbook_cmd,
+            subscribe_kalshi_orderbook_auth_cmd,
+            
+            // Consolidated WebSocket commands (NEW)
+            subscribe_consolidated_cmd,
+            unsubscribe_consolidated_cmd,
+            get_consolidated_subscriptions_cmd,
+            unsubscribe_platform_cmd,
+            set_kalshi_credentials_cmd,
+            clear_kalshi_credentials_cmd,
+            
+            // WebSocket commands
+            reconnect_websocket_cmd,
+            disconnect_websocket_cmd,
+            
+            // Order management commands
+            modify_order_cmd,
+            cancel_order_cmd,
+            get_balance_cmd,
+            
+            // Utility commands
+            log_frontend_error,
+            report_error,
+            restart_app,
+            frontend_ready,
+            
+            // API Key management commands (stored credentials for trading platforms)
+            // - save_api_key_cmd: Store/update API credentials for a platform
+            // - get_api_key_cmd: Retrieve stored credentials for a platform
+            // - get_all_api_keys_cmd: List all stored keys (summary only, no secrets)
+            // - delete_api_key_cmd: Remove stored credentials
+            // - has_api_key_cmd: Check if credentials exist for a platform
+            // - get_configured_platforms_cmd: Get list of platforms with stored keys
+            save_api_key_cmd,
+            get_api_key_cmd,
+            get_all_api_keys_cmd,
+            delete_api_key_cmd,
+            has_api_key_cmd,
+            get_configured_platforms_cmd,
         ])
         
         // Run the application
@@ -351,6 +421,9 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         .build()?;
     
     // 4. Initialize application state
+    // Create WebSocket manager first (needed for both state and startup)
+    let ws_manager = create_websocket_manager(app.handle().clone());
+    
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         http_client,
@@ -358,14 +431,19 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         analyzer_handle: Arc::new(Mutex::new(None)),
         executor_handle: Arc::new(Mutex::new(None)),
         config: Arc::new(Mutex::new(AppConfig::default())),
+        ws_manager: ws_manager.clone(),
     };
     
     // 5. Manage state (accessible to all commands via State<'_, AppState>)
     app.manage(state);
     
+    // 5b. Initialize and manage orderbook state
+    let orderbook_state = orderbook::init_state(app.handle().clone());
+    app.manage(orderbook_state);
+    
     // 6. Start background services (scraper supervisor, analyzer, executor)
-    // In a real implementation, these would be started here or on-demand
-    tauri::async_runtime::spawn(start_background_services(app.handle().clone()));
+    // Initialize all saved nodes and start their websockets/scrapers
+    tauri::async_runtime::spawn(start_background_services(app.handle().clone(), ws_manager));
     
     info!("Application initialization complete");
     Ok(())
@@ -375,10 +453,27 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
 /// 
 /// Spawns analyzer and executor services. Scrapers are started on-demand
 /// when users add data sources.
-async fn start_background_services(app_handle: tauri::AppHandle) {
+async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc<WebSocketManager>) {
     info!("Starting background services...");
     
     let state: State<'_, AppState> = app_handle.state();
+    
+    // Initialize all saved nodes from database
+    match startup::initialize_saved_nodes(
+        state.db.clone(),
+        ws_manager,
+        app_handle.clone(),
+    ).await {
+        Ok(active_services) => {
+            // Store the active scrapers in state
+            let mut scrapers = state.active_scrapers.lock().await;
+            *scrapers = active_services.scrapers;
+            info!("Saved nodes initialized successfully");
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize saved nodes: {}", e);
+        }
+    }
     
     // Start analyzer service (consumes data, produces signals)
     // TODO: Create channels between analyzer and executor
@@ -693,12 +788,51 @@ async fn add_market_cmd(
     market_config: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<models::node::Node, String> {
+    info!("Adding market connection: {:?}", market_type);
+    
+    // Parse market type
+    let market_type_enum = match market_type.as_str() {
+        "Polymarket" => models::node::MarketType::Polymarket,
+        "Kalshi" => models::node::MarketType::Kalshi,
+        _ => return Err(format!("Unknown market type: {}", market_type)),
+    };
+    
+    // Extract market_id from config if present
+    let market_id = market_config.get("market_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    
+    // Create node in database
+    let node = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        let node = models::node::Node {
+            id: uuid::Uuid::new_v4().to_string(),
+            node_type: models::node::NodeType::Market(market_type_enum.clone()),
+            position: (200.0, 200.0), // Default position
+            connections: vec![],
+            metadata: serde_json::json!({
+                "api_credentials": api_credentials,
+                "market_config": market_config,
+                "market_id": market_id,
+                "status": "connected",
+                "connected_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        };
+        
+        if let Err(e) = sqlite::insert_node(&conn, &node) {
+            return Err(format!("Database error: {}", e));
+        }
+        Ok(node)
+    })?;
+    
+    info!("Market node created: {}", node.id);
+    
     // TODO: 
     // 1. Validate API credentials with market
     // 2. Establish WebSocket connection
-    // 3. Create market node in DB
-    // 4. Start market listener task
-    Err("Not implemented".to_string())
+    // 3. Start market listener task
+    
+    Ok(node)
 }
 
 /// Remove market connection
@@ -707,7 +841,18 @@ async fn remove_market_cmd(
     node_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // TODO: Close WebSocket, archive node
+    info!("Removing market connection: {}", node_id);
+    
+    // Archive in database (soft delete)
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::delete_node(&conn, &node_id)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    // TODO: Close WebSocket connection if active
+    
+    info!("Market node removed: {}", node_id);
     Ok(())
 }
 
@@ -749,8 +894,12 @@ async fn get_orderbook_cmd(
 #[tauri::command]
 async fn refresh_market_connection_cmd(
     node_id: String,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
+    info!("Refreshing market connection: {}", node_id);
+    
     // TODO: Reconnect WebSocket
+    
     Ok(())
 }
 
@@ -893,6 +1042,126 @@ async fn get_storage_stats_cmd(
     })
 }
 
+/// Get node stored data
+#[tauri::command]
+async fn get_node_stored_data_cmd(
+    node_id: String,
+    limit: Option<i32>,
+    state: State<'_, AppState>,
+) -> Result<crate::commands::storage::NodeStoredData, String> {
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        // Get timeseries data
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, source_id, metric_type, value, metadata 
+             FROM timeseries 
+             WHERE source_id = ? 
+             ORDER BY timestamp DESC 
+             LIMIT ?"
+        ).map_err(|e| e.to_string())?;
+        
+        let timeseries: Vec<crate::commands::storage::DataPoint> = stmt.query_map(
+            params![node_id, limit.unwrap_or(100)],
+            |row| {
+                let metadata_str: Option<String> = row.get(4)?;
+                let metadata = metadata_str.as_ref().and_then(|s| serde_json::from_str(s).ok());
+                
+                Ok(crate::commands::storage::DataPoint {
+                    timestamp: row.get(0)?,
+                    source_id: row.get(1)?,
+                    metric: row.get(2)?,
+                    value: row.get(3)?,
+                    metadata,
+                })
+            }
+        ).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        
+        // Get websocket messages
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, node_id, message_type, payload, processed 
+             FROM websocket_messages 
+             WHERE node_id = ? 
+             ORDER BY timestamp DESC 
+             LIMIT ?"
+        ).map_err(|e| e.to_string())?;
+        
+        let websocket_messages: Vec<crate::commands::storage::WebsocketMessage> = stmt.query_map(
+            params![node_id, limit.unwrap_or(100)],
+            |row| {
+                let payload_str: String = row.get(4)?;
+                let payload = serde_json::from_str(&payload_str).unwrap_or(serde_json::json!(null));
+                
+                Ok(crate::commands::storage::WebsocketMessage {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    node_id: row.get(2)?,
+                    message_type: row.get(3)?,
+                    payload,
+                    processed: row.get::<_, i32>(5)? != 0,
+                })
+            }
+        ).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        
+        // Get available metrics
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT metric_type FROM timeseries WHERE source_id = ?"
+        ).map_err(|e| e.to_string())?;
+        
+        let available_metrics: Vec<String> = stmt.query_map(
+            params![node_id],
+            |row| row.get(0)
+        ).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        
+        // Get statistics
+        let (total_points, oldest_timestamp, newest_timestamp) = conn.query_row(
+            "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM timeseries WHERE source_id = ?",
+            params![node_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                ))
+            }
+        ).map_err(|e| e.to_string())?;
+        
+        Ok(crate::commands::storage::NodeStoredData {
+            timeseries,
+            websocket_messages,
+            available_metrics,
+            total_points,
+            oldest_timestamp,
+            newest_timestamp,
+        })
+    })
+}
+
+/// Delete stored data for a node
+#[tauri::command]
+async fn delete_node_stored_data_cmd(
+    node_id: String,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        // Delete timeseries data
+        let ts_count = conn.execute(
+            "DELETE FROM timeseries WHERE source_id = ?",
+            params![node_id]
+        ).map_err(|e| e.to_string())?;
+        
+        // Delete websocket messages
+        let ws_count = conn.execute(
+            "DELETE FROM websocket_messages WHERE node_id = ?",
+            params![node_id]
+        ).map_err(|e| e.to_string())?;
+        
+        Ok(ts_count + ws_count)
+    })
+}
+
 // -------------------------------------------------------------------------
 // System Commands
 // -------------------------------------------------------------------------
@@ -939,4 +1208,297 @@ async fn vacuum_database_cmd(
         sqlite::vacuum_database(&conn)
             .map_err(|e| format!("Database error: {}", e))
     })
+}
+
+// -------------------------------------------------------------------------
+// Utility Commands (for frontend error handling)
+// -------------------------------------------------------------------------
+
+/// Log frontend error to backend
+#[tauri::command]
+async fn log_frontend_error(
+    message: String,
+    stack: Option<String>,
+) -> Result<(), String> {
+    log::error!("Frontend error: {}", message);
+    if let Some(stack) = stack {
+        log::error!("Stack trace: {}", stack);
+    }
+    Ok(())
+}
+
+/// Report error from error boundary
+#[tauri::command]
+async fn report_error(
+    error: String,
+    stack: Option<String>,
+    component_stack: Option<String>,
+) -> Result<(), String> {
+    log::error!("React error boundary: {}", error);
+    if let Some(stack) = stack {
+        log::error!("Stack: {}", stack);
+    }
+    if let Some(component_stack) = component_stack {
+        log::error!("Component stack: {}", component_stack);
+    }
+    Ok(())
+}
+
+/// Restart the application
+#[tauri::command]
+async fn restart_app(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    log::info!("Restart requested");
+    app.restart();
+}
+
+/// Frontend ready notification
+#[tauri::command]
+async fn frontend_ready() -> Result<(), String> {
+    log::info!("Frontend ready notification received");
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Orderbook Commands
+// -------------------------------------------------------------------------
+
+/// Subscribe to orderbook updates for a market (legacy)
+#[tauri::command]
+async fn subscribe_orderbook_cmd(
+    platform: String,
+    market_id: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Subscribing to {} orderbook for market: {}", platform, market_id);
+    orderbook::subscribe_orderbook_cmd(platform, market_id, app_handle, state).await
+}
+
+/// Subscribe to Polymarket market updates using the ws/market endpoint
+/// This uses a different subscription format (assets_ids + type: "market")
+#[tauri::command]
+async fn subscribe_polymarket_market_cmd(
+    asset_ids: Vec<String>,
+    app_handle: tauri::AppHandle,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Subscribing to Polymarket market for {} assets", asset_ids.len());
+    orderbook::subscribe_polymarket_market_cmd(asset_ids, app_handle, state).await
+}
+
+/// Unsubscribe from orderbook updates (legacy)
+#[tauri::command]
+async fn unsubscribe_orderbook_cmd(
+    market_id: String,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Unsubscribing from orderbook for market: {}", market_id);
+    orderbook::unsubscribe_orderbook_cmd(market_id, state).await
+}
+
+/// Get active orderbook subscriptions (legacy)
+#[tauri::command]
+async fn get_orderbook_subscriptions_cmd(
+    state: State<'_, OrderbookState>,
+) -> Result<Vec<orderbook::SubscriptionInfo>, String> {
+    orderbook::get_orderbook_subscriptions_cmd(state).await
+}
+
+/// Unsubscribe from all orderbooks (legacy)
+#[tauri::command]
+async fn unsubscribe_all_orderbooks_cmd(
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Unsubscribing from all orderbooks");
+    orderbook::unsubscribe_all_orderbooks_cmd(state).await
+}
+
+/// Reconnect a stale orderbook connection (legacy)
+#[tauri::command]
+async fn reconnect_orderbook_cmd(
+    market_id: String,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Reconnecting orderbook for market: {}", market_id);
+    orderbook::reconnect_orderbook_cmd(market_id, state).await
+}
+
+/// Subscribe to Kalshi orderbook with authentication (legacy)
+#[tauri::command]
+async fn subscribe_kalshi_orderbook_auth_cmd(
+    market_id: String,
+    api_key: String,
+    private_key_pem: String,
+    demo: bool,
+    app_handle: tauri::AppHandle,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Subscribing to Kalshi orderbook with auth for market: {}", market_id);
+    orderbook::subscribe_kalshi_orderbook_with_auth_cmd(market_id, api_key, private_key_pem, demo, app_handle, state).await
+}
+
+// -------------------------------------------------------------------------
+// Consolidated WebSocket Commands (NEW)
+// -------------------------------------------------------------------------
+
+/// Subscribe to orderbook using consolidated stream manager
+#[tauri::command]
+async fn subscribe_consolidated_cmd(
+    platform: String,
+    market_id: String,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("[Consolidated] Subscribing to {} for market: {}", platform, market_id);
+    orderbook::subscribe_consolidated_cmd(platform, market_id, state).await
+}
+
+/// Unsubscribe from consolidated stream
+#[tauri::command]
+async fn unsubscribe_consolidated_cmd(
+    platform: String,
+    market_id: String,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("[Consolidated] Unsubscribing from {} for market: {}", platform, market_id);
+    orderbook::unsubscribe_consolidated_cmd(platform, market_id, state).await
+}
+
+/// Get consolidated subscriptions grouped by platform
+#[tauri::command]
+async fn get_consolidated_subscriptions_cmd(
+    state: State<'_, OrderbookState>,
+) -> Result<Vec<orderbook::ConsolidatedSubscriptionInfo>, String> {
+    orderbook::get_consolidated_subscriptions_cmd(state).await
+}
+
+/// Unsubscribe from all markets on a platform
+#[tauri::command]
+async fn unsubscribe_platform_cmd(
+    platform: String,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("[Consolidated] Unsubscribing from all {} markets", platform);
+    orderbook::unsubscribe_platform_cmd(platform, state).await
+}
+
+/// Set Kalshi credentials for authenticated WebSocket
+#[tauri::command]
+async fn set_kalshi_credentials_cmd(
+    api_key: String,
+    private_key_pem: String,
+    demo: bool,
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Setting Kalshi credentials");
+    orderbook::set_kalshi_credentials_cmd(api_key, private_key_pem, demo, state).await
+}
+
+/// Clear Kalshi credentials
+#[tauri::command]
+async fn clear_kalshi_credentials_cmd(
+    state: State<'_, OrderbookState>,
+) -> Result<String, String> {
+    info!("Clearing Kalshi credentials");
+    orderbook::clear_kalshi_credentials_cmd(state).await
+}
+
+// -------------------------------------------------------------------------
+// WebSocket Commands (Stub implementations for frontend compatibility)
+// -------------------------------------------------------------------------
+
+/// Reconnect a WebSocket channel (stub implementation)
+#[tauri::command]
+async fn reconnect_websocket_cmd(channel: String) -> Result<(), String> {
+    info!("WebSocket reconnect requested for channel: {}", channel);
+    // TODO: Implement actual WebSocket reconnection logic
+    Ok(())
+}
+
+/// Disconnect a WebSocket channel (stub implementation)
+#[tauri::command]
+async fn disconnect_websocket_cmd(channel: String) -> Result<(), String> {
+    info!("WebSocket disconnect requested for channel: {}", channel);
+    // TODO: Implement actual WebSocket disconnection logic
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Order Management Commands (Stub implementations for frontend compatibility)
+// -------------------------------------------------------------------------
+
+/// Modify an existing order (stub implementation)
+#[tauri::command]
+async fn modify_order_cmd(
+    position_id: String,
+    updates: serde_json::Value,
+) -> Result<(), String> {
+    info!("Modify order requested for position: {} with updates: {:?}", position_id, updates);
+    // TODO: Implement actual order modification logic
+    Ok(())
+}
+
+/// Cancel an order (stub implementation)
+#[tauri::command]
+async fn cancel_order_cmd(order_id: String) -> Result<(), String> {
+    info!("Cancel order requested for order: {}", order_id);
+    // TODO: Implement actual order cancellation logic
+    Ok(())
+}
+
+/// Get balance for a market (stub implementation)
+#[tauri::command]
+async fn get_balance_cmd(market: String) -> Result<f64, String> {
+    info!("Get balance requested for market: {}", market);
+    // TODO: Implement actual balance retrieval logic
+    Ok(0.0)
+}
+
+// -------------------------------------------------------------------------
+// API Key Commands
+// -------------------------------------------------------------------------
+
+/// Save API key for a platform
+#[tauri::command]
+async fn save_api_key_cmd(
+    request: api_keys::SaveApiKeyRequest,
+) -> Result<(), String> {
+    api_keys::save_api_key_command(request).await
+}
+
+/// Get API key for a platform
+#[tauri::command]
+async fn get_api_key_cmd(
+    platform: String,
+) -> Result<api_keys::ApiKeyResponse, String> {
+    api_keys::get_api_key_command(platform).await
+}
+
+/// Get all API keys (summary only)
+#[tauri::command]
+async fn get_all_api_keys_cmd() -> Result<Vec<api_keys::ApiKeySummary>, String> {
+    api_keys::get_all_api_keys_command().await
+}
+
+/// Delete API key for a platform
+#[tauri::command]
+async fn delete_api_key_cmd(
+    platform: String,
+) -> Result<bool, String> {
+    api_keys::delete_api_key_command(platform).await
+}
+
+/// Check if API key exists for a platform
+#[tauri::command]
+async fn has_api_key_cmd(
+    platform: String,
+) -> Result<bool, String> {
+    api_keys::has_api_key_command(platform).await
+}
+
+/// Get list of platforms with configured API keys
+#[tauri::command]
+async fn get_configured_platforms_cmd() -> Result<Vec<String>, String> {
+    api_keys::get_configured_platforms_command().await
 }

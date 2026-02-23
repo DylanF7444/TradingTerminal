@@ -528,16 +528,11 @@ async fn scrape_crypto(client: &Client, config: &ScraperConfig) -> Result<Scrape
     }
     
     if points.is_empty() {
-        // Return a placeholder point to show the node is working
-        points.push(DataPoint {
-            metric_type: "price:placeholder".to_string(),
-            value: 0.0,
-            metadata: Some(serde_json::json!({
-                "source": "coingecko",
-                "error": "No price data found. Check symbol names.",
-                "ids_requested": ids
-            })),
-        });
+        // Return an error instead of storing placeholder data
+        return Err(anyhow::anyhow!(
+            "No price data found for symbols: {}. Check symbol names (use bitcoin, ethereum, etc.)",
+            ids.join(", ")
+        ));
     }
     
     Ok(ScrapedData {

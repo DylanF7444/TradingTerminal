@@ -247,6 +247,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 
+use anyhow::Result;
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================
@@ -831,4 +833,237 @@ pub async fn shutdown_storage(state: &StorageState) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ============================================================================
+// NODE DATA COMMANDS
+// ============================================================================
+
+/// Stored data for a node (from timeseries or websocket_messages)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeStoredData {
+    /// Data points from timeseries table
+    pub timeseries: Vec<DataPoint>,
+    /// Recent websocket messages
+    pub websocket_messages: Vec<WebsocketMessage>,
+    /// Available metrics for this node
+    pub available_metrics: Vec<String>,
+    /// Total count of stored data points
+    pub total_points: i64,
+    /// Oldest timestamp
+    pub oldest_timestamp: Option<i64>,
+    /// Newest timestamp
+    pub newest_timestamp: Option<i64>,
+}
+
+/// Websocket message from database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebsocketMessage {
+    pub id: i64,
+    pub timestamp: i64,
+    pub node_id: String,
+    pub message_type: String,
+    pub payload: JsonValue,
+    pub processed: bool,
+}
+
+/// Get all stored data for a specific node
+#[tauri::command]
+pub async fn get_node_stored_data(
+    node_id: String,
+    limit: Option<i32>,
+    state: State<'_, StorageState>,
+) -> Result<NodeStoredData, String> {
+    let limit = limit.unwrap_or(100);
+    
+    // Get timeseries data
+    let timeseries = get_node_timeseries(&state.db_pool, &node_id, limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Get websocket messages
+    let websocket_messages = get_node_websocket_messages(&state.db_pool, &node_id, limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Get available metrics
+    let available_metrics = get_node_metrics(&state.db_pool, &node_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Get statistics
+    let (total_points, oldest_timestamp, newest_timestamp) = get_node_stats(&state.db_pool, &node_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(NodeStoredData {
+        timeseries,
+        websocket_messages,
+        available_metrics,
+        total_points,
+        oldest_timestamp,
+        newest_timestamp,
+    })
+}
+
+/// Get timeseries data for a node
+async fn get_node_timeseries(
+    pool: &Pool<SqliteConnectionManager>,
+    node_id: &str,
+    limit: i32,
+) -> Result<Vec<DataPoint>, Box<dyn std::error::Error + Send + Sync>> {
+    let pool = pool.clone();
+    let node_id = node_id.to_string();
+    
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get()?;
+        
+        let mut stmt = conn.prepare_cached(
+            "SELECT timestamp, source_id, metric_type, value, metadata 
+             FROM timeseries 
+             WHERE source_id = ? 
+             ORDER BY timestamp DESC 
+             LIMIT ?"
+        )?;
+        
+        let points: Result<Vec<DataPoint>, rusqlite::Error> = stmt.query_map(
+            params![node_id, limit],
+            |row| {
+                let metadata_str: Option<String> = row.get(4)?;
+                let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
+                
+                Ok(DataPoint {
+                    timestamp: row.get(0)?,
+                    source_id: row.get(1)?,
+                    metric: row.get(2)?,
+                    value: row.get(3)?,
+                    metadata,
+                })
+            }
+        )?.collect();
+        
+        Ok(points?)
+    }).await?
+}
+
+/// Get websocket messages for a node
+async fn get_node_websocket_messages(
+    pool: &Pool<SqliteConnectionManager>,
+    node_id: &str,
+    limit: i32,
+) -> Result<Vec<WebsocketMessage>, Box<dyn std::error::Error + Send + Sync>> {
+    let pool = pool.clone();
+    let node_id = node_id.to_string();
+    
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get()?;
+        
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, timestamp, node_id, message_type, payload, processed 
+             FROM websocket_messages 
+             WHERE node_id = ? 
+             ORDER BY timestamp DESC 
+             LIMIT ?"
+        )?;
+        
+        let messages: Result<Vec<WebsocketMessage>, rusqlite::Error> = stmt.query_map(
+            params![node_id, limit],
+            |row| {
+                let payload_str: String = row.get(4)?;
+                let payload = serde_json::from_str(&payload_str).unwrap_or(serde_json::json!(null));
+                
+                Ok(WebsocketMessage {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    node_id: row.get(2)?,
+                    message_type: row.get(3)?,
+                    payload,
+                    processed: row.get::<_, i32>(5)? != 0,
+                })
+            }
+        )?.collect();
+        
+        Ok(messages?)
+    }).await?
+}
+
+/// Get available metrics for a node
+async fn get_node_metrics(
+    pool: &Pool<SqliteConnectionManager>,
+    node_id: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let pool = pool.clone();
+    let node_id = node_id.to_string();
+    
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get()?;
+        
+        let mut stmt = conn.prepare_cached(
+            "SELECT DISTINCT metric_type FROM timeseries WHERE source_id = ?"
+        )?;
+        
+        let metrics: Result<Vec<String>, rusqlite::Error> = stmt.query_map(
+            params![node_id],
+            |row| row.get(0)
+        )?.collect();
+        
+        Ok(metrics?)
+    }).await?
+}
+
+/// Get statistics for a node's stored data
+async fn get_node_stats(
+    pool: &Pool<SqliteConnectionManager>,
+    node_id: &str,
+) -> Result<(i64, Option<i64>, Option<i64>), Box<dyn std::error::Error + Send + Sync>> {
+    let pool = pool.clone();
+    let node_id = node_id.to_string();
+    
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get()?;
+        
+        let mut stmt = conn.prepare_cached(
+            "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM timeseries WHERE source_id = ?"
+        )?;
+        
+        let result = stmt.query_row(params![node_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+            ))
+        })?;
+        
+        Ok(result)
+    }).await?
+}
+
+/// Delete stored data for a node
+#[tauri::command]
+pub async fn delete_node_stored_data(
+    node_id: String,
+    state: State<'_, StorageState>,
+) -> Result<usize, String> {
+    let pool = state.db_pool.clone();
+    let node_id = node_id.to_string();
+    
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        
+        // Delete timeseries data
+        let ts_count = conn.execute(
+            "DELETE FROM timeseries WHERE source_id = ?",
+            params![node_id]
+        ).map_err(|e| e.to_string())?;
+        
+        // Delete websocket messages
+        let ws_count = conn.execute(
+            "DELETE FROM websocket_messages WHERE node_id = ?",
+            params![node_id]
+        ).map_err(|e| e.to_string())?;
+        
+        Ok::<usize, String>(ts_count + ws_count)
+    }).await;
+    
+    result.map_err(|e| e.to_string())?
 }

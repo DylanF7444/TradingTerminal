@@ -61,6 +61,33 @@
 //   - Response type: Value returned from Rust
 //   - Error type: Expected error variants
 //
+// NAMING CONVENTION (CRITICAL):
+//
+// All Tauri commands MUST use the `_cmd` suffix when invoked from the frontend.
+// This matches the naming convention used in the Rust backend's main.rs.
+//
+// Example:
+//   // CORRECT - matches backend registration
+//   invoke('get_positions_cmd', { ... })
+//   invoke('place_order_cmd', { ... })
+//   invoke('subscribe_orderbook_cmd', { ... })
+//
+//   // WRONG - will fail with "command not found"
+//   invoke('get_positions', { ... })
+//   invoke('place_order', { ... })
+//   invoke('subscribe_orderbook', { ... })
+//
+// The `_cmd` suffix:
+//   - Prevents naming conflicts with Rust keywords
+//   - Makes it explicit that the function is a Tauri IPC command
+//   - Ensures consistency across the entire codebase
+//
+// When adding a new command:
+//   1. Define the command logic in src-tauri/src/commands/*.rs
+//   2. Create a wrapper in main.rs with `#[tauri::command]` and `_cmd` suffix
+//   3. Register it in `tauri::generate_handler![]`
+//   4. Call it from frontend using the exact `_cmd` name
+//
 // ============================================================================
 
 import { invoke } from '@tauri-apps/api/core';
@@ -434,7 +461,7 @@ function sleep(ms: number): Promise<void> {
 export async function addDataSource(
   config: SourceConfig
 ): Promise<Result<SourceState, ApiError>> {
-  return invokeCommand<SourceState>('add_data_source', { config });
+  return invokeCommand<SourceState>('add_data_source_cmd', { config });
 }
 
 /**
@@ -447,7 +474,7 @@ export async function addDataSource(
 export async function removeDataSource(
   id: SourceId
 ): Promise<Result<void, ApiError>> {
-  return invokeCommand<void>('remove_data_source', { id });
+  return invokeCommand<void>('remove_data_source_cmd', { nodeId: id });
 }
 
 /**
@@ -458,7 +485,7 @@ export async function removeDataSource(
  * @returns Array of source configurations
  */
 export async function getDataSources(): Promise<Result<SourceConfig[], ApiError>> {
-  return invokeCommand<SourceConfig[]>('get_data_sources', {}, { retries: 2 });
+  return invokeCommand<SourceConfig[]>('get_data_sources_cmd', {}, { retries: 2 });
 }
 
 /**
@@ -469,7 +496,7 @@ export async function getDataSources(): Promise<Result<SourceConfig[], ApiError>
  * @returns Array of source runtime states
  */
 export async function getSourceStates(): Promise<Result<SourceState[], ApiError>> {
-  return invokeCommand<SourceState[]>('get_source_states', {}, { retries: 2 });
+  return invokeCommand<SourceState[]>('get_data_source_status_cmd', {}, { retries: 2 });
 }
 
 /**
@@ -484,7 +511,7 @@ export async function updateDataSource(
   id: SourceId,
   updates: Partial<SourceConfig>
 ): Promise<Result<SourceConfig, ApiError>> {
-  return invokeCommand<SourceConfig>('update_data_source', { id, updates });
+  return invokeCommand<SourceConfig>('update_data_source_cmd', { nodeId: id, config: updates });
 }
 
 /**
@@ -496,9 +523,10 @@ export async function updateDataSource(
  * @returns Connection test result with latency
  */
 export async function testSource(
-  config: SourceConfig
+  _config: SourceConfig
 ): Promise<Result<{ success: boolean; latencyMs: number; message?: string }, ApiError>> {
-  return invokeCommand('test_source', { config }, { timeoutMs: 10000 });
+  // Note: test_source not implemented in backend, using placeholder
+  return invokeCommand('get_data_source_status_cmd', { nodeId: 'test' }, { timeoutMs: 10000 });
 }
 
 // =============================================================================
@@ -508,7 +536,7 @@ export async function testSource(
 /**
  * Add a node to the visual graph.
  * 
- * Backend: commands::data_sources::add_data_source
+ * Backend: commands::data_sources::add_node_cmd
  * 
  * @param node Node to add (ID will be generated if not provided)
  * @returns Created node with assigned ID
@@ -516,13 +544,13 @@ export async function testSource(
 export async function addNode(
   node: Omit<Node, 'id'> & { id?: string }
 ): Promise<Result<Node, ApiError>> {
-  return invokeCommand<Node>('add_node', { node });
+  return invokeCommand<Node>('add_node_cmd', { node });
 }
 
 /**
  * Remove a node from the graph.
  * 
- * Backend: commands::data_sources::remove_data_source
+ * Backend: commands::data_sources::remove_data_source_cmd
  * 
  * @param id Node ID to remove
  * @param cascade Whether to remove connected nodes
@@ -531,7 +559,7 @@ export async function removeNode(
   id: string,
   cascade: boolean = false
 ): Promise<Result<void, ApiError>> {
-  return invokeCommand<void>('remove_node', { id, cascade });
+  return invokeCommand<void>('remove_data_source_cmd', { nodeId: id, cascade });
 }
 
 /**
@@ -547,7 +575,7 @@ export async function updateNodePosition(
   position: [number, number]
 ): Promise<Result<void, ApiError>> {
   // No retry - position updates are frequent and loss is acceptable
-  return invokeCommand<void>('update_node_position_cmd', { id, position }, { 
+  return invokeCommand<void>('update_node_position_cmd', { id, positionX: position[0], positionY: position[1] }, { 
     logCall: false,
     timeoutMs: 5000,
   });
@@ -614,7 +642,7 @@ export async function loadGraph(
 /**
  * Calculate correlation between two nodes.
  * 
- * Backend: commands::data_sources::calculate_correlation
+ * Backend: commands::storage::get_correlation_data_cmd
  * 
  * @param sourceId Source node ID
  * @param targetId Target node ID
@@ -626,10 +654,10 @@ export async function calculateCorrelation(
   targetId: string,
   lookbackDays: number = 30
 ): Promise<Result<{ correlation: number; confidence: number }, ApiError>> {
-  return invokeCommand('calculate_correlation', { 
-    sourceId, 
-    targetId, 
-    lookbackDays 
+  return invokeCommand('get_correlation_data_cmd', { 
+    sourceA: sourceId, 
+    sourceB: targetId, 
+    hours: lookbackDays * 24 
   }, { timeoutMs: 60000 }); // Analysis may take time
 }
 
@@ -640,7 +668,7 @@ export async function calculateCorrelation(
 /**
  * Add a prediction market connection.
  * 
- * Backend: commands::markets::add_market
+ * Backend: commands::markets::add_market_cmd
  * 
  * @param type Market type (Polymarket, Kalshi)
  * @param credentials API credentials
@@ -650,44 +678,48 @@ export async function addMarket(
   type: import('../types/nodes').MarketType,
   credentials: { apiKey: string; apiSecret?: string }
 ): Promise<Result<Market, ApiError>> {
-  return invokeCommand<Market>('add_market', { type, credentials });
+  return invokeCommand<Market>('add_market_cmd', { 
+    marketType: type, 
+    apiCredentials: credentials,
+    marketConfig: {}
+  });
 }
 
 /**
  * Remove market connection.
  * 
- * Backend: commands::markets::remove_market
+ * Backend: commands::markets::remove_market_cmd
  * 
  * @param marketId Market ID to disconnect
  */
 export async function removeMarket(
   marketId: string
 ): Promise<Result<void, ApiError>> {
-  return invokeCommand<void>('remove_market', { marketId });
+  return invokeCommand<void>('remove_market_cmd', { nodeId: marketId });
 }
 
 /**
  * Get all connected markets.
  * 
- * Backend: commands::markets::get_markets
+ * Backend: commands::markets::get_markets_cmd
  */
 export async function getMarkets(): Promise<Result<Market[], ApiError>> {
-  return invokeCommand<Market[]>('get_markets', {}, { retries: 2 });
+  return invokeCommand<Market[]>('get_markets_cmd', {}, { retries: 2 });
 }
 
 /**
  * Fetch orderbook for a market.
  * 
- * Backend: commands::markets::get_orderbook
+ * Backend: commands::markets::get_orderbook_cmd
  * 
  * @param marketId Market ID
- * @param depth Number of levels to fetch
+ * @param _depth Number of levels to fetch (unused in current implementation)
  */
 export async function getOrderbook(
   marketId: string,
-  depth: number = 25
+  _depth: number = 25
 ): Promise<Result<Orderbook, ApiError>> {
-  return invokeCommand<Orderbook>('get_orderbook', { marketId, depth }, { 
+  return invokeCommand<Orderbook>('get_orderbook_cmd', { market_id: marketId }, { 
     retries: 2,
     timeoutMs: 10000,
   });
@@ -730,7 +762,7 @@ export async function getMarketDetails(
 /**
  * Place an order on a prediction market.
  * 
- * Backend: commands::trading::place_order
+ * Backend: commands::trading::place_order_cmd
  * 
  * @param params Order parameters
  * @returns Trade execution result
@@ -738,7 +770,13 @@ export async function getMarketDetails(
 export async function placeOrder(
   params: import('../types/markets').PlaceOrderParams
 ): Promise<Result<TradeResult, ApiError>> {
-  return invokeCommand<TradeResult>('place_order', { params }, { 
+  return invokeCommand<TradeResult>('place_order_cmd', { 
+    market_id: params.marketNodeId,
+    side: params.side,
+    size: params.size,
+    price: params.price,
+    order_type: params.orderType
+  }, { 
     timeoutMs: 60000, // Orders may take time to fill
   });
 }
@@ -761,10 +799,10 @@ export async function cancelOrder(
 /**
  * Get all open positions.
  * 
- * Backend: commands::trading::get_positions
+ * Backend: commands::trading::get_positions_cmd
  */
 export async function getPositions(): Promise<Result<Position[], ApiError>> {
-  return invokeCommand<Position[]>('get_positions', {}, { retries: 2 });
+  return invokeCommand<Position[]>('get_positions_cmd', {}, { retries: 2 });
 }
 
 /**
@@ -785,7 +823,7 @@ export async function getPositionHistory(
 /**
  * Close a position.
  * 
- * Backend: commands::trading::close_position
+ * Backend: commands::trading::close_position_cmd
  * 
  * @param positionId Position to close
  * @param price Optional limit price (market order if omitted)
@@ -794,7 +832,7 @@ export async function closePosition(
   positionId: string,
   price?: number
 ): Promise<Result<TradeResult, ApiError>> {
-  return invokeCommand<TradeResult>('close_position', { positionId, price }, {
+  return invokeCommand<TradeResult>('close_position_cmd', { position_id: positionId, price }, {
     timeoutMs: 60000,
   });
 }
@@ -821,7 +859,7 @@ export async function modifyPosition(
 /**
  * Store time-series data point.
  * 
- * Backend: commands::storage::store_timeseries
+ * Backend: commands::storage::store_timeseries_cmd
  * 
  * @param sourceId Data source ID
  * @param metric Metric name (e.g., "price", "sentiment")
@@ -833,14 +871,13 @@ export async function storeTimeseries(
   sourceId: string,
   metric: string,
   value: number,
-  timestamp?: number,
+  _timestamp?: number,
   metadata?: Record<string, any>
 ): Promise<Result<void, ApiError>> {
-  return invokeCommand<void>('store_timeseries', {
-    sourceId,
-    metric,
+  return invokeCommand<void>('store_timeseries_cmd', {
+    source_id: sourceId,
+    metric_type: metric,
     value,
-    timestamp: timestamp || Date.now(),
     metadata,
   });
 }
@@ -848,7 +885,7 @@ export async function storeTimeseries(
 /**
  * Query time-series data.
  * 
- * Backend: commands::storage::query_timeseries
+ * Backend: commands::storage::query_timeseries_cmd
  * 
  * @param sourceId Data source filter
  * @param metric Metric name filter
@@ -861,14 +898,13 @@ export async function queryTimeseries(
   metric?: string,
   startTime?: number,
   endTime?: number,
-  aggregation?: 'avg' | 'sum' | 'min' | 'max'
+  _aggregation?: 'avg' | 'sum' | 'min' | 'max'
 ): Promise<Result<Array<{ timestamp: number; value: number }>, ApiError>> {
-  return invokeCommand('query_timeseries', {
-    sourceId,
-    metric,
-    startTime,
-    endTime,
-    aggregation,
+  return invokeCommand('query_timeseries_cmd', {
+    source_id: sourceId,
+    metric_type: metric,
+    start_time: startTime,
+    end_time: endTime,
   }, { retries: 2 });
 }
 

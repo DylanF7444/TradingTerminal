@@ -179,6 +179,9 @@
 pub mod scraper;
 pub mod analyzer;
 pub mod executor;
+pub mod orderbook;
+pub mod websocket_manager;
+pub mod startup;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

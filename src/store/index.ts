@@ -217,7 +217,11 @@ import {
   subscribeWithSelector 
 } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
+import { enableMapSet } from 'immer';
 import { shallow } from 'zustand/shallow';
+
+// Enable MapSet support in Immer for Set<string> selectedIds
+enableMapSet();
 
 // Import slice creators
 import { createNodesSlice, type NodesSlice } from './nodesSlice';

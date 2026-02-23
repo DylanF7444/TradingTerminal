@@ -410,7 +410,7 @@ export default function SourcePanel({
     if (!confirm('Are you sure you want to remove this data source?')) return;
     
     try {
-      await invoke('remove_data_source', { id: nodeId });
+      await invoke('remove_data_source_cmd', { nodeId });
       // Parent should refresh the existingSources prop
     } catch (err) {
       console.error('Failed to remove source:', err);

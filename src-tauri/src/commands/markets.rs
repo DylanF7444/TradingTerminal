@@ -622,13 +622,17 @@ async fn authenticate_platform(
     
     match platform {
         MarketType::Polymarket => {
-            // POST https://auth.polymarket.com/api-key
-            let api_key = credentials["api_key"]
-                .as_str()
-                .ok_or("Missing api_key")?;
-            
-            // Mock validation - in real implementation, exchange for JWT
-            Ok(format!("pm_token_{}", api_key))
+            // Polymarket market data is public - API keys are optional
+            // If API key is provided, we can authenticate for trading
+            // If not provided, we can still access public market data
+            if let Some(api_key) = credentials["api_key"].as_str() {
+                // Mock validation - in real implementation, exchange for JWT
+                Ok(format!("pm_token_{}", api_key))
+            } else {
+                // No API key - return empty token for public access
+                println!("Polymarket: Using public access (no API key provided)");
+                Ok("pm_public_access".to_string())
+            }
         }
         MarketType::Kalshi => {
             // POST https://trading-api.kalshi.com/v1/login
@@ -817,9 +821,9 @@ fn validate_credentials(
 ) -> Result<(), String> {
     match platform {
         MarketType::Polymarket => {
-            if creds["api_key"].as_str().is_none() {
-                return Err("Polymarket requires api_key".to_string());
-            }
+            // Polymarket market data is public - API keys are optional (only needed for trading)
+            // No validation required for read-only market data access
+            println!("Polymarket credentials validation: API keys are optional for market data access");
         }
         MarketType::Kalshi => {
             if creds["api_key"].as_str().is_none() || creds["api_secret"].as_str().is_none() {

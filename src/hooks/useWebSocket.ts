@@ -479,7 +479,7 @@ export function useWebSocket<T = any>(
       setConnectionStatus('connecting');
       
       // Trigger backend reconnection via command
-      invoke('reconnect_websocket', { channel })
+      invoke('reconnect_websocket_cmd', { channel })
         .then(() => {
           console.log(`Reconnected to ${channel}`);
           setupHeartbeat();
@@ -583,7 +583,7 @@ export function useWebSocket<T = any>(
     
     // Force backend reconnect then re-run setup
     try {
-      await invoke('reconnect_websocket', { channel });
+      await invoke('reconnect_websocket_cmd', { channel });
       // The effect cleanup/re-run will handle re-subscription
     } catch (err) {
       setError(`Reconnect failed: ${err}`);
@@ -605,7 +605,7 @@ export function useWebSocket<T = any>(
     onDisconnect?.();
     
     // Notify backend
-    invoke('disconnect_websocket', { channel }).catch(console.error);
+    invoke('disconnect_websocket_cmd', { channel }).catch(console.error);
   }, [channel, onDisconnect]);
 
   const clearHistory = useCallback(() => {

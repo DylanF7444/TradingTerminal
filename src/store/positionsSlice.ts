@@ -601,7 +601,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
       const result = await invoke<{
         position: Position;
         order: Order;
-      }>('place_order', {
+      }>('place_order_cmd', {
         market: params.market,
         marketNodeId: params.marketNodeId,
         side: params.side,
@@ -653,7 +653,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
       }));
       
       // Invoke backend to place closing order
-      await invoke('place_order', {
+      await invoke('place_order_cmd', {
         market: position.market,
         marketNodeId: position.marketNodeId,
         side: position.side === 'buy' ? 'sell' : 'buy', // Opposite side
@@ -693,7 +693,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
     }
     
     try {
-      await invoke('modify_order', {
+      await invoke('modify_order_cmd', {
         positionId,
         updates: allowedUpdates,
       });
@@ -833,7 +833,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
   
   cancelOrder: async (orderId: string) => {
     try {
-      await invoke('cancel_order', { orderId });
+      await invoke('cancel_order_cmd', { orderId });
       
       set((state) => {
         const order = state.pendingOrders.find((o) => o.id === orderId);
@@ -891,7 +891,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
   
   syncPositions: async () => {
     try {
-      const positions = await invoke<Position[]>('get_positions', {});
+      const positions = await invoke<Position[]>('get_positions_cmd', {});
       
       set(() => {
         // Rebuild positionByMarket index
@@ -916,7 +916,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
 
   loadHistory: async (options: HistoryQueryOptions = {}) => {
     try {
-      const history = await invoke<ClosedPosition[]>('query_timeseries', {
+      const history = await invoke<ClosedPosition[]>('query_timeseries_cmd', {
         table: 'positions',
         startTime: options.startTime,
         endTime: options.endTime,
@@ -932,7 +932,7 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
 
   syncBalance: async (market: string) => {
     try {
-      const balance = await invoke<number>('get_balance', { market });
+      const balance = await invoke<number>('get_balance_cmd', { market });
       
       set((state) => ({
         balances: {
