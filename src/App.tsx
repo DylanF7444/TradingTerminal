@@ -175,6 +175,44 @@ const BREAKPOINTS = {
 };
 
 // =============================================================================
+// CLOCK COMPONENT
+// =============================================================================
+
+/**
+ * Real-time clock component that displays the current time with seconds.
+ * Updates every second to show precise time.
+ */
+function Clock(): ReactNode {
+  const [time, setTime] = useState(() => new Date());
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTime(new Date());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatTime = (date: Date): string => {
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    return `${hours}:${minutes}:${seconds}`;
+  };
+
+  return (
+    <div className="flex items-center justify-center gap-2">
+      <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <span className="font-mono text-sm text-gray-300 tracking-wider">
+        {formatTime(time)}
+      </span>
+    </div>
+  );
+}
+
+// =============================================================================
 // NODE DETAILS PANEL COMPONENT
 // =============================================================================
 
@@ -1200,34 +1238,43 @@ function App(): ReactNode {
         }`}
         aria-label="Control panel"
       >
-        {/* Header */}
-        <div className="h-14 flex items-center px-4 border-b border-gray-800">
-          {leftSidebarCollapsed ? (
-            <button 
-              onClick={() => setLeftSidebarCollapsed(false)}
-              className="p-2 hover:bg-gray-800 rounded-lg"
-              title="Expand sidebar"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-              </svg>
-            </button>
-          ) : (
-            <div className="flex items-center justify-between w-full">
-              <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                Trading Terminal
-              </h1>
-              <button 
-                onClick={() => setLeftSidebarCollapsed(true)}
-                className="p-1.5 hover:bg-gray-800 rounded-lg text-gray-400"
-                title="Collapse sidebar"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-                </svg>
-              </button>
+        {/* Header with Clock */}
+        <div className="flex flex-col border-b border-gray-800">
+          {/* Clock Row */}
+          {!leftSidebarCollapsed && (
+            <div className="px-4 py-2 text-center border-b border-gray-800/50 bg-gray-800/30">
+              <Clock />
             </div>
           )}
+          {/* Title Row */}
+          <div className="h-14 flex items-center px-4">
+            {leftSidebarCollapsed ? (
+              <button 
+                onClick={() => setLeftSidebarCollapsed(false)}
+                className="p-2 hover:bg-gray-800 rounded-lg"
+                title="Expand sidebar"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+              </button>
+            ) : (
+              <div className="flex items-center justify-between w-full">
+                <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                  Trading Terminal
+                </h1>
+                <button 
+                  onClick={() => setLeftSidebarCollapsed(true)}
+                  className="p-1.5 hover:bg-gray-800 rounded-lg text-gray-400"
+                  title="Collapse sidebar"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                  </svg>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Scrollable content */}
