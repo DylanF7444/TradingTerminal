@@ -93,7 +93,10 @@
 // Node Operations:
 // - insert_node(conn, node) -> Result<()>
 // - update_node(conn, node) -> Result<()>
-// - delete_node(conn, node_id) -> Result<()> [soft delete]
+// - delete_node(conn, node_id) -> Result<()> [soft delete only]
+// - delete_node_cascade(conn, node_id) -> Result<DeleteNodeStats> [full cleanup]
+//   - Deletes: timeseries, websocket_messages, connections, scraper_status, positions
+//   - Then soft-deletes the node
 // - get_node_by_id(conn, node_id) -> Result<Node>
 // - get_all_active_nodes(conn) -> Result<Vec<Node>>
 //
@@ -569,6 +572,72 @@ pub fn delete_node(conn: &Connection, node_id: &str) -> SqliteResult<()> {
 
     println!("Node archived: {}", node_id);
     Ok(())
+}
+
+/// Delete a node and all its associated data (cascade delete)
+/// This removes: timeseries, websocket_messages, connections, scraper_status, positions
+/// Then performs a soft delete on the node itself
+pub fn delete_node_cascade(conn: &Connection, node_id: &str) -> SqliteResult<DeleteNodeStats> {
+    let now = Utc::now().timestamp();
+    let mut stats = DeleteNodeStats::default();
+    
+    // Delete timeseries data
+    stats.timeseries_deleted = conn.execute(
+        "DELETE FROM timeseries WHERE source_id = ?1",
+        params![node_id],
+    )?;
+    
+    // Delete websocket messages
+    stats.websocket_messages_deleted = conn.execute(
+        "DELETE FROM websocket_messages WHERE node_id = ?1",
+        params![node_id],
+    )?;
+    
+    // Delete connections where this node is source or target
+    stats.connections_deleted = conn.execute(
+        "DELETE FROM connections WHERE source_node_id = ?1 OR target_node_id = ?1",
+        params![node_id],
+    )?;
+    
+    // Delete scraper status
+    stats.scraper_status_deleted = conn.execute(
+        "DELETE FROM scraper_status WHERE node_id = ?1",
+        params![node_id],
+    )?;
+    
+    // Delete positions (for market nodes)
+    stats.positions_deleted = conn.execute(
+        "DELETE FROM positions WHERE market_id = ?1",
+        params![node_id],
+    )?;
+    
+    // Soft delete the node itself
+    let node_deleted = conn.execute(
+        "UPDATE nodes SET archived = 1, updated_at = ?1 WHERE id = ?2",
+        params![now, node_id],
+    )?;
+    
+    stats.node_archived = node_deleted > 0;
+    
+    println!("Node cascade delete completed for {}: {:?}", node_id, stats);
+    Ok(stats)
+}
+
+/// Statistics about what was deleted during cascade delete
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DeleteNodeStats {
+    /// Number of timeseries entries deleted
+    pub timeseries_deleted: usize,
+    /// Number of websocket messages deleted
+    pub websocket_messages_deleted: usize,
+    /// Number of connections deleted
+    pub connections_deleted: usize,
+    /// Number of scraper status entries deleted
+    pub scraper_status_deleted: usize,
+    /// Number of positions deleted
+    pub positions_deleted: usize,
+    /// Whether the node was successfully archived
+    pub node_archived: bool,
 }
 
 /// Get a single node by ID

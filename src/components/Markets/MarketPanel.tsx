@@ -665,8 +665,10 @@ export default function MarketPanel({
               
               // Safely access metadata properties with type assertions
               const metadata = market.metadata as Record<string, any>;
-              const status = metadata?.status || 'connecting';
-              const isConnected = status === 'connected';
+              // Use quality.successRate to determine connection status (same as Node component)
+              const quality = metadata?.quality;
+              const isConnected = quality?.successRate !== undefined && quality.successRate > 0.5;
+              const latency = quality?.avgLatency;
               const balance = metadata?.balance || 0;
 
               return (
@@ -685,6 +687,12 @@ export default function MarketPanel({
                       <div className="text-xs text-gray-500 flex items-center gap-2">
                         <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
                         {isConnected ? 'Connected' : 'Connecting...'}
+                        {latency !== undefined && (
+                          <>
+                            <span className="text-gray-600">•</span>
+                            <span className="text-blue-400">{latency.toFixed(0)}ms</span>
+                          </>
+                        )}
                         <span className="text-gray-600">•</span>
                         <span className="text-emerald-400">${balance.toFixed(2)}</span>
                       </div>

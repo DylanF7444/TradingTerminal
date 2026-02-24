@@ -264,7 +264,7 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
     icon: Bitcoin,
     description: 'Real-time cryptocurrency price feeds via WebSocket',
     color: 'text-orange-400',
-    defaultConfig: { symbols: 'BTC-USD,ETH-USD', update_interval_seconds: 5, provider: 'coinbase' }
+    defaultConfig: { symbols: 'BTC-USD,ETH-USD', storage_interval_seconds: 60, provider: 'coinbase' }
   },
   [InfoSourceType.FinancialPrices]: {
     label: 'Financial Prices',
@@ -400,6 +400,8 @@ export default function SourcePanel({
         symbols: config.symbols?.split(',').map((s: string) => s.trim()),
         tickers: config.tickers?.split(',').map((s: string) => s.trim()),
         keywords: config.keywords?.split(',').map((s: string) => s.trim()),
+        // Convert storage_interval_seconds to storageIntervalMs for backend
+        storageIntervalMs: config.storage_interval_seconds ? config.storage_interval_seconds * 1000 : 60000,
       };
 
       const result = await addSource({
@@ -470,19 +472,43 @@ export default function SourcePanel({
                 className={commonInputClass}
               />
             </div>
-            <div>
-              <label className={labelClass}>Update Interval (seconds)</label>
-              <input
-                type="range"
-                min="5"
-                max="300"
-                step="5"
-                value={config.update_interval_seconds || 5}
-                onChange={(e) => handleConfigChange('update_interval_seconds', parseInt(e.target.value))}
-                className="w-full"
-              />
-              <span className="text-sm text-gray-500">{config.update_interval_seconds || 5}s</span>
-            </div>
+            {config.provider === 'coinbase' && (
+              <div>
+                <label className={labelClass}>
+                  Database Storage Interval (seconds)
+                  <span className="text-xs text-gray-500 ml-1">(raw stream updates in real-time)</span>
+                </label>
+                <input
+                  type="range"
+                  min="10"
+                  max="300"
+                  step="10"
+                  value={config.storage_interval_seconds || 60}
+                  onChange={(e) => handleConfigChange('storage_interval_seconds', parseInt(e.target.value))}
+                  className="w-full"
+                />
+                <span className="text-sm text-gray-500">{config.storage_interval_seconds || 60}s</span>
+                <p className="text-xs text-gray-600 mt-1">
+                  Price updates are displayed in real-time in the raw stream tab. 
+                  Database writes happen at this interval to reduce disk I/O.
+                </p>
+              </div>
+            )}
+            {config.provider !== 'coinbase' && (
+              <div>
+                <label className={labelClass}>Polling Interval (seconds)</label>
+                <input
+                  type="range"
+                  min="5"
+                  max="300"
+                  step="5"
+                  value={config.update_interval_seconds || 30}
+                  onChange={(e) => handleConfigChange('update_interval_seconds', parseInt(e.target.value))}
+                  className="w-full"
+                />
+                <span className="text-sm text-gray-500">{config.update_interval_seconds || 30}s</span>
+              </div>
+            )}
           </div>
         );
 
@@ -607,9 +633,11 @@ export default function SourcePanel({
               const meta = type ? SOURCE_TYPE_METADATA[type] : null;
               const Icon = meta?.icon || Activity;
               // Use quality.successRate from metadata to determine connection status
-              const isConnected = type && source.metadata && 'quality' in source.metadata 
-                ? (source.metadata.quality?.successRate ?? 0) > 0.5 
-                : false;
+              // Cast metadata to access quality field
+              const sourceMetadata = source.metadata as Record<string, any>;
+              const quality = sourceMetadata?.quality;
+              const isConnected = quality?.successRate !== undefined && quality.successRate > 0.5;
+              const latency = quality?.avgLatency;
 
               return (
                 <div 
@@ -625,8 +653,11 @@ export default function SourcePanel({
                         {source.name || meta?.label || 'Unknown'}
                       </div>
                       <div className="text-xs text-gray-500 flex items-center gap-1">
-                        <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-                        {isConnected ? 'Active' : 'Disconnected'}
+                        <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
+                        {isConnected ? 'Active' : 'Connecting...'}
+                        {latency !== undefined && (
+                          <span className="text-blue-400 ml-1">{latency.toFixed(0)}ms</span>
+                        )}
                       </div>
                     </div>
                   </div>

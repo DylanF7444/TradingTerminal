@@ -594,6 +594,10 @@ function NodeDetailsPanel({
 /**
  * Component to display raw input stream data for a node.
  * Shows recent data entries to verify node connectivity and data flow.
+ * 
+ * This component listens for real-time 'infosource:update' events from the backend
+ * WebSocket scraper, which emits events immediately for each price update while
+ * database insertion happens at a configurable interval.
  */
 function RawStreamTab({ nodeId }: { nodeId: string | undefined }): ReactNode {
   const rawDataStreams = useStore((state: StoreState) => state.rawDataStreams);
@@ -601,6 +605,7 @@ function RawStreamTab({ nodeId }: { nodeId: string | undefined }): ReactNode {
   const clearRawDataStream = useStore((state: StoreState) => state.clearRawDataStream);
   const connections = useStore((state: StoreState) => state.connections);
   const nodes = useStore((state: StoreState) => state.nodes);
+  const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
   
   // Get stream data for this node
   const streamData = nodeId ? (rawDataStreams[nodeId] || []) : [];
@@ -614,75 +619,169 @@ function RawStreamTab({ nodeId }: { nodeId: string | undefined }): ReactNode {
   const isInfoSource = node?.node_type && 'InfoSource' in node.node_type;
   const isMarket = node?.node_type && 'Market' in node.node_type;
   
-  // Simulate data for demo purposes
-  // InfoSource nodes always generate data (they are data sources)
-  // Market nodes only show data when they have incoming connections
+  // Ref to track latency history for averaging
+  const latencyHistoryRef = useRef<number[]>([]);
+  const successCountRef = useRef<number>(0);
+  const totalCountRef = useRef<number>(0);
+  const lastEventTimeRef = useRef<number>(Date.now());
+  
+  // Listen for real-time infosource:update events from backend WebSocket scraper
+  // These events are emitted immediately for each price update, while database
+  // insertion happens at a configurable storage_interval_ms
   useEffect(() => {
     if (!nodeId || !node) return;
     
-    // InfoSource nodes always generate their own data stream
-    // Market nodes need incoming connections to receive data
-    const shouldSimulateData = isInfoSource || (isMarket && incomingConnections.length > 0);
+    // Only listen for InfoSource nodes of type CryptoPrices
+    if (!isInfoSource) return;
     
-    if (shouldSimulateData) {
-      const interval = setInterval(() => {
-        if (isInfoSource && node.node_type && 'InfoSource' in node.node_type) {
-          // Info sources generate data - simulate based on source subtype
-          const subtype = (node.node_type as { InfoSource: string }).InfoSource;
+    const subtype = (node.node_type as { InfoSource: string }).InfoSource;
+    if (subtype !== 'CryptoPrices') return;
+    
+    let unlisten: (() => void) | null = null;
+    
+    // Import listen dynamically to avoid issues in non-Tauri environments
+    const setupListener = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        
+        unlisten = await listen('infosource:update', (event) => {
+          const payload = event.payload as {
+            nodeId: string;
+            symbol: string;
+            price: number;
+            bid?: number;
+            ask?: number;
+            volume_24h?: string;
+            timestamp: number;
+            source: string;
+          };
           
-          if (subtype === 'CryptoPrices') {
-            appendRawDataEntry(nodeId, {
-              data: {
-                type: 'price_update',
-                symbol: ['BTC', 'ETH', 'SOL'][Math.floor(Math.random() * 3)],
-                price: Math.random() * 50000 + 20000,
-                change: (Math.random() - 0.5) * 5,
-                volume: Math.floor(Math.random() * 1000000),
-              },
-              source: 'binance_websocket',
-              status: 'success',
-            });
-          } else if (subtype === 'NewsSource') {
-            appendRawDataEntry(nodeId, {
-              data: {
-                type: 'news_article',
-                title: ['Market Update', 'Fed Decision', 'Crypto News'][Math.floor(Math.random() * 3)],
-                source: ['Reuters', 'Bloomberg', 'CNBC'][Math.floor(Math.random() * 3)],
-                sentiment: Math.random() > 0.5 ? 'bullish' : 'bearish',
-              },
-              source: 'news_feed',
-              status: 'success',
-            });
-          } else {
-            // Generic info source data
-            appendRawDataEntry(nodeId, {
-              data: {
-                type: 'data_update',
-                value: Math.random() * 100,
-                timestamp: Date.now(),
-              },
-              source: 'polling',
-              status: 'success',
-            });
+          // Only process events for this node
+          if (payload.nodeId !== nodeId) return;
+          
+          // Calculate latency (time between event emission and receipt)
+          const now = Date.now();
+          const eventLatency = now - payload.timestamp;
+          
+          // Update latency history (keep last 20 samples)
+          latencyHistoryRef.current.push(Math.min(eventLatency, 1000)); // Cap at 1s for outliers
+          if (latencyHistoryRef.current.length > 20) {
+            latencyHistoryRef.current.shift();
           }
-        } else if (isMarket) {
-          // Markets receive data from connected sources
+          
+          // Update success tracking
+          totalCountRef.current++;
+          successCountRef.current++;
+          
+          // Calculate average latency
+          const avgLatency = latencyHistoryRef.current.reduce((a, b) => a + b, 0) / latencyHistoryRef.current.length;
+          
+          // Calculate success rate
+          const successRate = totalCountRef.current > 0 
+            ? successCountRef.current / totalCountRef.current 
+            : 0;
+          
+          // Update node metadata with quality metrics
+          updateNodeMetadata(nodeId, {
+            quality: {
+              successRate,
+              avgLatency,
+              lastError: undefined,
+            },
+            lastData: {
+              timestamp: now,
+              value: payload.price,
+            },
+          });
+          
+          // Add to raw stream display - this happens in real-time for every update
           appendRawDataEntry(nodeId, {
             data: {
-              type: 'market_data',
-              bestBid: Math.random() * 0.5 + 0.25,
-              bestAsk: Math.random() * 0.5 + 0.5,
-              volume: Math.floor(Math.random() * 10000),
+              type: 'price_update',
+              symbol: payload.symbol,
+              price: payload.price,
+              bid: payload.bid,
+              ask: payload.ask,
+              volume_24h: payload.volume_24h,
             },
-            source: 'connected_sources',
+            source: payload.source || 'coinbase_websocket',
             status: 'success',
           });
-        }
-      }, 2000); // Every 2 seconds
+          
+          lastEventTimeRef.current = now;
+        });
+      } catch (error) {
+        console.warn('Failed to setup infosource:update listener:', error);
+      }
+    };
+    
+    setupListener();
+    
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [nodeId, node, isInfoSource, appendRawDataEntry, updateNodeMetadata]);
+  
+  // For Market nodes, simulate data from connected sources (existing behavior)
+  useEffect(() => {
+    if (!nodeId || !node) return;
+    if (!isMarket || incomingConnections.length === 0) return;
+    
+    const interval = setInterval(() => {
+      // Simulate latency between 10-150ms
+      const currentLatency = Math.floor(Math.random() * 140) + 10;
+      const isSuccess = Math.random() > 0.05; // 95% success rate
       
-      return () => clearInterval(interval);
-    }
-  }, [nodeId, node, isInfoSource, isMarket, incomingConnections.length, appendRawDataEntry]);
+      // Update latency history (keep last 20 samples)
+      latencyHistoryRef.current.push(currentLatency);
+      if (latencyHistoryRef.current.length > 20) {
+        latencyHistoryRef.current.shift();
+      }
+      
+      // Update success tracking
+      totalCountRef.current++;
+      if (isSuccess) {
+        successCountRef.current++;
+      }
+      
+      // Calculate average latency
+      const avgLatency = latencyHistoryRef.current.reduce((a, b) => a + b, 0) / latencyHistoryRef.current.length;
+      
+      // Calculate success rate
+      const successRate = totalCountRef.current > 0 
+        ? successCountRef.current / totalCountRef.current 
+        : 0;
+      
+      // Update node metadata with quality metrics
+      updateNodeMetadata(nodeId, {
+        quality: {
+          successRate,
+          avgLatency,
+          lastError: isSuccess ? undefined : 'Connection timeout',
+        },
+        lastData: {
+          timestamp: Date.now(),
+          value: undefined,
+        },
+      });
+      
+      // Markets receive data from connected sources
+      appendRawDataEntry(nodeId, {
+        data: {
+          type: 'market_data',
+          bestBid: Math.random() * 0.5 + 0.25,
+          bestAsk: Math.random() * 0.5 + 0.5,
+          volume: Math.floor(Math.random() * 10000),
+        },
+        source: 'connected_sources',
+        status: isSuccess ? 'success' : 'error',
+      });
+    }, 2000); // Every 2 seconds
+    
+    return () => clearInterval(interval);
+  }, [nodeId, node, isMarket, incomingConnections.length, appendRawDataEntry, updateNodeMetadata]);
   
   const handleClearStream = () => {
     if (nodeId) {
@@ -837,6 +936,87 @@ function App(): ReactNode {
 
   // Create ref for createDemoNodes to avoid circular dependency in useEffect
   const createDemoNodesRef = useRef<() => Promise<void> | void>(() => {});
+
+  // -------------------------------------------------------------------------
+  // Global Node Quality Metrics Update
+  // Updates quality metrics (successRate, avgLatency) for all nodes periodically
+  // -------------------------------------------------------------------------
+  
+  const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
+  
+  useEffect(() => {
+    // Track latency history per node for averaging
+    const latencyHistory: Record<string, number[]> = {};
+    const successCount: Record<string, number> = {};
+    const totalCount: Record<string, number> = {};
+    
+    const updateInterval = setInterval(() => {
+      const currentNodes = useStore.getState().nodes;
+      
+      Object.values(currentNodes).forEach(node => {
+        if (!node?.id) return;
+        
+        const nodeId = node.id;
+        const isInfoSource = node.node_type && 'InfoSource' in node.node_type;
+        const isMarket = node.node_type && 'Market' in node.node_type;
+        
+        // Only update quality for info sources and markets with incoming connections
+        const incomingConns = useStore.getState().connections.filter(c => c.target === nodeId);
+        if (!isInfoSource && !isMarket) return;
+        if (isMarket && incomingConns.length === 0) return;
+        
+        // Initialize tracking for new nodes
+        if (!latencyHistory[nodeId]) {
+          latencyHistory[nodeId] = [];
+          successCount[nodeId] = 0;
+          totalCount[nodeId] = 0;
+        }
+        
+        // Simulate latency between 15-80ms for connected nodes
+        const currentLatency = Math.floor(Math.random() * 65) + 15;
+        const isSuccess = Math.random() > 0.02; // 98% success rate
+        
+        // Update latency history (keep last 20 samples)
+        latencyHistory[nodeId].push(currentLatency);
+        if (latencyHistory[nodeId].length > 20) {
+          latencyHistory[nodeId].shift();
+        }
+        
+        // Update success tracking
+        totalCount[nodeId]++;
+        if (isSuccess) {
+          successCount[nodeId]++;
+        }
+        
+        // Calculate average latency
+        const avgLatency = latencyHistory[nodeId].reduce((a, b) => a + b, 0) / latencyHistory[nodeId].length;
+        
+        // Calculate success rate
+        const successRate = totalCount[nodeId] > 0 
+          ? successCount[nodeId] / totalCount[nodeId] 
+          : 0;
+        
+        // Get current metadata to preserve other fields
+        const currentMetadata = node.metadata as Record<string, any> || {};
+        
+        // Update node metadata with quality metrics
+        updateNodeMetadata(nodeId, {
+          ...currentMetadata,
+          quality: {
+            successRate,
+            avgLatency,
+            lastError: isSuccess ? undefined : 'Connection timeout',
+          },
+          lastData: {
+            timestamp: Date.now(),
+            value: currentMetadata.lastData?.value,
+          },
+        });
+      });
+    }, 2000); // Update every 2 seconds
+    
+    return () => clearInterval(updateInterval);
+  }, [updateNodeMetadata]);
 
   useEffect(() => {
     let isMounted = true;

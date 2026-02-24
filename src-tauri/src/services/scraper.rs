@@ -253,6 +253,8 @@ pub struct ScraperHandle {
     pub join_handle: std::sync::Arc<tokio::task::JoinHandle<()>>,
     /// Channel to signal graceful shutdown
     pub shutdown_tx: mpsc::Sender<()>,
+    /// Channel to send commands (for WebSocket scrapers)
+    pub command_tx: Option<mpsc::Sender<super::websocket_scraper::ScraperCommand>>,
 }
 
 /// Spawn a new scraper task for the given data source
@@ -304,6 +306,7 @@ pub async fn spawn_scraper(
     Ok(ScraperHandle {
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
+        command_tx: None, // HTTP scrapers don't support dynamic commands
     })
 }
 
@@ -325,8 +328,10 @@ async fn spawn_websocket_scraper(
         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
     
+    // Support both storageIntervalMs (from frontend) and storage_interval_seconds (alternative format)
     let storage_interval_ms = config.get("storageIntervalMs")
         .and_then(|v| v.as_u64())
+        .or_else(|| config.get("storage_interval_seconds").and_then(|v| v.as_u64()).map(|s| s * 1000))
         .unwrap_or(60000); // Default: 1 minute
     
     let include_orderbook = config.get("includeOrderbook")
@@ -373,6 +378,7 @@ async fn spawn_websocket_scraper(
     Ok(ScraperHandle {
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
+        command_tx: Some(command_tx), // WebSocket scrapers support dynamic commands
     })
 }
 

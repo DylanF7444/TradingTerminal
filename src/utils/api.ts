@@ -465,16 +465,36 @@ export async function addDataSource(
 }
 
 /**
+ * Statistics returned when a node is deleted with cascade.
+ */
+export interface DeleteNodeStats {
+  /** Number of timeseries entries deleted */
+  timeseries_deleted: number;
+  /** Number of websocket messages deleted */
+  websocket_messages_deleted: number;
+  /** Number of connections deleted */
+  connections_deleted: number;
+  /** Number of scraper status entries deleted */
+  scraper_status_deleted: number;
+  /** Number of positions deleted */
+  positions_deleted: number;
+  /** Whether the node was successfully archived */
+  node_archived: boolean;
+}
+
+/**
  * Remove a data source and stop its scraper.
+ * Cleans up all associated database records.
  * 
- * Backend: commands::data_sources::remove_data_source
+ * Backend: commands::data_sources::remove_data_source_cmd
  * 
  * @param id Source ID to remove
+ * @returns Statistics about what was deleted
  */
 export async function removeDataSource(
   id: SourceId
-): Promise<Result<void, ApiError>> {
-  return invokeCommand<void>('remove_data_source_cmd', { nodeId: id });
+): Promise<Result<DeleteNodeStats, ApiError>> {
+  return invokeCommand<DeleteNodeStats>('remove_data_source_cmd', { nodeId: id });
 }
 
 /**
@@ -549,17 +569,19 @@ export async function addNode(
 
 /**
  * Remove a node from the graph.
+ * Cleans up all associated database records (timeseries, websocket messages, connections, etc.)
  * 
  * Backend: commands::data_sources::remove_data_source_cmd
  * 
  * @param id Node ID to remove
- * @param cascade Whether to remove connected nodes
+ * @param cascade Whether to remove connected nodes (unused, kept for API compatibility)
+ * @returns Statistics about what was deleted
  */
 export async function removeNode(
   id: string,
   cascade: boolean = false
-): Promise<Result<void, ApiError>> {
-  return invokeCommand<void>('remove_data_source_cmd', { nodeId: id, cascade });
+): Promise<Result<DeleteNodeStats, ApiError>> {
+  return invokeCommand<DeleteNodeStats>('remove_data_source_cmd', { nodeId: id, cascade });
 }
 
 /**

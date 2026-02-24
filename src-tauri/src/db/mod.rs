@@ -98,6 +98,8 @@ pub use sqlite::{
     insert_node,
     update_node,
     delete_node,
+    delete_node_cascade,
+    DeleteNodeStats,
     get_node_by_id,
     get_all_active_nodes,
     insert_timeseries,

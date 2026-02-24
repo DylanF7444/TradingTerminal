@@ -648,7 +648,7 @@ async fn add_data_source_cmd(
 async fn remove_data_source_cmd(
     node_id: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<sqlite::DeleteNodeStats, String> {
     info!("Removing data source: {}", node_id);
     
     // Stop scraper
@@ -656,14 +656,17 @@ async fn remove_data_source_cmd(
         scraper::stop_scraper(&handle).await.map_err(|e| e.to_string())?;
     }
     
-    // Archive in database (soft delete)
-    tokio::task::block_in_place(|| {
+    // Delete node and all associated data (cascade delete)
+    let stats = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
-        sqlite::delete_node(&conn, &node_id)
+        sqlite::delete_node_cascade(&conn, &node_id)
             .map_err(|e| format!("Database error: {}", e))
     })?;
     
-    Ok(())
+    info!("Data source removed: {} (deleted {} timeseries, {} websocket messages, {} connections)", 
+        node_id, stats.timeseries_deleted, stats.websocket_messages_deleted, stats.connections_deleted);
+    
+    Ok(stats)
 }
 
 /// Get all active data sources
@@ -685,12 +688,43 @@ async fn update_data_source_cmd(
     config: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<models::node::Node, String> {
-    // TODO: Implement
-    // 1. Fetch node from DB
-    // 2. Update metadata
-    // 3. Restart scraper with new config
-    // 4. Return updated node
-    Err("Not implemented".to_string())
+    info!("Updating data source: {}", node_id);
+    
+    // Fetch existing node from database
+    let mut node = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_node_by_id(&conn, &node_id)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    // Update metadata with new config
+    node.metadata = config.clone();
+    
+    // Save updated node to database
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::update_node(&conn, &node)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    // If this is a WebSocket scraper with storage_interval_seconds, update it
+    if let Some(storage_interval_ms) = config.get("storageIntervalMs").and_then(|v| v.as_u64()) {
+        // Check if there's an active scraper for this node
+        let scrapers = state.active_scrapers.lock().await;
+        if let Some(handle) = scrapers.get(&node_id) {
+            // Send command to update storage interval if the scraper supports it
+            if let Some(ref command_tx) = handle.command_tx {
+                use crate::services::websocket_scraper::ScraperCommand;
+                if let Err(e) = command_tx.send(ScraperCommand::SetStorageInterval(storage_interval_ms)).await {
+                    eprintln!("Failed to update storage interval: {}", e);
+                } else {
+                    info!("Updated storage interval for {} to {}ms", node_id, storage_interval_ms);
+                }
+            }
+        }
+    }
+    
+    Ok(node)
 }
 
 /// Get scraper health status
@@ -840,20 +874,22 @@ async fn add_market_cmd(
 async fn remove_market_cmd(
     node_id: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<sqlite::DeleteNodeStats, String> {
     info!("Removing market connection: {}", node_id);
     
-    // Archive in database (soft delete)
-    tokio::task::block_in_place(|| {
+    // Delete node and all associated data (cascade delete)
+    let stats = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
-        sqlite::delete_node(&conn, &node_id)
+        sqlite::delete_node_cascade(&conn, &node_id)
             .map_err(|e| format!("Database error: {}", e))
     })?;
     
     // TODO: Close WebSocket connection if active
     
-    info!("Market node removed: {}", node_id);
-    Ok(())
+    info!("Market node removed: {} (deleted {} timeseries, {} websocket messages, {} connections, {} positions)", 
+        node_id, stats.timeseries_deleted, stats.websocket_messages_deleted, stats.connections_deleted, stats.positions_deleted);
+    
+    Ok(stats)
 }
 
 /// Get all connected markets
