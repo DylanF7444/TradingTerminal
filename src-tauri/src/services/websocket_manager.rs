@@ -74,6 +74,7 @@ pub enum PlatformType {
     Polymarket,
     Kalshi,
     Binance,
+    Coinbase,
 }
 
 impl PlatformType {
@@ -82,6 +83,7 @@ impl PlatformType {
             PlatformType::Polymarket => "polymarket",
             PlatformType::Kalshi => "kalshi",
             PlatformType::Binance => "binance",
+            PlatformType::Coinbase => "coinbase",
         }
     }
 }
@@ -871,6 +873,398 @@ async fn run_binance_consolidated(
 }
 
 // ============================================================================
+// COINBASE CONSOLIDATED CONNECTION
+// ============================================================================
+
+const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
+
+/// Coinbase subscription message format
+#[derive(Debug, Serialize)]
+struct CoinbaseSubscribe {
+    #[serde(rename = "type")]
+    msg_type: String,
+    product_ids: Vec<String>,
+    channels: Vec<String>,
+}
+
+/// Coinbase ticker message
+#[derive(Debug, Deserialize)]
+struct CoinbaseTickerMessage {
+    #[serde(rename = "type")]
+    msg_type: String,
+    product_id: String,
+    price: String,
+    #[serde(default)]
+    best_bid: String,
+    #[serde(default)]
+    best_ask: String,
+    #[serde(default)]
+    volume_24h: String,
+    time: String,
+}
+
+/// Coinbase level2 snapshot message
+#[derive(Debug, Deserialize)]
+struct CoinbaseLevel2Snapshot {
+    #[serde(rename = "type")]
+    msg_type: String,
+    product_id: String,
+    bids: Vec<Vec<String>>,
+    asks: Vec<Vec<String>>,
+}
+
+/// Coinbase level2 update message
+#[derive(Debug, Deserialize)]
+struct CoinbaseLevel2Update {
+    #[serde(rename = "type")]
+    msg_type: String,
+    product_id: String,
+    changes: Vec<Vec<String>>,
+}
+
+/// Run a consolidated Coinbase WebSocket connection
+async fn run_coinbase_consolidated(
+    app_handle: AppHandle,
+    mut command_rx: mpsc::Receiver<ConnectionCommand>,
+    subscribed_markets: Arc<RwLock<HashSet<String>>>,
+) {
+    let mut retry_count = 0u32;
+    let max_retries = 10u32;
+    
+    println!("[Coinbase Consolidated] Starting connection manager");
+    
+    // Current WebSocket state
+    let mut ws_sender: Option<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>> = None;
+    let mut ws_receiver: Option<futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>> = None;
+    
+    // Orderbook state per market (Coinbase sends incremental updates)
+    let mut orderbook_state: HashMap<String, (Vec<OrderbookLevel>, Vec<OrderbookLevel>)> = HashMap::new();
+    
+    loop {
+        tokio::select! {
+            // Handle commands from manager
+            cmd = command_rx.recv() => {
+                match cmd {
+                    Some(ConnectionCommand::AddSubscription { market_id }) => {
+                        // Add to subscribed set
+                        {
+                            let mut subs = subscribed_markets.write().await;
+                            subs.insert(market_id.clone());
+                        }
+                        
+                        // Initialize orderbook state
+                        orderbook_state.entry(market_id.clone()).or_insert_with(|| (Vec::new(), Vec::new()));
+                        
+                        // If connected, send subscription update
+                        if let Some(ref mut sender) = ws_sender {
+                            let subs = subscribed_markets.read().await;
+                            let all_markets: Vec<String> = subs.iter().cloned().collect();
+                            drop(subs);
+                            
+                            // Subscribe to ticker and level2 channels
+                            let subscribe_msg = CoinbaseSubscribe {
+                                msg_type: "subscribe".to_string(),
+                                product_ids: all_markets,
+                                channels: vec![
+                                    "ticker".to_string(),
+                                    "level2_batch".to_string(),
+                                ],
+                            };
+                            
+                            if let Ok(json) = serde_json::to_string(&subscribe_msg) {
+                                println!("[Coinbase Consolidated] Sending subscription update: {}", json);
+                                let _ = sender.send(WsMessage::Text(json)).await;
+                            }
+                        } else {
+                            // Trigger reconnection
+                            println!("[Coinbase Consolidated] No connection, triggering connect");
+                            retry_count = 0;
+                        }
+                    }
+                    Some(ConnectionCommand::RemoveSubscription { market_id }) => {
+                        // Remove from subscribed set
+                        {
+                            let mut subs = subscribed_markets.write().await;
+                            subs.remove(&market_id);
+                        }
+                        
+                        // Remove orderbook state
+                        orderbook_state.remove(&market_id);
+                        
+                        // If connected and still have subscriptions, update
+                        if let Some(ref mut sender) = ws_sender {
+                            let subs = subscribed_markets.read().await;
+                            
+                            if subs.is_empty() {
+                                // No more subscriptions, close connection
+                                println!("[Coinbase Consolidated] No more subscriptions, closing connection");
+                                let _ = sender.close().await;
+                                ws_sender = None;
+                                ws_receiver = None;
+                            } else {
+                                // Unsubscribe from this market
+                                let unsubscribe_msg = CoinbaseSubscribe {
+                                    msg_type: "unsubscribe".to_string(),
+                                    product_ids: vec![market_id.clone()],
+                                    channels: vec!["ticker".to_string(), "level2_batch".to_string()],
+                                };
+                                
+                                if let Ok(json) = serde_json::to_string(&unsubscribe_msg) {
+                                    println!("[Coinbase Consolidated] Sending unsubscribe: {}", json);
+                                    let _ = sender.send(WsMessage::Text(json)).await;
+                                }
+                            }
+                        }
+                    }
+                    Some(ConnectionCommand::Shutdown) | None => {
+                        println!("[Coinbase Consolidated] Shutdown command received");
+                        if let Some(ref mut sender) = ws_sender {
+                            let _ = sender.close().await;
+                        }
+                        break;
+                    }
+                    Some(ConnectionCommand::Reconnect) => {
+                        println!("[Coinbase Consolidated] Reconnect command received");
+                        if let Some(ref mut sender) = ws_sender {
+                            let _ = sender.close().await;
+                        }
+                        ws_sender = None;
+                        ws_receiver = None;
+                        retry_count = 0;
+                    }
+                }
+            }
+            
+            // Handle incoming WebSocket messages
+            msg = async {
+                if let Some(ref mut receiver) = ws_receiver {
+                    receiver.next().await
+                } else {
+                    // No connection, wait a bit
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    None
+                }
+            } => {
+                match msg {
+                    Some(Ok(WsMessage::Text(text))) => {
+                        // Parse message type
+                        if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+                            let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let product_id = value.get("product_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            
+                            match msg_type {
+                                "ticker" => {
+                                    // Handle ticker message
+                                    if let Ok(ticker) = serde_json::from_str::<CoinbaseTickerMessage>(&text) {
+                                        let price = ticker.price.parse::<f64>().unwrap_or(0.0);
+                                        let best_bid = ticker.best_bid.parse::<f64>().ok();
+                                        let best_ask = ticker.best_ask.parse::<f64>().ok();
+                                        
+                                        // Emit price update
+                                        let price_update = serde_json::json!({
+                                            "symbol": ticker.product_id,
+                                            "price": price,
+                                            "bid": best_bid,
+                                            "ask": best_ask,
+                                            "volume_24h": ticker.volume_24h,
+                                            "timestamp": ticker.time,
+                                            "platform": "coinbase",
+                                        });
+                                        let _ = app_handle.emit("price:update", &price_update);
+                                        
+                                        // Also emit raw message for database storage
+                                        let raw_msg = RawWebSocketMessage {
+                                            market_id: ticker.product_id.clone(),
+                                            platform: "coinbase".to_string(),
+                                            raw_message: text.clone(),
+                                            timestamp: Utc::now().timestamp_millis(),
+                                            msg_type: Some("ticker".to_string()),
+                                        };
+                                        let _ = app_handle.emit("orderbook:raw", &raw_msg);
+                                    }
+                                }
+                                "snapshot" => {
+                                    // Handle level2 snapshot
+                                    if let Ok(snapshot) = serde_json::from_str::<CoinbaseLevel2Snapshot>(&text) {
+                                        let bids: Vec<OrderbookLevel> = snapshot.bids.iter()
+                                            .filter_map(|level| {
+                                                let price = level.get(0)?.parse::<f64>().ok()?;
+                                                let size = level.get(1)?.parse::<f64>().ok()?;
+                                                Some(OrderbookLevel { price, size, order_count: None })
+                                            })
+                                            .collect();
+                                        
+                                        let asks: Vec<OrderbookLevel> = snapshot.asks.iter()
+                                            .filter_map(|level| {
+                                                let price = level.get(0)?.parse::<f64>().ok()?;
+                                                let size = level.get(1)?.parse::<f64>().ok()?;
+                                                Some(OrderbookLevel { price, size, order_count: None })
+                                            })
+                                            .collect();
+                                        
+                                        // Update orderbook state
+                                        if let Some(state) = orderbook_state.get_mut(&snapshot.product_id) {
+                                            *state = (bids.clone(), asks.clone());
+                                        }
+                                        
+                                        let update = OrderbookUpdate {
+                                            market_id: snapshot.product_id.clone(),
+                                            platform: "coinbase".to_string(),
+                                            bids,
+                                            asks,
+                                            timestamp: Utc::now().timestamp_millis(),
+                                            sequence: 0,
+                                            last_price: None,
+                                            last_size: None,
+                                        };
+                                        
+                                        let _ = app_handle.emit("orderbook:update", &update);
+                                    }
+                                }
+                                "l2update" => {
+                                    // Handle level2 update
+                                    if let Ok(update_msg) = serde_json::from_str::<CoinbaseLevel2Update>(&text) {
+                                        if let Some(state) = orderbook_state.get_mut(&update_msg.product_id) {
+                                            let (ref mut bids, ref mut asks) = state;
+                                            
+                                            for change in &update_msg.changes {
+                                                let side = change.get(0).map(|s| s.as_str()).unwrap_or("");
+                                                let price = change.get(1).and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
+                                                let size = change.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                
+                                                let level = OrderbookLevel { price, size, order_count: None };
+                                                
+                                                match side {
+                                                    "buy" => {
+                                                        if size == 0.0 {
+                                                            bids.retain(|l| l.price != price);
+                                                        } else {
+                                                            if let Some(existing) = bids.iter_mut().find(|l| l.price == price) {
+                                                                existing.size = size;
+                                                            } else {
+                                                                bids.push(level);
+                                                                bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+                                                            }
+                                                        }
+                                                    }
+                                                    "sell" => {
+                                                        if size == 0.0 {
+                                                            asks.retain(|l| l.price != price);
+                                                        } else {
+                                                            if let Some(existing) = asks.iter_mut().find(|l| l.price == price) {
+                                                                existing.size = size;
+                                                            } else {
+                                                                asks.push(level);
+                                                                asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            
+                                            // Emit updated orderbook
+                                            let update = OrderbookUpdate {
+                                                market_id: update_msg.product_id.clone(),
+                                                platform: "coinbase".to_string(),
+                                                bids: bids.clone(),
+                                                asks: asks.clone(),
+                                                timestamp: Utc::now().timestamp_millis(),
+                                                sequence: 0,
+                                                last_price: None,
+                                                last_size: None,
+                                            };
+                                            
+                                            let _ = app_handle.emit("orderbook:update", &update);
+                                        }
+                                    }
+                                }
+                                "subscriptions" => {
+                                    println!("[Coinbase Consolidated] Subscription confirmed: {}", text);
+                                }
+                                "error" => {
+                                    eprintln!("[Coinbase Consolidated] Error from server: {}", text);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(Ok(WsMessage::Ping(data))) => {
+                        if let Some(ref mut sender) = ws_sender {
+                            let _ = sender.send(WsMessage::Pong(data)).await;
+                        }
+                    }
+                    Some(Ok(WsMessage::Pong(_))) => {
+                        // Pong received, connection is alive
+                    }
+                    Some(Ok(WsMessage::Close(_))) => {
+                        println!("[Coinbase Consolidated] Connection closed by server");
+                        ws_sender = None;
+                        ws_receiver = None;
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("[Coinbase Consolidated] WebSocket error: {}", e);
+                        ws_sender = None;
+                        ws_receiver = None;
+                    }
+                    _ => {}
+                }
+            }
+            
+            // Connection maintenance - reconnect if needed
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                // Check if we need to connect/reconnect
+                if ws_sender.is_none() && ws_receiver.is_none() {
+                    let subs = subscribed_markets.read().await;
+                    if !subs.is_empty() {
+                        println!("[Coinbase Consolidated] Attempting connection (retry {})", retry_count);
+                        
+                        let all_markets: Vec<String> = subs.iter().cloned().collect();
+                        drop(subs);
+                        
+                        match connect_async(COINBASE_WS_URL).await {
+                            Ok((ws_stream, _)) => {
+                                println!("[Coinbase Consolidated] Connected successfully");
+                                let (sender, receiver) = ws_stream.split();
+                                ws_sender = Some(sender);
+                                ws_receiver = Some(receiver);
+                                
+                                // Send initial subscription
+                                if let Some(ref mut sender) = ws_sender {
+                                    let subscribe_msg = CoinbaseSubscribe {
+                                        msg_type: "subscribe".to_string(),
+                                        product_ids: all_markets,
+                                        channels: vec![
+                                            "ticker".to_string(),
+                                            "level2_batch".to_string(),
+                                        ],
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&subscribe_msg) {
+                                        println!("[Coinbase Consolidated] Sending initial subscription: {}", json);
+                                        let _ = sender.send(WsMessage::Text(json)).await;
+                                    }
+                                }
+                                
+                                retry_count = 0;
+                            }
+                            Err(e) => {
+                                eprintln!("[Coinbase Consolidated] Connection failed: {}", e);
+                                retry_count += 1;
+                                if retry_count >= max_retries {
+                                    eprintln!("[Coinbase Consolidated] Max retries reached");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("[Coinbase Consolidated] Connection manager exiting");
+}
+
+// ============================================================================
 // WEBSOCKET MANAGER IMPLEMENTATION
 // ============================================================================
 
@@ -940,6 +1334,13 @@ impl WebSocketManager {
                 }
                 PlatformType::Binance => {
                     tokio::spawn(run_binance_consolidated(
+                        app_handle,
+                        command_rx,
+                        subscribed_markets_clone,
+                    ))
+                }
+                PlatformType::Coinbase => {
+                    tokio::spawn(run_coinbase_consolidated(
                         app_handle,
                         command_rx,
                         subscribed_markets_clone,

@@ -274,7 +274,7 @@ pub enum NodeType {
 }
 
 /// Specific types of information sources
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InfoSourceType {
     /// Cryptocurrency price data (Bitcoin, Ethereum, etc.)
     CryptoPrices,

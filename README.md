@@ -2,6 +2,23 @@
 
 A desktop trading terminal for prediction markets (Polymarket, Kalshi) built with Tauri 2, React, and Rust.
 
+## Data Sources
+
+### Crypto Price Feeds
+The terminal uses **Coinbase WebSocket** as the primary/default source for real-time cryptocurrency prices. Coinbase provides:
+- Real-time ticker updates (price, bid/ask spreads)
+- Level 2 orderbook data via `level2_batch` channel
+- Reliable WebSocket connections with automatic reconnection
+- No API key required for public market data
+
+Supported trading pairs include: BTC-USD, ETH-USD, SOL-USD, and more.
+
+Alternative crypto providers available:
+- **Binance** - High frequency, requires API key
+- **CoinGecko** - Free tier, rate limited (REST API only)
+- **CoinMarketCap** - Comprehensive metadata
+- **CryptoCompare** - Historical data specialist
+
 ## Architecture Overview
 
 ```

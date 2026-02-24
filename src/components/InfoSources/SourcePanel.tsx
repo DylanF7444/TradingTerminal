@@ -262,9 +262,9 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
   [InfoSourceType.CryptoPrices]: {
     label: 'Crypto Prices',
     icon: Bitcoin,
-    description: 'Real-time cryptocurrency price feeds',
+    description: 'Real-time cryptocurrency price feeds via WebSocket',
     color: 'text-orange-400',
-    defaultConfig: { symbols: 'BTC,ETH', update_interval_seconds: 5, exchange: 'binance' }
+    defaultConfig: { symbols: 'BTC-USD,ETH-USD', update_interval_seconds: 5, provider: 'coinbase' }
   },
   [InfoSourceType.FinancialPrices]: {
     label: 'Financial Prices',
@@ -377,6 +377,17 @@ export default function SourcePanel({
       setLocalError('Please enter at least one cryptocurrency symbol');
       return;
     }
+    
+    // Validate Coinbase symbol format (must be BTC-USD, not BTC)
+    if (selectedType === InfoSourceType.CryptoPrices && config.provider === 'coinbase') {
+      const symbols = config.symbols?.split(',').map((s: string) => s.trim()) || [];
+      const invalidSymbols = symbols.filter((s: string) => !s.includes('-'));
+      if (invalidSymbols.length > 0) {
+        setLocalError(`Coinbase symbols must include currency pair (e.g., BTC-USD). Invalid: ${invalidSymbols.join(', ')}`);
+        return;
+      }
+    }
+    
     if (selectedType === InfoSourceType.Livestream && !config.url) {
       setLocalError('Please enter a valid stream URL');
       return;
@@ -429,12 +440,33 @@ export default function SourcePanel({
         return (
           <div className="space-y-4">
             <div>
-              <label className={labelClass}>Symbols (comma-separated)</label>
+              <label className={labelClass}>Provider</label>
+              <select
+                value={config.provider || 'coinbase'}
+                onChange={(e) => handleConfigChange('provider', e.target.value)}
+                className={commonInputClass}
+              >
+                <option value="coinbase">Coinbase (WebSocket - Real-time)</option>
+                <option value="coingecko">CoinGecko (HTTP Polling)</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                {config.provider === 'coinbase' 
+                  ? 'WebSocket connection for real-time price updates'
+                  : 'HTTP polling with 5-second intervals'}
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>
+                Symbols (comma-separated)
+                {config.provider === 'coinbase' && (
+                  <span className="text-xs text-gray-500 ml-1">(use BTC-USD format)</span>
+                )}
+              </label>
               <input
                 type="text"
                 value={config.symbols || ''}
                 onChange={(e) => handleConfigChange('symbols', e.target.value)}
-                placeholder="BTC, ETH, SOL"
+                placeholder={config.provider === 'coinbase' ? "BTC-USD, ETH-USD, SOL-USD" : "BTC, ETH, SOL"}
                 className={commonInputClass}
               />
             </div>

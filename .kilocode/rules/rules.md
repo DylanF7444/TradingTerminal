@@ -7,7 +7,7 @@ Read README.md for architecture overview and conventions.
 - All Tauri commands use `_cmd` suffix (e.g., `get_positions_cmd`)
 - Rust types map to TypeScript: f64→number, Option<T>→T|undefined, Vec<T>→T[]
 - Always persist state changes to SQLite via Tauri commands
-
+- Update comment sections of files to reflect any changes made
 ## Key Files
 - src/types/ - TypeScript definitions
 - src/utils/api.ts - Backend communication

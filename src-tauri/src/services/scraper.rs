@@ -258,6 +258,7 @@ pub struct ScraperHandle {
 /// Spawn a new scraper task for the given data source
 /// 
 /// This is the main entry point called by commands::data_sources::add_data_source
+/// For WebSocket-capable sources (Coinbase crypto), spawns a WebSocket scraper instead
 pub async fn spawn_scraper(
     node_id: String,
     source_type: InfoSourceType,
@@ -265,6 +266,18 @@ pub async fn spawn_scraper(
     db: Arc<Mutex<Connection>>,
     window: Window,
 ) -> Result<ScraperHandle, anyhow::Error> {
+    
+    // Check if this is a WebSocket-capable source
+    if source_type == InfoSourceType::CryptoPrices {
+        let provider = config.get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("coingecko");
+        
+        if provider == "coinbase" {
+            // Use WebSocket scraper for Coinbase
+            return spawn_websocket_scraper(node_id, source_type, config, db, window).await;
+        }
+    }
     
     // Parse configuration from node metadata
     let scraper_config = parse_config(&source_type, &config)?;
@@ -288,6 +301,75 @@ pub async fn spawn_scraper(
     
     println!("Scraper spawned for node {}: {:?}", node_id, source_type);
     
+    Ok(ScraperHandle {
+        join_handle: std::sync::Arc::new(join_handle),
+        shutdown_tx,
+    })
+}
+
+/// Spawn a WebSocket-based scraper for real-time data sources
+async fn spawn_websocket_scraper(
+    node_id: String,
+    source_type: InfoSourceType,
+    config: JsonValue,
+    db: Arc<Mutex<Connection>>,
+    window: Window,
+) -> Result<ScraperHandle, anyhow::Error> {
+    use super::websocket_scraper::{
+        WebSocketScraperConfig, run_coinbase_scraper, ScraperCommand,
+    };
+    
+    // Parse WebSocket-specific config
+    let symbols: Vec<String> = config.get("symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    
+    let storage_interval_ms = config.get("storageIntervalMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60000); // Default: 1 minute
+    
+    let include_orderbook = config.get("includeOrderbook")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    
+    let orderbook_depth = config.get("orderbookDepth")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as usize;
+    
+    let ws_config = WebSocketScraperConfig {
+        node_id: node_id.clone(),
+        source_type,
+        provider: "coinbase".to_string(),
+        symbols,
+        storage_interval_ms,
+        include_orderbook,
+        orderbook_depth,
+    };
+    
+    // Create shutdown channel for WebSocket scraper
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+    
+    // Create command channel for WebSocket scraper
+    let (command_tx, command_rx) = mpsc::channel(100);
+    
+    // Clone shutdown receiver for the wrapper task
+    let command_tx_clone = command_tx.clone();
+    
+    // Spawn a wrapper task that converts shutdown signal to WebSocket command
+    let _shutdown_handle = tokio::spawn(async move {
+        // Wait for shutdown signal
+        let _ = shutdown_rx.recv().await;
+        // Send shutdown command to WebSocket scraper
+        let _ = command_tx_clone.send(ScraperCommand::Shutdown).await;
+    });
+    
+    // Spawn WebSocket scraper
+    let join_handle = tokio::spawn(run_coinbase_scraper(ws_config, db, window, command_rx));
+    
+    println!("WebSocket scraper spawned for node {}: coinbase", node_id);
+    
+    // Wait for both tasks (shutdown wrapper and actual scraper)
     Ok(ScraperHandle {
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,

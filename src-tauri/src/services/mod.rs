@@ -181,6 +181,7 @@ pub mod analyzer;
 pub mod executor;
 pub mod orderbook;
 pub mod websocket_manager;
+pub mod websocket_scraper;
 pub mod startup;
 
 use std::sync::Arc;

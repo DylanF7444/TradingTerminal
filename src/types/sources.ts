@@ -347,6 +347,13 @@ export interface CryptoPricesConfig extends BaseSourceConfig {
   /** Orderbook depth levels */
   orderbookDepth: number;
   
+  /** Storage interval for WebSocket data (milliseconds)
+   *  When using WebSocket providers (Coinbase), data is received in real-time
+   *  but only stored to database at this interval to reduce write load.
+   *  Default: 60000 (1 minute)
+   */
+  storageIntervalMs?: number;
+  
   /** Provider-specific settings */
   providerConfig?: {
     /** CoinGecko: API tier (free/pro/enterprise) */
@@ -364,6 +371,9 @@ export interface CryptoPricesConfig extends BaseSourceConfig {
  * Supported crypto data providers.
  */
 export enum CryptoProvider {
+  /** Coinbase - primary/default WebSocket provider for real-time prices */
+  Coinbase = 'coinbase',
+  
   /** CoinGecko - free tier available, rate limited */
   CoinGecko = 'coingecko',
   
@@ -1179,12 +1189,13 @@ export function getDefaultConfig(
       return {
         ...base,
         type,
-        provider: CryptoProvider.CoinGecko,
+        provider: CryptoProvider.Coinbase,
         symbols: ['BTC-USD', 'ETH-USD'],
-        granularity: '5m',
-        includeOrderbook: false,
+        granularity: 'tick',
+        includeOrderbook: true,
         orderbookDepth: 10,
-        interval: 5,
+        interval: 0, // Real-time via WebSocket
+        deliveryMode: DeliveryMode.WebSocket,
       } as Partial<CryptoPricesConfig>;
       
     case InfoSourceType.NewsSource:
@@ -1255,6 +1266,7 @@ export const MAX_SOURCES_PER_TYPE: Record<InfoSourceType, number> = {
 
 /** Default rate limits (requests per minute) by provider */
 export const DEFAULT_RATE_LIMITS: Record<string, number> = {
+  [CryptoProvider.Coinbase]: 10000,     // WebSocket primary, high limit
   [CryptoProvider.CoinGecko]: 50,      // Free tier
   [CryptoProvider.Binance]: 1200,
   [NewsProvider.NewsAPI]: 100,          // Developer tier
