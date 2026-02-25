@@ -542,6 +542,18 @@ function NodeDetailsPanel({
               <span className="text-gray-300">{metadata.exchange}</span>
             </div>
           )}
+          {metadata?.provider && (
+            <div className="flex justify-between">
+              <span className="text-gray-500">Provider:</span>
+              <span className="text-gray-300">{metadata.provider}</span>
+            </div>
+          )}
+          {metadata?.storage_interval_seconds && (
+            <div className="flex justify-between">
+              <span className="text-gray-500">DB Storage Interval:</span>
+              <span className="text-gray-300">{metadata.storage_interval_seconds}s</span>
+            </div>
+          )}
           {metadata?.autoTrade !== undefined && (
             <div className="flex justify-between">
               <span className="text-gray-500">Auto Trade:</span>
@@ -557,6 +569,53 @@ function NodeDetailsPanel({
             </div>
           )}
         </div>
+        
+        {/* Storage Interval Adjustment for Coinbase CryptoPrices */}
+        {isInfoSource && nodeSubtype === 'CryptoPrices' && metadata?.provider === 'coinbase' && (
+          <div className="mt-3 pt-3 border-t border-gray-700">
+            <label className="block text-xs text-gray-400 mb-1">
+              Adjust DB Storage Interval
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min="10"
+                max="300"
+                step="10"
+                value={metadata.storage_interval_seconds || 60}
+                onChange={async (e) => {
+                  const newInterval = parseInt(e.target.value);
+                  try {
+                    await invoke('update_data_source_cmd', {
+                      node_id: node.id,
+                      config: {
+                        ...metadata,
+                        storage_interval_seconds: newInterval,
+                        storageIntervalMs: newInterval * 1000,
+                      }
+                    });
+                    // Update local node metadata
+                    const updateNodeMetadata = useStore.getState().updateNodeMetadata;
+                    if (updateNodeMetadata) {
+                      updateNodeMetadata(node.id, {
+                        ...metadata,
+                        storage_interval_seconds: newInterval,
+                        storageIntervalMs: newInterval * 1000,
+                      });
+                    }
+                  } catch (err) {
+                    console.error('Failed to update storage interval:', err);
+                  }
+                }}
+                className="flex-1 h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+              />
+              <span className="text-xs text-gray-400 w-8">{metadata.storage_interval_seconds || 60}s</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Raw stream updates in real-time. DB writes at this interval.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Technical Details (collapsible) */}
@@ -616,113 +675,15 @@ function RawStreamTab({ nodeId }: { nodeId: string | undefined }): ReactNode {
   
   // Get the current node to check its type
   const node = nodeId ? nodes[nodeId] : null;
-  const isInfoSource = node?.node_type && 'InfoSource' in node.node_type;
   const isMarket = node?.node_type && 'Market' in node.node_type;
   
-  // Ref to track latency history for averaging
+  // Ref to track latency history for averaging (used for Market node simulation)
   const latencyHistoryRef = useRef<number[]>([]);
   const successCountRef = useRef<number>(0);
   const totalCountRef = useRef<number>(0);
-  const lastEventTimeRef = useRef<number>(Date.now());
   
-  // Listen for real-time infosource:update events from backend WebSocket scraper
-  // These events are emitted immediately for each price update, while database
-  // insertion happens at a configurable storage_interval_ms
-  useEffect(() => {
-    if (!nodeId || !node) return;
-    
-    // Only listen for InfoSource nodes of type CryptoPrices
-    if (!isInfoSource) return;
-    
-    const subtype = (node.node_type as { InfoSource: string }).InfoSource;
-    if (subtype !== 'CryptoPrices') return;
-    
-    let unlisten: (() => void) | null = null;
-    
-    // Import listen dynamically to avoid issues in non-Tauri environments
-    const setupListener = async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        
-        unlisten = await listen('infosource:update', (event) => {
-          const payload = event.payload as {
-            nodeId: string;
-            symbol: string;
-            price: number;
-            bid?: number;
-            ask?: number;
-            volume_24h?: string;
-            timestamp: number;
-            source: string;
-          };
-          
-          // Only process events for this node
-          if (payload.nodeId !== nodeId) return;
-          
-          // Calculate latency (time between event emission and receipt)
-          const now = Date.now();
-          const eventLatency = now - payload.timestamp;
-          
-          // Update latency history (keep last 20 samples)
-          latencyHistoryRef.current.push(Math.min(eventLatency, 1000)); // Cap at 1s for outliers
-          if (latencyHistoryRef.current.length > 20) {
-            latencyHistoryRef.current.shift();
-          }
-          
-          // Update success tracking
-          totalCountRef.current++;
-          successCountRef.current++;
-          
-          // Calculate average latency
-          const avgLatency = latencyHistoryRef.current.reduce((a, b) => a + b, 0) / latencyHistoryRef.current.length;
-          
-          // Calculate success rate
-          const successRate = totalCountRef.current > 0 
-            ? successCountRef.current / totalCountRef.current 
-            : 0;
-          
-          // Update node metadata with quality metrics
-          updateNodeMetadata(nodeId, {
-            quality: {
-              successRate,
-              avgLatency,
-              lastError: undefined,
-            },
-            lastData: {
-              timestamp: now,
-              value: payload.price,
-            },
-          });
-          
-          // Add to raw stream display - this happens in real-time for every update
-          appendRawDataEntry(nodeId, {
-            data: {
-              type: 'price_update',
-              symbol: payload.symbol,
-              price: payload.price,
-              bid: payload.bid,
-              ask: payload.ask,
-              volume_24h: payload.volume_24h,
-            },
-            source: payload.source || 'coinbase_websocket',
-            status: 'success',
-          });
-          
-          lastEventTimeRef.current = now;
-        });
-      } catch (error) {
-        console.warn('Failed to setup infosource:update listener:', error);
-      }
-    };
-    
-    setupListener();
-    
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, [nodeId, node, isInfoSource, appendRawDataEntry, updateNodeMetadata]);
+  // Note: infosource:update events are now handled by a global listener in App component
+  // This component reads from the rawDataStreams store which is populated by that global listener
   
   // For Market nodes, simulate data from connected sources (existing behavior)
   useEffect(() => {
@@ -944,6 +905,84 @@ function App(): ReactNode {
   
   const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
   
+  // -------------------------------------------------------------------------
+  // Global WebSocket Event Listener for InfoSource Updates
+  // Listens for 'infosource:update' events from backend Coinbase scraper
+  // -------------------------------------------------------------------------
+  
+  const appendRawDataEntry = useStore((state: StoreState) => state.appendRawDataEntry);
+  
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    
+    const setupGlobalListener = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        
+        unlisten = await listen('infosource:update', (event) => {
+          const payload = event.payload as {
+            nodeId: string;
+            symbol: string;
+            price: number;
+            bid?: number;
+            ask?: number;
+            volume_24h?: string;
+            timestamp: number;
+            source: string;
+          };
+          
+          console.log('[Global] Received infosource:update:', payload);
+          
+          // Add to raw stream display for the specific node
+          appendRawDataEntry(payload.nodeId, {
+            data: {
+              type: 'price_update',
+              symbol: payload.symbol,
+              price: payload.price,
+              bid: payload.bid,
+              ask: payload.ask,
+              volume_24h: payload.volume_24h,
+            },
+            source: payload.source || 'coinbase_websocket',
+            status: 'success',
+          });
+          
+          // Update node metadata with latest price
+          const currentNodes = useStore.getState().nodes;
+          const node = currentNodes[payload.nodeId];
+          if (node) {
+            const currentMetadata = node.metadata as Record<string, any> || {};
+            updateNodeMetadata(payload.nodeId, {
+              ...currentMetadata,
+              lastData: {
+                timestamp: payload.timestamp,
+                value: payload.price,
+              },
+              quality: {
+                ...(currentMetadata.quality || {}),
+                successRate: 1.0,
+                avgLatency: 0,
+                lastError: undefined,
+              },
+            });
+          }
+        });
+        
+        console.log('[Global] infosource:update listener registered');
+      } catch (error) {
+        console.warn('[Global] Failed to setup infosource:update listener:', error);
+      }
+    };
+    
+    setupGlobalListener();
+    
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [appendRawDataEntry, updateNodeMetadata]);
+
   useEffect(() => {
     // Track latency history per node for averaging
     const latencyHistory: Record<string, number[]> = {};
