@@ -268,12 +268,17 @@ pub async fn spawn_scraper(
     db: Arc<Mutex<Connection>>,
     window: Window,
 ) -> Result<ScraperHandle, anyhow::Error> {
+    // DEBUG: Print incoming config
+    println!("[SCRAPER] spawn_scraper called for node {} with source_type {:?}", node_id, source_type);
+    println!("[SCRAPER] Config: {}", config);
     
     // Check if this is a WebSocket-capable source
     if source_type == InfoSourceType::CryptoPrices {
         let provider = config.get("provider")
             .and_then(|v| v.as_str())
             .unwrap_or("coingecko");
+        
+        println!("[SCRAPER] Detected provider: {}", provider);
         
         if provider == "coinbase" {
             // Use WebSocket scraper for Coinbase
@@ -322,11 +327,16 @@ async fn spawn_websocket_scraper(
         WebSocketScraperConfig, run_coinbase_scraper, ScraperCommand,
     };
     
+    // DEBUG: Print that we entered websocket scraper
+    println!("[SCRAPER] Entered spawn_websocket_scraper for node {}", node_id);
+    
     // Parse WebSocket-specific config
     let symbols: Vec<String> = config.get("symbols")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    
+    println!("[SCRAPER] Parsed symbols: {:?}", symbols);
     
     // Support both storageIntervalMs (from frontend) and storage_interval_seconds (alternative format)
     let storage_interval_ms = config.get("storageIntervalMs")
