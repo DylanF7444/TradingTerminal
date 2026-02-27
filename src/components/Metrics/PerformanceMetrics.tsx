@@ -351,15 +351,6 @@ function formatTime(date: Date): string {
   });
 }
 
-// Format bytes to human readable format
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
 // Metric data interfaces
 interface MetricValue {
   current: number;
@@ -869,7 +860,7 @@ export default function PerformanceMetrics({
           <MetricCard
             label="Network"
             value={networkMetrics ? networkMetrics.bytes_received + networkMetrics.bytes_sent : 0}
-            unit="B"
+            unit=""
             compact
             icon={Network}
           />
@@ -950,6 +941,14 @@ export default function PerformanceMetrics({
             unit="ms"
             icon={Wifi}
             sparklineData={displayMetrics?.latency?.websocket?.history}
+          />
+          
+          <MetricCard
+            label="Bandwidth"
+            value={networkMetrics ? networkMetrics.bytes_received + networkMetrics.bytes_sent : 0}
+            unit=""
+            icon={Network}
+            color="text-blue-400"
           />
         </div>
       </div>
