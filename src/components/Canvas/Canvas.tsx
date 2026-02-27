@@ -314,6 +314,10 @@ export interface CanvasProps {
   onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
   /** Callback to resize a node */
   onNodeResize?: (id: string, size: { width: number; height: number | null }) => void;
+  /** Connection mode state */
+  connectionMode?: boolean;
+  /** Callback when a new connection is created */
+  onCreateConnection?: (sourceId: string, targetId: string) => void;
 }
 
 export default function Canvas({
@@ -330,6 +334,8 @@ export default function Canvas({
   onViewportChange,
   onOpenOrderbook,
   onNodeResize,
+  connectionMode = false,
+  onCreateConnection,
 }: CanvasProps): ReactNode {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -339,6 +345,9 @@ export default function Canvas({
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const didPanRef = useRef(false);
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
+  
+  // Connection mode state
+  const [connectionSource, setConnectionSource] = useState<string | null>(null);
 
   // Default bounds if not provided (large canvas area)
   const defaultBounds: CanvasBounds = {
@@ -666,9 +675,15 @@ export default function Canvas({
     [viewport]
   );
 
-  // Handle click - prevent background click if we were panning
+  // Handle click - prevent background click if we were panning, cancel connection mode
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
+      // Cancel connection mode when clicking on background
+      if (connectionSource) {
+        setConnectionSource(null);
+        return;
+      }
+      
       if (didPanRef.current) {
         e.preventDefault();
         e.stopPropagation();
@@ -677,7 +692,7 @@ export default function Canvas({
       }
       onBackgroundClick();
     },
-    [onBackgroundClick]
+    [onBackgroundClick, connectionSource]
   );
 
   // Handle node drag start
@@ -729,9 +744,15 @@ export default function Canvas({
     };
   }, [draggingNode, viewport, dragOffset, onNodeMove, clampToBounds]);
 
-  // Handle keyboard delete for selected node
+  // Handle keyboard delete for selected node and Escape for connection mode
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape key - cancel connection mode
+      if (e.key === 'Escape' && connectionSource) {
+        setConnectionSource(null);
+        return;
+      }
+      
       // Delete or Backspace key
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNodeId) {
         // Prevent default browser behavior (like going back in history)
@@ -751,7 +772,7 @@ export default function Canvas({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNodeId, onNodeDelete]);
+  }, [selectedNodeId, onNodeDelete, connectionSource]);
 
   return (
     <div
@@ -774,20 +795,44 @@ export default function Canvas({
 
       {/* Node layer - positions handled individually by each NodeComponent */}
       <div className="absolute inset-0 pointer-events-none z-10">
-        {visibleNodes.map((node) => (
-          <NodeComponent
-            key={node.id}
-            node={node}
-            viewport={viewport}
-            isSelected={selectedNodeId === node.id}
-            isDragging={draggingNode === node.id}
-            onClick={() => onNodeClick(node)}
-            onMouseDown={(e) => handleNodeDragStart(node.id, e)}
-            onDelete={() => onNodeDelete(node.id)}
-            onOpenOrderbook={onOpenOrderbook}
-            onResize={onNodeResize ? (id, size) => onNodeResize(id, size) : undefined}
-          />
-        ))}
+        {visibleNodes.map((node) => {
+          // Determine if this node is highlighted for connection mode
+          const isConnectionSource = connectionMode && connectionSource === node.id;
+          const isValidTarget = !!(connectionMode && connectionSource && connectionSource !== node.id);
+          
+          return (
+            <NodeComponent
+              key={node.id}
+              node={node}
+              viewport={viewport}
+              isSelected={selectedNodeId === node.id}
+              isDragging={draggingNode === node.id}
+              isConnectionSource={isConnectionSource}
+              isValidConnectionTarget={isValidTarget}
+              onClick={() => {
+                if (connectionMode) {
+                  // Connection mode: handle connection creation
+                  if (!connectionSource) {
+                    // First click: set source node
+                    setConnectionSource(node.id);
+                  } else if (connectionSource !== node.id) {
+                    // Second click: create connection
+                    onCreateConnection?.(connectionSource, node.id);
+                    // Reset connection mode
+                    setConnectionSource(null);
+                  }
+                } else {
+                  // Normal mode: select node
+                  onNodeClick(node);
+                }
+              }}
+              onMouseDown={(e) => handleNodeDragStart(node.id, e)}
+              onDelete={() => onNodeDelete(node.id)}
+              onOpenOrderbook={onOpenOrderbook}
+              onResize={onNodeResize ? (id, size) => onNodeResize(id, size) : undefined}
+            />
+          );
+        })}
       </div>
 
       {/* Zoom controls */}

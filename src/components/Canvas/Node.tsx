@@ -42,6 +42,10 @@ export interface NodeComponentProps {
   onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
   /** Callback for node resize */
   onResize?: (id: string, size: { width: number; height: number | null }) => void;
+  /** Node is the source of a pending connection */
+  isConnectionSource?: boolean;
+  /** Node is a valid target for connection */
+  isValidConnectionTarget?: boolean;
 }
 
 // Icon components for different source types
@@ -175,6 +179,8 @@ export default function NodeComponent({
   onDelete,
   onOpenOrderbook,
   onResize,
+  isConnectionSource,
+  isValidConnectionTarget,
 }: NodeComponentProps) {
   const [isHovered, setIsHovered] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
@@ -202,18 +208,18 @@ export default function NodeComponent({
       ? (node.node_type as { Market: string }).Market 
       : 'Unknown';
   
-  // Color scheme based on type
+  // Color scheme based on type and connection mode
   const colorScheme = isInfoSource 
     ? { 
         bg: 'bg-slate-800/95', 
-        border: isSelected ? 'border-blue-400' : 'border-slate-600',
+        border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-blue-400' : 'border-slate-600',
         header: 'bg-blue-600',
         accent: 'text-blue-400',
         glow: 'shadow-blue-500/20'
       }
     : { 
         bg: 'bg-slate-800/95', 
-        border: isSelected ? 'border-emerald-400' : 'border-slate-600',
+        border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-emerald-400' : 'border-slate-600',
         header: 'bg-emerald-600',
         accent: 'text-emerald-400',
         glow: 'shadow-emerald-500/20'
@@ -425,8 +431,15 @@ export default function NodeComponent({
             </div>
           </div>
           
+          {/* Connection mode indicator */}
+          {(isConnectionSource || isValidConnectionTarget) && (
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+              isConnectionSource ? 'bg-yellow-400 animate-pulse' : 'bg-green-400 animate-pulse'
+            }`} />
+          )}
+          
           {/* Live indicator for market nodes */}
-          {isMarket && (
+          {isMarket && !isConnectionSource && !isValidConnectionTarget && (
             <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse flex-shrink-0" />
           )}
         </div>
@@ -477,6 +490,25 @@ export default function NodeComponent({
               <span className={`${colorScheme.accent} text-[10px] font-medium`}>AUTO</span>
             )}
           </div>
+
+          {/* Incoming Data from InfoSources (for Market nodes) */}
+          {isMarket && metadata && (metadata as any).incomingData && Object.keys((metadata as any).incomingData).length > 0 && (
+            <div className="mt-2 pt-2 border-t border-slate-700">
+              <div className="text-[10px] text-gray-500 mb-1">Data from sources:</div>
+              <div className="flex flex-wrap gap-1">
+                {Object.values((metadata as any).incomingData).slice(0, 3).map((sourceData: any, idx: number) => (
+                  <div 
+                    key={idx}
+                    className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-900/40 rounded text-[10px]"
+                    title={`${sourceData.sourceName}: ${sourceData.symbol} = $${sourceData.price?.toFixed(2)}`}
+                  >
+                    <span className="text-blue-300">{sourceData.symbol}</span>
+                    <span className="text-emerald-400">${formatPrice(sourceData.price)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         
         {/* Connection Ports (visual only) */}

@@ -522,6 +522,47 @@ function NodeDetailsPanel({
         )}
       </div>
 
+      {/* Incoming Data from InfoSources (for Market nodes) */}
+      {isMarket && metadata?.incomingData && Object.keys(metadata.incomingData).length > 0 && (
+        <div className="bg-gray-800/50 rounded-lg p-3">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">
+            Incoming Data ({Object.keys(metadata.incomingData).length} sources)
+          </h3>
+          <div className="space-y-2">
+            {Object.entries(metadata.incomingData).map(([sourceId, sourceData]: [string, any]) => (
+              <div key={sourceId} className="bg-gray-900/50 rounded p-2 text-xs">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-blue-300 font-medium">{sourceData.sourceName}</span>
+                  {sourceData.strength && (
+                    <span className="text-gray-500">{Math.round(sourceData.strength * 100)}% strength</span>
+                  )}
+                </div>
+                {sourceData.symbol && (
+                  <div className="flex items-center gap-2 text-gray-400">
+                    <span className="font-mono">{sourceData.symbol}</span>
+                    {sourceData.price !== undefined && (
+                      <>
+                        <span className="text-emerald-400">${sourceData.price.toFixed(2)}</span>
+                        {sourceData.bid && sourceData.ask && (
+                          <span className="text-gray-600">
+                            (bid: ${sourceData.bid.toFixed(2)} / ask: ${sourceData.ask.toFixed(2)})
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                {sourceData.timestamp && (
+                  <div className="text-gray-600 mt-1">
+                    Last update: {new Date(sourceData.timestamp).toLocaleTimeString()}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Configuration Details */}
       <div className="bg-gray-800/50 rounded-lg p-3">
         <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Configuration</h3>
@@ -956,7 +997,9 @@ function App(): ReactNode {
           
           // Update node metadata with latest price
           const currentNodes = useStore.getState().nodes;
+          const connections = useStore.getState().connections;
           const node = currentNodes[payload.nodeId];
+          
           if (node) {
             const currentMetadata = node.metadata as Record<string, any> || {};
             
@@ -987,6 +1030,73 @@ function App(): ReactNode {
                 lastError: undefined,
               },
             });
+            
+            // Propagate data to connected Market nodes
+            const outgoingConnections = connections.filter(c => c.source === payload.nodeId);
+            for (const conn of outgoingConnections) {
+              const targetNode = currentNodes[conn.target];
+              if (targetNode && targetNode.node_type && 'Market' in targetNode.node_type) {
+                const targetMetadata = targetNode.metadata as Record<string, any> || {};
+                
+                // Get existing incoming data from sources
+                const existingIncomingData = targetMetadata.incomingData || {};
+                
+                // Add/update data from this source
+                const sourceNodeType = (node.node_type as { InfoSource: string }).InfoSource;
+                const sourceName = targetMetadata.sources?.[payload.nodeId] || sourceNodeType || 'source';
+                
+                const incomingData = { ...existingIncomingData };
+                incomingData[payload.nodeId] = {
+                  sourceName,
+                  sourceType: sourceNodeType,
+                  symbol: payload.symbol,
+                  price: payload.price,
+                  bid: payload.bid,
+                  ask: payload.ask,
+                  volume_24h: payload.volume_24h,
+                  timestamp: payload.timestamp,
+                  strength: conn.strength || 1.0,
+                };
+                
+                // Update target Market node metadata
+                updateNodeMetadata(conn.target, {
+                  ...targetMetadata,
+                  incomingData,
+                  lastData: {
+                    timestamp: payload.timestamp,
+                    // Keep the most recent price as the main value
+                    value: payload.price,
+                    sourceId: payload.nodeId,
+                    symbol: payload.symbol,
+                  },
+                  quality: {
+                    ...(targetMetadata.quality || {}),
+                    successRate: conn.strength || 1.0,
+                    avgLatency: Math.floor(Math.random() * 50) + 10,
+                    lastError: undefined,
+                  },
+                });
+                
+                // Add to target Market node's raw stream
+                appendRawDataEntry(conn.target, {
+                  data: {
+                    type: 'source_data',
+                    fromNode: payload.nodeId,
+                    sourceName,
+                    symbol: payload.symbol,
+                    price: payload.price,
+                    bid: payload.bid,
+                    ask: payload.ask,
+                    volume_24h: payload.volume_24h,
+                    strength: conn.strength || 1.0,
+                  },
+                  source: `info_source:${payload.nodeId}`,
+                  status: 'success',
+                });
+                
+                console.log(`[DataFlow] Propagated ${payload.symbol} data from ${payload.nodeId} to market ${conn.target}`);
+              }
+            }
           }
         });
         
@@ -1293,6 +1403,9 @@ function App(): ReactNode {
   /** Active tab in node detail panel */
   const [detailPanelTab, setDetailPanelTab] = useState<'details' | 'raw-stream' | 'stored-data'>('details');
   
+  /** Connection mode - allows creating connections between nodes */
+  const [connectionMode, setConnectionMode] = useState(false);
+  
   /** Window size for responsive behavior */
   const [windowSize, setWindowSize] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1200,
@@ -1385,10 +1498,26 @@ function App(): ReactNode {
       if (e.key === 'Escape') {
         if (showHelp) {
           setShowHelp(false);
+        } else if (connectionMode) {
+          setConnectionMode(false);
         } else if (selectedIds.size > 0) {
           clearSelection();
         } else if (showRightSidebar) {
           setShowRightSidebar(false);
+        }
+      }
+      
+      // 'c' key to toggle connection mode
+      if (e.key === 'c' && !e.ctrlKey && !e.metaKey) {
+        const activeElement = document.activeElement;
+        const isEditing = activeElement && (
+          activeElement.tagName === 'INPUT' ||
+          activeElement.tagName === 'TEXTAREA' ||
+          (activeElement as HTMLElement).isContentEditable
+        );
+        if (!isEditing) {
+          e.preventDefault();
+          setConnectionMode((prev) => !prev);
         }
       }
 
@@ -1465,6 +1594,39 @@ function App(): ReactNode {
   /** Handle closing orderbook overlay */
   const handleCloseOrderbook = useCallback(() => {
     setOrderbookOverlay(null);
+  }, []);
+
+  /** Handle creating a connection between nodes */
+  const handleCreateConnection = useCallback((sourceId: string, targetId: string) => {
+    const { addConnection, connections } = useStore.getState();
+    
+    // Check if connection already exists
+    const exists = connections.some(
+      (conn) => conn.source === sourceId && conn.target === targetId
+    );
+    
+    if (exists) {
+      console.warn('Connection already exists');
+      return;
+    }
+    
+    // Prevent self-connections
+    if (sourceId === targetId) {
+      console.warn('Cannot connect node to itself');
+      return;
+    }
+    
+    // Add connection with default strength
+    addConnection({
+      source: sourceId as NodeId,
+      target: targetId as NodeId,
+      strength: 0.8,
+    });
+    
+    console.log(`[Connection] Created connection from ${sourceId} to ${targetId}`);
+    
+    // Exit connection mode after creating
+    setConnectionMode(false);
   }, []);
 
   /** Toggle right sidebar */
@@ -1588,6 +1750,20 @@ function App(): ReactNode {
           >
             Positions
           </button>
+          <button
+            onClick={() => setConnectionMode((prev) => !prev)}
+            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              connectionMode ? 'bg-yellow-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+            title="Connect nodes (Press C)"
+          >
+            Connect
+          </button>
+          {connectionMode && (
+            <span className="text-xs text-yellow-400 animate-pulse">
+              Click source node, then target node • ESC to cancel
+            </span>
+          )}
           <div className="flex-1" />
           <button
             onClick={() => setShowSettings(true)}
@@ -1624,6 +1800,8 @@ function App(): ReactNode {
             onViewportChange={handleViewportChange}
             onOpenOrderbook={handleOpenOrderbook}
             onNodeResize={handleNodeResize}
+            connectionMode={connectionMode}
+            onCreateConnection={handleCreateConnection}
           />
         </div>
 
@@ -1834,6 +2012,8 @@ function App(): ReactNode {
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
             onNodeResize={handleNodeResize}
+            connectionMode={connectionMode}
+            onCreateConnection={handleCreateConnection}
           />
         </div>
 
@@ -1937,6 +2117,8 @@ function App(): ReactNode {
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
             onNodeResize={handleNodeResize}
+            connectionMode={connectionMode}
+            onCreateConnection={handleCreateConnection}
           />
         )}
         
