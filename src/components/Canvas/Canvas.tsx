@@ -312,6 +312,8 @@ export interface CanvasProps {
   onViewportChange: (viewport: Viewport) => void;
   /** Callback to open orderbook overlay for market nodes */
   onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
+  /** Callback to resize a node */
+  onNodeResize?: (id: string, size: { width: number; height: number | null }) => void;
 }
 
 export default function Canvas({
@@ -327,6 +329,7 @@ export default function Canvas({
   onBackgroundClick,
   onViewportChange,
   onOpenOrderbook,
+  onNodeResize,
 }: CanvasProps): ReactNode {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -782,6 +785,7 @@ export default function Canvas({
             onMouseDown={(e) => handleNodeDragStart(node.id, e)}
             onDelete={() => onNodeDelete(node.id)}
             onOpenOrderbook={onOpenOrderbook}
+            onResize={onNodeResize ? (id, size) => onNodeResize(id, size) : undefined}
           />
         ))}
       </div>

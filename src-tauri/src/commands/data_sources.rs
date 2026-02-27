@@ -163,6 +163,7 @@ pub async fn add_data_source(
         id: node_id.clone(),
         node_type: NodeType::InfoSource(source_type.clone()),
         position: (0.0, 0.0),
+        size: None,
         connections: vec![],
         metadata: config.clone(),
     };
@@ -317,6 +318,31 @@ pub async fn update_node_position_cmd(
     Ok(())
 }
 
+/// Update the size of a node on the canvas
+/// This is called during resize operations to persist size changes
+#[tauri::command]
+pub async fn update_node_size_cmd(
+    id: String,
+    size: (f64, Option<f64>),
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Get database connection from app state
+    let conn = state.db.lock().await;
+
+    // Fetch existing node
+    let mut node = crate::db::get_node_by_id(&conn, &id)
+        .map_err(|e| format!("Failed to get node: {}", e))?;
+
+    // Update size
+    node.size = Some(size);
+
+    // Save to database
+    crate::db::update_node(&conn, &node)
+        .map_err(|e| format!("Failed to update node size: {}", e))?;
+
+    Ok(())
+}
+
 // ============================================================================
 // DUMMY DATABASE METHODS
 // These would be implemented in db/sqlite.rs in a real application
@@ -345,6 +371,7 @@ async fn fetch_active_nodes_from_db() -> Result<Vec<Node>, anyhow::Error> {
             id: "dummy-node-1".to_string(),
             node_type: NodeType::InfoSource(InfoSourceType::CryptoPrices),
             position: (100.0, 100.0),
+            size: None,
             connections: vec![],
             metadata: json!({
                 "symbols": ["BTC", "ETH"],
@@ -355,6 +382,7 @@ async fn fetch_active_nodes_from_db() -> Result<Vec<Node>, anyhow::Error> {
             id: "dummy-node-2".to_string(),
             node_type: NodeType::InfoSource(InfoSourceType::NewsSource),
             position: (300.0, 100.0),
+            size: None,
             connections: vec![],
             metadata: json!({
                 "sources": ["reuters", "ap"],
@@ -372,6 +400,7 @@ async fn fetch_node_from_db(id: &str) -> Result<Node, anyhow::Error> {
         id: id.to_string(),
         node_type: NodeType::InfoSource(InfoSourceType::CryptoPrices),
         position: (100.0, 100.0),
+        size: None,
         connections: vec![],
         metadata: json!({
             "symbols": ["BTC"],

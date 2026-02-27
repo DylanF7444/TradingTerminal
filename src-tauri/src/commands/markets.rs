@@ -227,6 +227,7 @@ pub async fn add_market<R: Runtime>(
         id: node_id.clone(),
         node_type: NodeType::Market(market_type.clone()),
         position: (100.0 + rand::random::<f64>() * 200.0, 100.0 + rand::random::<f64>() * 200.0),
+        size: None,
         connections: vec![],
         metadata: serde_json::json!({
             "market_id": market_id,

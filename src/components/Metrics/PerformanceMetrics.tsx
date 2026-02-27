@@ -335,9 +335,12 @@ import {
   Clock,
   BarChart3,
   Wifi,
-  Server
+  Server,
+  Network
 } from 'lucide-react';
-import { getSystemInfo, type SystemInfo } from '../../utils/api';
+import { getSystemInfo, getNetworkMetrics, type SystemInfo } from '../../utils/api';
+import type { NetworkMetrics } from '../../types/markets';
+
 // Date formatting utility (replaces date-fns for smaller bundle)
 function formatTime(date: Date): string {
   return date.toLocaleTimeString('en-US', { 
@@ -346,6 +349,15 @@ function formatTime(date: Date): string {
     minute: '2-digit', 
     second: '2-digit' 
   });
+}
+
+// Format bytes to human readable format
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 // Metric data interfaces
@@ -612,6 +624,7 @@ export default function PerformanceMetrics({
   const [activeAlerts, setActiveAlerts] = useState<MetricAlert[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [networkMetrics, setNetworkMetrics] = useState<NetworkMetrics | null>(null);
   
   // Memoize thresholds to prevent unnecessary re-renders
   const thresholds = useMemo(
@@ -632,11 +645,22 @@ export default function PerformanceMetrics({
       }
     };
     
+    const fetchNetworkMetrics = async () => {
+      const result = await getNetworkMetrics();
+      if (result.ok && mounted) {
+        setNetworkMetrics(result.value);
+      }
+    };
+    
     // Initial fetch
     fetchSystemInfo();
+    fetchNetworkMetrics();
     
     // Poll every 2 seconds
-    intervalId = setInterval(fetchSystemInfo, 2000);
+    intervalId = setInterval(() => {
+      fetchSystemInfo();
+      fetchNetworkMetrics();
+    }, 2000);
     
     return () => {
       mounted = false;
@@ -840,6 +864,14 @@ export default function PerformanceMetrics({
             unit=""
             compact
             icon={Activity}
+          />
+          
+          <MetricCard
+            label="Network"
+            value={networkMetrics ? networkMetrics.bytes_received + networkMetrics.bytes_sent : 0}
+            unit="B"
+            compact
+            icon={Network}
           />
         </div>
 

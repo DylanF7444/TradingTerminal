@@ -26,7 +26,7 @@
 //
 // ============================================================================
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import type { Node, InfoSourceMetadata, MarketMetadata } from "../../types/nodes";
 import { InfoSourceType } from "../../types/nodes";
 
@@ -40,6 +40,8 @@ export interface NodeComponentProps {
   onDelete: () => void;
   /** Callback to open orderbook overlay for market nodes */
   onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
+  /** Callback for node resize */
+  onResize?: (id: string, size: { width: number; height: number | null }) => void;
 }
 
 // Icon components for different source types
@@ -172,8 +174,11 @@ export default function NodeComponent({
   onMouseDown,
   onDelete,
   onOpenOrderbook,
+  onResize,
 }: NodeComponentProps) {
   const [isHovered, setIsHovered] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartRef = useRef<{ width: number; height: number; mouseX: number; mouseY: number } | null>(null);
   
   // Transform position based on viewport - with fallback for missing/invalid position
   const nodePosition = node.position && Array.isArray(node.position) && node.position.length >= 2 
@@ -224,14 +229,40 @@ export default function NodeComponent({
   const metrics = useMemo(() => {
     if (isInfoSource) {
       const infoMeta = metadata as InfoSourceMetadata | undefined;
-      const lastData = infoMeta?.lastData;
+      const lastData = infoMeta?.lastData as { timestamp?: number; value?: number | string | Record<string, any>; symbolValues?: Record<string, { price?: number; bid?: number; ask?: number; timestamp?: number }> } | undefined;
       const quality = infoMeta?.quality;
+      const configSymbols = infoMeta?.symbols || [];
+      
+      // Get all symbol values from data
+      const symbolValues = lastData?.symbolValues || {};
+      const dataSymbols = Object.keys(symbolValues);
+      
+      // Build ticker displays for each symbol from price data
+      const tickerDisplays = dataSymbols.map(symbol => {
+        const data = symbolValues[symbol];
+        return data?.price !== undefined 
+          ? `${symbol}: ${formatPrice(data.price)}`
+          : null;
+      }).filter(Boolean);
+      
+      // If we have ticker data, use it. Otherwise use metadata symbols.
+      const hasTickerData = tickerDisplays.length > 0;
+      
+      // Primary: show first symbol's price
+      const primaryValue = hasTickerData
+        ? tickerDisplays[0]?.replace(/^[^:]+: /, '')
+        : (lastData?.value !== undefined 
+            ? (typeof lastData.value === 'number' ? formatPrice(lastData.value) : String(lastData.value))
+            : '--');
+      
+      // Secondary: show ALL ticker prices or fallback to config symbols
+      const secondaryValue = hasTickerData
+        ? tickerDisplays.join(' | ')
+        : (configSymbols.length > 0 ? configSymbols.slice(0, 3).join(', ') : '--');
       
       return {
-        primary: lastData?.value !== undefined 
-          ? (typeof lastData.value === 'number' ? formatPrice(lastData.value) : String(lastData.value))
-          : '--',
-        secondary: infoMeta?.symbols?.slice(0, 2).join(', ') || '--',
+        primary: primaryValue,
+        secondary: secondaryValue,
         status: quality?.successRate !== undefined 
           ? `${(quality.successRate * 100).toFixed(0)}% uptime`
           : 'Connecting...',
@@ -305,6 +336,46 @@ export default function NodeComponent({
   // Show delete button when hovered or selected
   const showDeleteButton = isHovered || isSelected;
 
+  // Get node size - use stored size or default (192px = w-48)
+  const nodeWidth = node.size?.width || 192;
+  const nodeHeight = node.size?.height;
+
+  // Handle resize start
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setIsResizing(true);
+    resizeStartRef.current = {
+      width: nodeWidth,
+      height: nodeHeight || 0,
+      mouseX: e.clientX,
+      mouseY: e.clientY,
+    };
+    
+    // Add global mouse move and up listeners
+    const handleResizeMove = (moveEvent: MouseEvent) => {
+      if (!resizeStartRef.current || !onResize) return;
+      
+      const dx = moveEvent.clientX - resizeStartRef.current.mouseX;
+      const dy = moveEvent.clientY - resizeStartRef.current.mouseY;
+      
+      const newWidth = Math.max(128, resizeStartRef.current.width + dx); // Minimum 128px
+      const newHeight = nodeHeight !== null ? Math.max(80, resizeStartRef.current.height + dy) : null;
+      
+      onResize(node.id, { width: newWidth, height: newHeight });
+    };
+    
+    const handleResizeEnd = () => {
+      setIsResizing(false);
+      resizeStartRef.current = null;
+      window.removeEventListener('mousemove', handleResizeMove);
+      window.removeEventListener('mouseup', handleResizeEnd);
+    };
+    
+    window.addEventListener('mousemove', handleResizeMove);
+    window.addEventListener('mouseup', handleResizeEnd);
+  };
+
   return (
     <div
       className="absolute pointer-events-auto"
@@ -323,7 +394,7 @@ export default function NodeComponent({
       {/* Main Node Card */}
       <div
         className={`
-          w-48 rounded-lg overflow-hidden
+          rounded-lg overflow-hidden
           ${colorScheme.bg} border-2 ${colorScheme.border}
           ${isDragging ? "cursor-grabbing" : "cursor-grab"}
           transition-all duration-150 origin-center
@@ -331,6 +402,10 @@ export default function NodeComponent({
           ${isDragging ? "scale-105 shadow-xl" : "hover:shadow-xl"}
           select-none relative
         `}
+        style={{
+          width: nodeWidth,
+          minHeight: nodeHeight !== null ? nodeHeight : undefined,
+        }}
       >
         {/* Header Section */}
         <div className={`${colorScheme.header} px-3 py-2 flex items-center gap-2`}>
@@ -425,6 +500,23 @@ export default function NodeComponent({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
+      )}
+      
+      {/* Resize handle - appears on hover or selection */}
+      {(showDeleteButton || isResizing) && onResize && (
+        <div
+          onMouseDown={handleResizeStart}
+          className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize z-40"
+          title="Resize node"
+        >
+          <svg 
+            className={`w-3 h-3 text-gray-400 hover:text-white transition-colors ${isResizing ? 'text-white' : ''}`} 
+            viewBox="0 0 24 24" 
+            fill="currentColor"
+          >
+            <path d="M22 22H20V20H22V22ZM22 18H20V16H22V18ZM18 22H16V20H18V22ZM22 14H20V12H22V14ZM18 18H16V16H18V18ZM14 22H12V20H14V22Z" />
+          </svg>
+        </div>
       )}
       
       {/* Market indicator tooltip on hover */}

@@ -1095,6 +1095,16 @@ export interface PerformanceMetrics {
   totalReturn: number;
 }
 
+/**
+ * Network bandwidth metrics from WebSocket connections
+ */
+export interface NetworkMetrics {
+  bytes_received: number;
+  bytes_sent: number;
+  messages_received: number;
+  messages_sent: number;
+}
+
 export interface RiskAssessment {
   positionId: string;
   var95: number;

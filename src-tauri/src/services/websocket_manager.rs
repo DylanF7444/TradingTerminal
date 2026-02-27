@@ -50,6 +50,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -119,6 +120,77 @@ pub struct WebSocketManager {
     app_handle: AppHandle,
     /// Kalshi credentials (if available)
     kalshi_credentials: RwLock<Option<KalshiCredentials>>,
+    /// Network bandwidth metrics (shared across all connections)
+    network_metrics: Arc<NetworkMetrics>,
+}
+
+/// Network bandwidth metrics for tracking data transfer
+#[derive(Debug, Default)]
+pub struct NetworkMetrics {
+    /// Total bytes received via WebSocket
+    bytes_received: AtomicU64,
+    /// Total bytes sent via WebSocket
+    bytes_sent: AtomicU64,
+    /// Total messages received
+    messages_received: AtomicU64,
+    /// Total messages sent
+    messages_sent: AtomicU64,
+}
+
+impl Clone for NetworkMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            bytes_received: AtomicU64::new(self.bytes_received.load(Ordering::Relaxed)),
+            bytes_sent: AtomicU64::new(self.bytes_sent.load(Ordering::Relaxed)),
+            messages_received: AtomicU64::new(self.messages_received.load(Ordering::Relaxed)),
+            messages_sent: AtomicU64::new(self.messages_sent.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl NetworkMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Record bytes received
+    pub fn record_received(&self, bytes: u64) {
+        self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+        self.messages_received.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    /// Record bytes sent
+    pub fn record_sent(&self, bytes: u64) {
+        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+        self.messages_sent.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    /// Get current metrics snapshot
+    pub fn get_snapshot(&self) -> NetworkMetricsSnapshot {
+        NetworkMetricsSnapshot {
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            messages_received: self.messages_received.load(Ordering::Relaxed),
+            messages_sent: self.messages_sent.load(Ordering::Relaxed),
+        }
+    }
+    
+    /// Reset all counters
+    pub fn reset(&self) {
+        self.bytes_received.store(0, Ordering::Relaxed);
+        self.bytes_sent.store(0, Ordering::Relaxed);
+        self.messages_received.store(0, Ordering::Relaxed);
+        self.messages_sent.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Snapshot of network metrics for frontend display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkMetricsSnapshot {
+    pub bytes_received: u64,
+    pub bytes_sent: u64,
+    pub messages_received: u64,
+    pub messages_sent: u64,
 }
 
 // ============================================================================
@@ -141,6 +213,7 @@ async fn run_polymarket_consolidated(
     app_handle: AppHandle,
     mut command_rx: mpsc::Receiver<ConnectionCommand>,
     subscribed_markets: Arc<RwLock<HashSet<String>>>,
+    network_metrics: Arc<NetworkMetrics>,
 ) {
     let mut retry_count = 0u32;
     let max_retries = 10u32;
@@ -246,6 +319,9 @@ async fn run_polymarket_consolidated(
             } => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
+                        // Record network bandwidth (received)
+                        network_metrics.record_received(text.len() as u64);
+                        
                         // Parse and emit message
                         if text == "PONG" {
                             continue;
@@ -383,6 +459,7 @@ async fn run_kalshi_consolidated(
     mut command_rx: mpsc::Receiver<ConnectionCommand>,
     subscribed_markets: Arc<RwLock<HashSet<String>>>,
     credentials: Option<KalshiCredentials>,
+    network_metrics: Arc<NetworkMetrics>,
 ) {
     let mut retry_count = 0u32;
     let max_retries = 10u32;
@@ -511,6 +588,9 @@ async fn run_kalshi_consolidated(
             } => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
+                        // Record network bandwidth (received)
+                        network_metrics.record_received(text.len() as u64);
+                        
                         // Parse message to determine market
                         if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
                             let market_ticker = value.get("market_ticker")
@@ -685,6 +765,7 @@ async fn run_binance_consolidated(
     app_handle: AppHandle,
     mut command_rx: mpsc::Receiver<ConnectionCommand>,
     subscribed_markets: Arc<RwLock<HashSet<String>>>,
+    network_metrics: Arc<NetworkMetrics>,
 ) {
     let mut retry_count = 0u32;
     let max_retries = 10u32;
@@ -778,6 +859,9 @@ async fn run_binance_consolidated(
             } => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
+                        // Record network bandwidth (received)
+                        network_metrics.record_received(text.len() as u64);
+                        
                         // Parse Binance message
                         if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
                             // Binance includes the stream name which has the symbol
@@ -927,6 +1011,7 @@ async fn run_coinbase_consolidated(
     app_handle: AppHandle,
     mut command_rx: mpsc::Receiver<ConnectionCommand>,
     subscribed_markets: Arc<RwLock<HashSet<String>>>,
+    network_metrics: Arc<NetworkMetrics>,
 ) {
     let mut retry_count = 0u32;
     let max_retries = 10u32;
@@ -1047,6 +1132,9 @@ async fn run_coinbase_consolidated(
             } => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
+                        // Record network bandwidth (received)
+                        network_metrics.record_received(text.len() as u64);
+                        
                         // Parse message type
                         if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
                             let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -1275,7 +1363,18 @@ impl WebSocketManager {
             connections: RwLock::new(HashMap::new()),
             app_handle,
             kalshi_credentials: RwLock::new(None),
+            network_metrics: Arc::new(NetworkMetrics::new()),
         }
+    }
+    
+    /// Get network bandwidth metrics snapshot
+    pub fn get_network_metrics(&self) -> NetworkMetricsSnapshot {
+        self.network_metrics.get_snapshot()
+    }
+    
+    /// Get reference to network metrics for recording
+    pub fn network_metrics(&self) -> Arc<NetworkMetrics> {
+        self.network_metrics.clone()
     }
     
     /// Set Kalshi credentials
@@ -1314,6 +1413,7 @@ impl WebSocketManager {
             // Spawn platform-specific connection
             let app_handle = self.app_handle.clone();
             let subscribed_markets_clone = subscribed_markets.clone();
+            let network_metrics = self.network_metrics();
             
             let task_handle = match platform {
                 PlatformType::Polymarket => {
@@ -1321,6 +1421,7 @@ impl WebSocketManager {
                         app_handle,
                         command_rx,
                         subscribed_markets_clone,
+                        network_metrics.clone(),
                     ))
                 }
                 PlatformType::Kalshi => {
@@ -1330,6 +1431,7 @@ impl WebSocketManager {
                         command_rx,
                         subscribed_markets_clone,
                         creds,
+                        network_metrics.clone(),
                     ))
                 }
                 PlatformType::Binance => {
@@ -1337,6 +1439,7 @@ impl WebSocketManager {
                         app_handle,
                         command_rx,
                         subscribed_markets_clone,
+                        network_metrics.clone(),
                     ))
                 }
                 PlatformType::Coinbase => {
@@ -1344,6 +1447,7 @@ impl WebSocketManager {
                         app_handle,
                         command_rx,
                         subscribed_markets_clone,
+                        network_metrics.clone(),
                     ))
                 }
             };

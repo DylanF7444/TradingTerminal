@@ -604,6 +604,25 @@ export async function updateNodePosition(
 }
 
 /**
+ * Update node size (called during resize operations).
+ * 
+ * Backend: commands::data_sources::update_node_size_cmd
+ * 
+ * @param id Node ID
+ * @param size New { width, height } dimensions
+ */
+export async function updateNodeSize(
+  id: string,
+  size: { width: number; height: number | null }
+): Promise<Result<void, ApiError>> {
+  // No retry - size updates are infrequent and loss is acceptable
+  return invokeCommand<void>('update_node_size_cmd', { id, size: [size.width, size.height] }, { 
+    logCall: false,
+    timeoutMs: 5000,
+  });
+}
+
+/**
  * Add connection between nodes.
  * 
  * Backend: commands::data_sources::add_connection
@@ -1048,6 +1067,17 @@ export interface SystemInfo {
  */
 export async function getSystemInfo(): Promise<Result<SystemInfo, ApiError>> {
   return invokeCommand<SystemInfo>('get_system_info_cmd', {});
+}
+
+/**
+ * Get network bandwidth metrics from WebSocket connections.
+ * 
+ * Backend: main::get_network_metrics_cmd
+ * 
+ * @returns Network metrics (bytes sent/received, message counts)
+ */
+export async function getNetworkMetrics(): Promise<Result<import('../types/markets').NetworkMetrics, ApiError>> {
+  return invokeCommand<import('../types/markets').NetworkMetrics>('get_network_metrics_cmd', {});
 }
 
 // =============================================================================

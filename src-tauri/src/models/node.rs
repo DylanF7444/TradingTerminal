@@ -253,6 +253,9 @@ pub struct Node {
     /// Visual position on Canvas (x, y coordinates in pixels)
     pub position: (f64, f64),
     
+    /// Node size for resizable nodes (width, optional height)
+    pub size: Option<(f64, Option<f64>)>,
+    
     /// Graph edges: IDs of connected nodes
     pub connections: Vec<String>,
     
@@ -324,6 +327,7 @@ mod tests {
             id: "test-123".to_string(),
             node_type: NodeType::InfoSource(InfoSourceType::CryptoPrices),
             position: (100.0, 200.0),
+            size: None,
             connections: vec!["market-456".to_string()],
             metadata: serde_json::json!({"test": "value"}),
         };

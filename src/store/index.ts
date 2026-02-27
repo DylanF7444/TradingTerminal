@@ -432,6 +432,14 @@ if (typeof window !== 'undefined') {
               id: node.id,
               position: node.position,
             }).catch(console.error);
+            
+            // Also sync node size
+            if (node.size) {
+              void invoke('update_node_size_cmd', {
+                id: node.id,
+                size: [node.size.width, node.size.height ?? null],
+              }).catch(console.error);
+            }
           });
         });
       }, 500);

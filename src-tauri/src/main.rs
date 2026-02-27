@@ -176,12 +176,13 @@ use crate::commands::{
     trading,
     storage,
     update_node_position_cmd,
+    update_node_size_cmd,
     orderbook::{self, OrderbookState},
     api_keys,
 };
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
 use crate::services::{scraper, startup};
-use crate::services::websocket_manager::{WebSocketManager, create_websocket_manager};
+use crate::services::websocket_manager::{WebSocketManager, create_websocket_manager, NetworkMetricsSnapshot};
 use sysinfo::SystemExt;
 use rusqlite::params;
 
@@ -306,6 +307,7 @@ fn main() {
             update_data_source_cmd,
             get_data_source_status_cmd,
             update_node_position_cmd,
+            update_node_size_cmd,
             add_node_cmd,
             
             // Market commands
@@ -331,6 +333,7 @@ fn main() {
             
             // System commands
             get_system_info_cmd,
+            get_network_metrics_cmd,
             get_database_stats_cmd,
             vacuum_database_cmd,
             
@@ -614,6 +617,7 @@ async fn add_data_source_cmd(
             id: uuid::Uuid::new_v4().to_string(),
             node_type: models::node::NodeType::InfoSource(source_type.clone()),
             position: (100.0, 100.0), // Default position
+            size: None,
             connections: vec![],
             metadata: config.clone(),
         };
@@ -827,6 +831,7 @@ async fn add_node_cmd(
         id: node_id.clone(),
         node_type,
         position: (position_x, position_y),
+        size: None,
         connections: vec![],
         metadata,
     };
@@ -879,6 +884,7 @@ async fn add_market_cmd(
             id: uuid::Uuid::new_v4().to_string(),
             node_type: models::node::NodeType::Market(market_type_enum.clone()),
             position: (200.0, 200.0), // Default position
+            size: None,
             connections: vec![],
             metadata: serde_json::json!({
                 "api_credentials": api_credentials,
@@ -1261,6 +1267,13 @@ async fn get_system_info_cmd() -> Result<serde_json::Value, String> {
     }
     
     Err("System monitor not initialized".to_string())
+}
+
+/// Get network bandwidth metrics
+#[tauri::command]
+async fn get_network_metrics_cmd(state: State<'_, AppState>) -> Result<NetworkMetricsSnapshot, String> {
+    let metrics = state.ws_manager.get_network_metrics();
+    Ok(metrics)
 }
 
 /// Get database statistics

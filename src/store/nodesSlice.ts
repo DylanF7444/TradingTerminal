@@ -357,6 +357,9 @@ export interface NodesSlice {
   /** Update node position during drag operations */
   updateNodePosition: (id: string, position: [number, number]) => void;
   
+  /** Update node size during resize operations */
+  updateNodeSize: (id: string, size: { width: number; height: number | null }) => void;
+  
   /** Update node configuration metadata */
   updateNodeMetadata: (id: string, metadata: Record<string, any>) => void;
   
@@ -554,6 +557,24 @@ export const createNodesSlice: StateCreator<NodesSlice> = (set, get) => ({
           [id]: {
             ...node,
             position,
+          },
+        },
+        lastInteraction: Date.now(),
+      };
+    });
+  },
+
+  updateNodeSize: (id: string, size: { width: number; height: number | null }) => {
+    set((state) => {
+      const node = state.nodes[id];
+      if (!node) return state;
+      
+      return {
+        nodes: {
+          ...state.nodes,
+          [id]: {
+            ...node,
+            size,
           },
         },
         lastInteraction: Date.now(),

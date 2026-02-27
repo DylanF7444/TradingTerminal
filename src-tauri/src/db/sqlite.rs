@@ -299,6 +299,8 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
             node_subtype TEXT NOT NULL,
             position_x REAL NOT NULL DEFAULT 0.0,
             position_y REAL NOT NULL DEFAULT 0.0,
+            size_width REAL,
+            size_height REAL,
             metadata JSON,
             archived INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
@@ -306,6 +308,16 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         )",
         [],
     )?;
+    
+    // Add size columns to existing databases (migration)
+    let _ = conn.execute(
+        "ALTER TABLE nodes ADD COLUMN size_width REAL",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE nodes ADD COLUMN size_height REAL",
+        [],
+    );
 
     // Connections table - stores edges between nodes
     conn.execute(
@@ -517,15 +529,21 @@ pub fn insert_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
     let (node_type, node_subtype) = serialize_node_type(&node.node_type);
     
+    // Extract size values from node
+    let size_width = node.size.as_ref().map(|(w, _)| *w);
+    let size_height = node.size.as_ref().and_then(|(_, h)| *h);
+    
     conn.execute(
-        "INSERT INTO nodes (id, node_type, node_subtype, position_x, position_y, metadata, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO nodes (id, node_type, node_subtype, position_x, position_y, size_width, size_height, metadata, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             &node.id,
             node_type,
             node_subtype,
             node.position.0,
             node.position.1,
+            size_width,
+            size_height,
             serde_json::to_string(&node.metadata).unwrap(),
             now,
             now,
@@ -541,16 +559,22 @@ pub fn update_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
     let (node_type, node_subtype) = serialize_node_type(&node.node_type);
     
+    // Extract size values from node
+    let size_width = node.size.as_ref().map(|(w, _)| *w);
+    let size_height = node.size.as_ref().and_then(|(_, h)| *h);
+    
     conn.execute(
         "UPDATE nodes 
          SET node_type = ?1, node_subtype = ?2, position_x = ?3, position_y = ?4, 
-             metadata = ?5, updated_at = ?6
-         WHERE id = ?7",
+             size_width = ?5, size_height = ?6, metadata = ?7, updated_at = ?8
+         WHERE id = ?9",
         params![
             node_type,
             node_subtype,
             node.position.0,
             node.position.1,
+            size_width,
+            size_height,
             serde_json::to_string(&node.metadata).unwrap(),
             now,
             &node.id,
@@ -643,7 +667,7 @@ pub struct DeleteNodeStats {
 /// Get a single node by ID
 pub fn get_node_by_id(conn: &Connection, node_id: &str) -> SqliteResult<Node> {
     let mut stmt = conn.prepare(
-        "SELECT id, node_type, node_subtype, position_x, position_y, metadata 
+        "SELECT id, node_type, node_subtype, position_x, position_y, size_width, size_height, metadata 
          FROM nodes WHERE id = ?1 AND archived = 0"
     )?;
 
@@ -657,7 +681,7 @@ pub fn get_node_by_id(conn: &Connection, node_id: &str) -> SqliteResult<Node> {
 /// Get all active (non-archived) nodes
 pub fn get_all_active_nodes(conn: &Connection) -> SqliteResult<Vec<Node>> {
     let mut stmt = conn.prepare(
-        "SELECT id, node_type, node_subtype, position_x, position_y, metadata 
+        "SELECT id, node_type, node_subtype, position_x, position_y, size_width, size_height, metadata 
          FROM nodes WHERE archived = 0 
          ORDER BY created_at DESC"
     )?;
@@ -1082,7 +1106,9 @@ fn deserialize_node(row: &Row) -> Node {
     let node_subtype_str: String = row.get(2).unwrap();
     let position_x: f64 = row.get(3).unwrap();
     let position_y: f64 = row.get(4).unwrap();
-    let metadata_str: String = row.get(5).unwrap();
+    let size_width: Option<f64> = row.get(5).unwrap();
+    let size_height: Option<f64> = row.get(6).unwrap();
+    let metadata_str: String = row.get(7).unwrap();
 
     let node_type = match node_type_str.as_str() {
         "InfoSource" => {
@@ -1111,10 +1137,14 @@ fn deserialize_node(row: &Row) -> Node {
 
     let metadata: JsonValue = serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({}));
 
+    // Build size option from database values
+    let size = size_width.map(|w| (w, size_height));
+
     Node {
         id,
         node_type,
         position: (position_x, position_y),
+        size,
         connections: vec![], // Loaded separately
         metadata,
     }
@@ -1355,6 +1385,7 @@ mod tests {
             id: "test-node-1".to_string(),
             node_type: NodeType::InfoSource(InfoSourceType::CryptoPrices),
             position: (100.0, 200.0),
+            size: None,
             connections: vec![],
             metadata: serde_json::json!({"test": "data"}),
         };
@@ -1375,6 +1406,7 @@ mod tests {
             id: "source-1".to_string(),
             node_type: NodeType::InfoSource(InfoSourceType::CryptoPrices),
             position: (0.0, 0.0),
+            size: None,
             connections: vec![],
             metadata: serde_json::json!({}),
         };

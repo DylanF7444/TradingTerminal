@@ -238,6 +238,17 @@ export type NodeId = string & { __brand: 'NodeId' };
 export type Position = [number, number];
 
 /**
+ * Node size dimensions for resizable nodes.
+ * Allows nodes to be scaled like windows.
+ */
+export interface NodeSize {
+  /** Width in pixels (default: 192 = w-48) */
+  width: number;
+  /** Height in pixels (auto-calculated if not set) */
+  height: number | null;
+}
+
+/**
  * Base node interface - all nodes share this structure.
  * 
  * The node graph is heterogeneous - nodes have different behaviors
@@ -276,6 +287,9 @@ export interface Node {
   
   /** Visual state flags */
   visualState?: NodeVisualState;
+  
+  /** Node size for resizable nodes (like windows) */
+  size?: NodeSize;
   
   /** Creation timestamp */
   createdAt: number;

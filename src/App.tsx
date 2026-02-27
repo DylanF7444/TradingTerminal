@@ -138,7 +138,7 @@ import { useStore, type StoreState } from './store';
 import { invoke } from '@tauri-apps/api/core';
 
 // API utilities
-import { removeNode as removeNodeFromDb } from './utils/api';
+import { removeNode as removeNodeFromDb, updateNodeSize } from './utils/api';
 
 // Layout components
 import Canvas from './components/Canvas/Canvas';
@@ -952,10 +952,25 @@ function App(): ReactNode {
           const node = currentNodes[payload.nodeId];
           if (node) {
             const currentMetadata = node.metadata as Record<string, any> || {};
+            
+            // Create a NEW object for symbolValues (don't mutate the existing one)
+            const existingSymbolValues = (currentMetadata.lastData as any)?.symbolValues || {};
+            const symbolValues = { ...existingSymbolValues };
+            symbolValues[payload.symbol] = {
+              price: payload.price,
+              bid: payload.bid,
+              ask: payload.ask,
+              timestamp: payload.timestamp,
+            };
+            
+            console.log('[InfoSource] Updated symbolValues:', Object.keys(symbolValues));
+            
             updateNodeMetadata(payload.nodeId, {
               ...currentMetadata,
               lastData: {
                 timestamp: payload.timestamp,
+                symbolValues,
+                // Keep legacy value for backward compatibility
                 value: payload.price,
               },
               quality: {
@@ -1037,8 +1052,10 @@ function App(): ReactNode {
         
         // Get current metadata to preserve other fields
         const currentMetadata = node.metadata as Record<string, any> || {};
+        const symbolValues = { ...((currentMetadata.lastData as any)?.symbolValues || {}) };
+        const firstSymbolPrice = Object.values(symbolValues)[0] as { price?: number } | undefined;
         
-        // Update node metadata with quality metrics
+        // Update node metadata with quality metrics (preserve symbolValues)
         updateNodeMetadata(nodeId, {
           ...currentMetadata,
           quality: {
@@ -1048,7 +1065,8 @@ function App(): ReactNode {
           },
           lastData: {
             timestamp: Date.now(),
-            value: currentMetadata.lastData?.value,
+            symbolValues,
+            value: firstSymbolPrice?.price || currentMetadata.lastData?.value,
           },
         });
       });
@@ -1394,6 +1412,15 @@ function App(): ReactNode {
     updateNodePosition(id, position);
   }, []);
 
+  /** Handle node resize from Canvas */
+  const handleNodeResize = useCallback((id: string, size: { width: number; height: number | null }) => {
+    const { updateNodeSize: updateNodeSizeInStore } = useStore.getState();
+    updateNodeSizeInStore(id, size);
+    
+    // Persist to database
+    updateNodeSize(id, size).catch((err: unknown) => console.error('Failed to persist node size:', err));
+  }, []);
+
   /** Handle node deletion from Canvas */
   const handleNodeDelete = useCallback(async (id: string) => {
     // First, remove from local state
@@ -1589,6 +1616,7 @@ function App(): ReactNode {
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
             onOpenOrderbook={handleOpenOrderbook}
+            onNodeResize={handleNodeResize}
           />
         </div>
 
@@ -1798,6 +1826,7 @@ function App(): ReactNode {
             onNodeDelete={handleNodeDelete}
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
+            onNodeResize={handleNodeResize}
           />
         </div>
 
@@ -1900,6 +1929,7 @@ function App(): ReactNode {
             onNodeDelete={handleNodeDelete}
             onBackgroundClick={handleCanvasBackgroundClick}
             onViewportChange={handleViewportChange}
+            onNodeResize={handleNodeResize}
           />
         )}
         

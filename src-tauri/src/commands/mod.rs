@@ -76,7 +76,7 @@ pub mod api_keys;
 // Re-export all commands for main.rs invoke_handler registration
 
 // Data Sources: Info source node management
-pub use data_sources::{add_data_source, remove_data_source, get_data_sources, update_node_position_cmd};
+pub use data_sources::{add_data_source, remove_data_source, get_data_sources, update_node_position_cmd, update_node_size_cmd};
 
 // Markets: includes state initializer for main.rs
 pub use markets::{
