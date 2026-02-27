@@ -669,16 +669,52 @@ async fn remove_data_source_cmd(
     Ok(stats)
 }
 
-/// Get all active data sources
+/// Get all active data sources and restart their scrapers
 #[tauri::command]
 async fn get_data_sources_cmd(
     state: State<'_, AppState>,
+    window: tauri::Window,
 ) -> Result<Vec<models::node::Node>, String> {
-    tokio::task::block_in_place(|| {
+    let nodes = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
         sqlite::get_all_active_nodes(&conn)
             .map_err(|e| format!("Database error: {}", e))
-    })
+    })?;
+    
+    // Start scrapers for any InfoSource nodes that don't have active scrapers
+    for node in &nodes {
+        if let models::node::NodeType::InfoSource(ref source_type) = node.node_type {
+            // Check if scraper is already running
+            let already_running = state.active_scrapers.lock().await.contains_key(&node.id);
+            
+            if !already_running {
+                info!("Starting scraper for existing node: {} ({:?})", node.id, source_type);
+                
+                let db = state.db.clone();
+                let node_id = node.id.clone();
+                let source_type = source_type.clone();
+                let config = node.metadata.clone();
+                let window_clone = window.clone();
+                
+                match scraper::spawn_scraper(
+                    node_id.clone(),
+                    source_type,
+                    config,
+                    db,
+                    window_clone,
+                ).await {
+                    Ok(handle) => {
+                        state.active_scrapers.lock().await.insert(node_id, handle);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to start scraper for node {}: {}", node.id, e);
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(nodes)
 }
 
 /// Update data source configuration
@@ -896,9 +932,10 @@ async fn remove_market_cmd(
 #[tauri::command]
 async fn get_markets_cmd(
     state: State<'_, AppState>,
+    window: tauri::Window,
 ) -> Result<Vec<models::node::Node>, String> {
     // Filter nodes by Market type
-    let all_nodes = get_data_sources_cmd(state).await?;
+    let all_nodes = get_data_sources_cmd(state, window).await?;
     Ok(all_nodes.into_iter()
         .filter(|n| matches!(n.node_type, models::node::NodeType::Market(_)))
         .collect())
