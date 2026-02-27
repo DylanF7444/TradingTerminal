@@ -884,10 +884,17 @@ function App(): ReactNode {
       position = [100, 100] as [number, number];
     }
 
+    // Handle size - backend sends as array [width, height] from Rust tuple serialization
+    let size = node.size;
+    if (size && Array.isArray(size) && size.length >= 1) {
+      size = { width: size[0], height: size[1] ?? null };
+    }
+
     return {
       ...node,
       node_type: nodeType,
       position: position,
+      size: size,
       // Ensure required fields have defaults (backend doesn't include these)
       connections: node.connections || [],
       createdAt: node.createdAt || Date.now(),
