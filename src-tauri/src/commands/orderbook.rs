@@ -120,10 +120,10 @@ pub struct OrderbookState {
 }
 
 impl OrderbookState {
-    pub fn new(app_handle: AppHandle) -> Self {
+    pub fn new(app_handle: AppHandle, ws_manager: Arc<WebSocketManager>) -> Self {
         Self {
             subscriptions: create_subscriptions_state(),
-            ws_manager: create_websocket_manager(app_handle),
+            ws_manager,
         }
     }
 }
@@ -405,6 +405,6 @@ pub async fn reconnect_orderbook_cmd(
 }
 
 /// Initialize orderbook state (called from main.rs)
-pub fn init_state(app_handle: AppHandle) -> OrderbookState {
-    OrderbookState::new(app_handle)
+pub fn init_state(app_handle: AppHandle, ws_manager: Arc<WebSocketManager>) -> OrderbookState {
+    OrderbookState::new(app_handle, ws_manager)
 }

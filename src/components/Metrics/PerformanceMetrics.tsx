@@ -858,8 +858,16 @@ export default function PerformanceMetrics({
           />
           
           <MetricCard
-            label="Network"
-            value={networkMetrics ? networkMetrics.bytes_received + networkMetrics.bytes_sent : 0}
+            label="Net ↓"
+            value={networkMetrics ? networkMetrics.bytes_received : 0}
+            unit=""
+            compact
+            icon={Activity}
+          />
+          
+          <MetricCard
+            label="Net ↑"
+            value={networkMetrics ? networkMetrics.bytes_sent : 0}
             unit=""
             compact
             icon={Network}
@@ -944,9 +952,17 @@ export default function PerformanceMetrics({
           />
           
           <MetricCard
-            label="Bandwidth"
-            value={networkMetrics ? networkMetrics.bytes_received + networkMetrics.bytes_sent : 0}
-            unit=""
+            label="Received"
+            value={networkMetrics ? networkMetrics.bytes_received : 0}
+            unit="B"
+            icon={Wifi}
+            color="text-green-400"
+          />
+          
+          <MetricCard
+            label="Sent"
+            value={networkMetrics ? networkMetrics.bytes_sent : 0}
+            unit="B"
             icon={Network}
             color="text-blue-400"
           />

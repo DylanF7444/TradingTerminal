@@ -77,7 +77,7 @@ pub async fn initialize_saved_nodes(
             }
             NodeType::InfoSource(source_type) => {
                 // Start scraper for info source nodes
-                match start_info_source_scraper(&node, source_type, &db, &app_handle).await {
+                match start_info_source_scraper(&node, source_type, &db, &app_handle, &ws_manager).await {
                     Ok(handle) => {
                         source_count += 1;
                         scrapers.insert(node.id.clone(), handle);
@@ -138,6 +138,7 @@ async fn start_info_source_scraper(
     source_type: &InfoSourceType,
     db: &Arc<Mutex<Connection>>,
     app_handle: &AppHandle,
+    ws_manager: &Arc<WebSocketManager>,
 ) -> Result<ScraperHandle> {
     use tauri::Manager;
     use tauri::WebviewWindow;
@@ -149,13 +150,15 @@ async fn start_info_source_scraper(
     // Convert WebviewWindow to Window for the scraper
     let window = window.as_ref().window().clone();
     
-    // Spawn the scraper
+    // Spawn the scraper with network metrics
+    let network_metrics = ws_manager.network_metrics();
     let handle = spawn_scraper(
         node.id.clone(),
         source_type.clone(),
         node.metadata.clone(),
         db.clone(),
         window,
+        network_metrics,
     ).await?;
     
     Ok(handle)

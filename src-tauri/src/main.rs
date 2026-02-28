@@ -441,7 +441,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     app.manage(state);
     
     // 5b. Initialize and manage orderbook state
-    let orderbook_state = orderbook::init_state(app.handle().clone());
+    let orderbook_state = orderbook::init_state(app.handle().clone(), ws_manager.clone());
     app.manage(orderbook_state);
     
     // 6. Start background services (scraper supervisor, analyzer, executor)
@@ -630,12 +630,14 @@ async fn add_data_source_cmd(
     
     // Start scraper
     let db = state.db.clone();
+    let network_metrics = state.ws_manager.network_metrics();
     let scraper_handle = scraper::spawn_scraper(
         node.id.clone(),
         source_type,
         config,
         db,
         window,
+        network_metrics,
     ).await.map_err(|e| e.to_string())?;
     
     // Store handle for later shutdown
@@ -699,6 +701,7 @@ async fn get_data_sources_cmd(
                 let source_type = source_type.clone();
                 let config = node.metadata.clone();
                 let window_clone = window.clone();
+                let network_metrics = state.ws_manager.network_metrics();
                 
                 match scraper::spawn_scraper(
                     node_id.clone(),
@@ -706,6 +709,7 @@ async fn get_data_sources_cmd(
                     config,
                     db,
                     window_clone,
+                    network_metrics,
                 ).await {
                     Ok(handle) => {
                         state.active_scrapers.lock().await.insert(node_id, handle);
@@ -1271,7 +1275,7 @@ async fn get_system_info_cmd() -> Result<serde_json::Value, String> {
 
 /// Get network bandwidth metrics
 #[tauri::command]
-async fn get_network_metrics_cmd(state: State<'_, AppState>) -> Result<NetworkMetricsSnapshot, String> {
+async fn get_network_metrics_cmd(state: State<'_, OrderbookState>) -> Result<NetworkMetricsSnapshot, String> {
     let metrics = state.ws_manager.get_network_metrics();
     Ok(metrics)
 }

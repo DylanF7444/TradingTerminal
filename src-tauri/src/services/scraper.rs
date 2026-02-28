@@ -267,6 +267,7 @@ pub async fn spawn_scraper(
     config: JsonValue,
     db: Arc<Mutex<Connection>>,
     window: Window,
+    network_metrics: Arc<crate::services::websocket_manager::NetworkMetrics>,
 ) -> Result<ScraperHandle, anyhow::Error> {
     // DEBUG: Print incoming config
     println!("[SCRAPER] spawn_scraper called for node {} with source_type {:?}", node_id, source_type);
@@ -282,7 +283,7 @@ pub async fn spawn_scraper(
         
         if provider == "coinbase" {
             // Use WebSocket scraper for Coinbase
-            return spawn_websocket_scraper(node_id, source_type, config, db, window).await;
+            return spawn_websocket_scraper(node_id, source_type, config, db, window, network_metrics).await;
         }
     }
     
@@ -322,6 +323,7 @@ async fn spawn_websocket_scraper(
     config: JsonValue,
     db: Arc<Mutex<Connection>>,
     window: Window,
+    network_metrics: Arc<crate::services::websocket_manager::NetworkMetrics>,
 ) -> Result<ScraperHandle, anyhow::Error> {
     use super::websocket_scraper::{
         WebSocketScraperConfig, run_coinbase_scraper, ScraperCommand,
@@ -360,6 +362,7 @@ async fn spawn_websocket_scraper(
         storage_interval_ms,
         include_orderbook,
         orderbook_depth,
+        network_metrics,
     };
     
     // Create shutdown channel for WebSocket scraper

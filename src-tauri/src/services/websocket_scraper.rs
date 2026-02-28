@@ -50,6 +50,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc, Mutex};
 use tokio::time::interval;
@@ -60,6 +61,7 @@ use chrono::Utc;
 
 use crate::models::node::InfoSourceType;
 use crate::db::sqlite::{insert_timeseries, Connection};
+use crate::services::websocket_manager::NetworkMetrics;
 
 // ============================================================================
 // TYPES
@@ -82,6 +84,8 @@ pub struct WebSocketScraperConfig {
     pub include_orderbook: bool,
     /// Orderbook depth
     pub orderbook_depth: usize,
+    /// Network metrics for bandwidth tracking
+    pub network_metrics: Arc<NetworkMetrics>,
 }
 
 /// Handle to a running WebSocket scraper
@@ -208,7 +212,8 @@ pub async fn run_coinbase_scraper(
                             };
                             if let Ok(json) = serde_json::to_string(&subscribe_msg) {
                                 println!("[Coinbase Scraper {}] Dynamic subscribe: {}", config.node_id, json);
-                                let _ = sender.send(WsMessage::Text(json)).await;
+                                let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                config.network_metrics.record_sent(json.len() as u64);
                             }
                         }
                     }
@@ -226,7 +231,8 @@ pub async fn run_coinbase_scraper(
                             };
                             if let Ok(json) = serde_json::to_string(&unsubscribe_msg) {
                                 println!("[Coinbase Scraper {}] Dynamic unsubscribe: {}", config.node_id, json);
-                                let _ = sender.send(WsMessage::Text(json)).await;
+                                let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                config.network_metrics.record_sent(json.len() as u64);
                             }
                         }
                     }
@@ -263,6 +269,9 @@ pub async fn run_coinbase_scraper(
                 if let Some(ref mut receiver) = ws_receiver {
                     match receiver.next().await {
                         Some(Ok(WsMessage::Text(text))) => {
+                            // Record network bandwidth (received)
+                            config.network_metrics.record_received(text.len() as u64);
+                            
                             // DEBUG: Print raw WebSocket message
                             println!("[Coinbase Scraper {}] Raw message: {}", config.node_id, text);
                             
@@ -313,7 +322,8 @@ pub async fn run_coinbase_scraper(
                         }
                         Some(Ok(WsMessage::Ping(data))) => {
                             if let Some(ref mut sender) = ws_sender {
-                                let _ = sender.send(WsMessage::Pong(data)).await;
+                                let _ = sender.send(WsMessage::Pong(data.clone())).await;
+                                config.network_metrics.record_sent(data.len() as u64);
                             }
                         }
                         Some(Ok(WsMessage::Close(_))) => {
@@ -377,7 +387,8 @@ pub async fn run_coinbase_scraper(
                                 if let Ok(json) = serde_json::to_string(&subscribe_msg) {
                                     // DEBUG: Print subscription message being sent
                                     println!("[Coinbase Scraper {}] Sending subscribe: {}", config.node_id, json);
-                                    let _ = sender.send(WsMessage::Text(json)).await;
+                                    let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                    config.network_metrics.record_sent(json.len() as u64);
                                 }
                             }
                             
@@ -613,5 +624,6 @@ pub fn parse_websocket_config(
         storage_interval_ms,
         include_orderbook,
         orderbook_depth,
+        network_metrics: Arc::new(NetworkMetrics::new()),
     })
 }
