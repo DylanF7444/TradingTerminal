@@ -320,6 +320,8 @@ export interface CanvasProps {
   connectionMode?: boolean;
   /** Callback when a new connection is created */
   onCreateConnection?: (sourceId: string, targetId: string) => void;
+  /** Callback when a connection is deleted */
+  onConnectionDelete?: (source: string, target: string) => void;
 }
 
 export default function Canvas({
@@ -338,6 +340,7 @@ export default function Canvas({
   onNodeResize,
   connectionMode = false,
   onCreateConnection,
+  onConnectionDelete,
 }: CanvasProps): ReactNode {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -350,6 +353,8 @@ export default function Canvas({
   
   // Connection mode state
   const [connectionSource, setConnectionSource] = useState<string | null>(null);
+  // Hovered connection for delete button
+  const [hoveredConnection, setHoveredConnection] = useState<Connection | null>(null);
 
   // Default bounds if not provided (large canvas area)
   const defaultBounds: CanvasBounds = {
@@ -629,6 +634,29 @@ export default function Canvas({
         const worldX = Math.round((screenX - viewport.x) / viewport.zoom);
         const worldY = Math.round((screenY - viewport.y) / viewport.zoom);
         setMousePosition({ x: worldX, y: worldY });
+
+        // Find hovered connection (near midpoint)
+        const hoverThreshold = 30 / viewport.zoom; // 30px threshold in screen space
+        let nearestConn: Connection | null = null;
+        let nearestDist = Infinity;
+
+        for (const conn of connections) {
+          const sourceNode = nodeMap.get(conn.source);
+          const targetNode = nodeMap.get(conn.target);
+          if (!sourceNode || !targetNode) continue;
+
+          const [x1, y1] = sourceNode.position;
+          const [x2, y2] = targetNode.position;
+          const midX = (x1 + x2) / 2;
+          const midY = (y1 + y2) / 2;
+
+          const dist = Math.sqrt((worldX - midX) ** 2 + (worldY - midY) ** 2);
+          if (dist < hoverThreshold && dist < nearestDist) {
+            nearestDist = dist;
+            nearestConn = conn;
+          }
+        }
+        setHoveredConnection(nearestConn);
       }
 
       if (isPanning) {
@@ -657,7 +685,7 @@ export default function Canvas({
         });
       }
     },
-    [isPanning, dragOffset, viewport.zoom, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds]
+    [isPanning, dragOffset, viewport.zoom, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds, nodeMap, connections]
   );
 
   // Handle mouse up
@@ -669,6 +697,7 @@ export default function Canvas({
   // Handle mouse leave - hide coordinates
   const handleMouseLeave = useCallback(() => {
     setMousePosition(null);
+    setHoveredConnection(null);
   }, []);
 
   // Handle mouse enter - initialize coordinates
@@ -845,6 +874,38 @@ export default function Canvas({
           );
         })}
       </div>
+
+      {/* Connection delete button */}
+      {hoveredConnection && (() => {
+        const sourceNode = nodeMap.get(hoveredConnection.source);
+        const targetNode = nodeMap.get(hoveredConnection.target);
+        if (!sourceNode || !targetNode) return null;
+
+        const [x1, y1] = sourceNode.position;
+        const [x2, y2] = targetNode.position;
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+
+        const screenX = midX * viewport.zoom + viewport.x;
+        const screenY = midY * viewport.zoom + viewport.y;
+
+        return (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onConnectionDelete?.(hoveredConnection.source, hoveredConnection.target);
+              setHoveredConnection(null);
+            }}
+            className="absolute w-6 h-6 bg-red-600 hover:bg-red-500 rounded-full flex items-center justify-center text-white text-sm font-bold shadow-lg z-20 transition-transform hover:scale-110"
+            style={{
+              left: screenX - 12,
+              top: screenY - 12,
+            }}
+          >
+            ×
+          </button>
+        );
+      })()}
 
       {/* Zoom controls */}
       <div className="absolute bottom-4 right-4 flex flex-col gap-2">

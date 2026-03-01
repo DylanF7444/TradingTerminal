@@ -1,4 +1,3 @@
-
 // ============================================================================
 // SQLITE DATABASE LAYER
 // ============================================================================
@@ -262,20 +261,19 @@
 // - Add query result caching layer
 // ============================================================================
 
-
 // SQLite implementation for prediction market trading terminal
 // Handles all database operations: nodes, connections, time-series, positions
 
-use rusqlite::{params, Row, Result as SqliteResult, types::Value};
-use serde::{Serialize, Deserialize};
+use chrono::Utc;
+use rusqlite::{params, types::Value, Result as SqliteResult, Row};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::path::Path;
-use chrono::Utc;
 
 // Re-export rusqlite::Connection so other modules can use it
 pub use rusqlite::Connection;
 
-use crate::models::node::{Node, NodeType, InfoSourceType, MarketType};
+use crate::models::node::{InfoSourceType, MarketType, Node, NodeType};
 use crate::models::position::Position;
 
 // ============================================================================
@@ -308,16 +306,10 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         )",
         [],
     )?;
-    
+
     // Add size columns to existing databases (migration)
-    let _ = conn.execute(
-        "ALTER TABLE nodes ADD COLUMN size_width REAL",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE nodes ADD COLUMN size_height REAL",
-        [],
-    );
+    let _ = conn.execute("ALTER TABLE nodes ADD COLUMN size_width REAL", []);
+    let _ = conn.execute("ALTER TABLE nodes ADD COLUMN size_height REAL", []);
 
     // Connections table - stores edges between nodes
     conn.execute(
@@ -570,16 +562,16 @@ fn create_indexes(conn: &Connection) -> SqliteResult<()> {
 pub fn apply_optimizations(conn: &Connection) -> SqliteResult<()> {
     // Note: PRAGMA journal_mode = WAL is handled via execute_batch in create_connection
     // to avoid rusqlite issues with PRAGMA returning results
-    
+
     // NORMAL synchronous: Fast writes, safe for crashes (but not power loss)
     let _ = conn.execute("PRAGMA synchronous = NORMAL", []);
-    
+
     // 64MB cache size for better performance
     let _ = conn.execute("PRAGMA cache_size = -64000", []);
-    
+
     // Store temp tables in memory
     let _ = conn.execute("PRAGMA temp_store = MEMORY", []);
-    
+
     // Foreign keys enforcement
     let _ = conn.execute("PRAGMA foreign_keys = ON", []);
 
@@ -595,11 +587,11 @@ pub fn apply_optimizations(conn: &Connection) -> SqliteResult<()> {
 pub fn insert_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
     let (node_type, node_subtype) = serialize_node_type(&node.node_type);
-    
+
     // Extract size values from node
     let size_width = node.size.as_ref().map(|(w, _)| *w);
     let size_height = node.size.as_ref().and_then(|(_, h)| *h);
-    
+
     conn.execute(
         "INSERT INTO nodes (id, node_type, node_subtype, position_x, position_y, size_width, size_height, metadata, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -625,11 +617,11 @@ pub fn insert_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
 pub fn update_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
     let (node_type, node_subtype) = serialize_node_type(&node.node_type);
-    
+
     // Extract size values from node
     let size_width = node.size.as_ref().map(|(w, _)| *w);
     let size_height = node.size.as_ref().and_then(|(_, h)| *h);
-    
+
     conn.execute(
         "UPDATE nodes 
          SET node_type = ?1, node_subtype = ?2, position_x = ?3, position_y = ?4, 
@@ -655,7 +647,7 @@ pub fn update_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
 /// Delete a node (soft delete - mark as archived)
 pub fn delete_node(conn: &Connection, node_id: &str) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
-    
+
     conn.execute(
         "UPDATE nodes SET archived = 1, updated_at = ?1 WHERE id = ?2",
         params![now, node_id],
@@ -671,45 +663,45 @@ pub fn delete_node(conn: &Connection, node_id: &str) -> SqliteResult<()> {
 pub fn delete_node_cascade(conn: &Connection, node_id: &str) -> SqliteResult<DeleteNodeStats> {
     let now = Utc::now().timestamp();
     let mut stats = DeleteNodeStats::default();
-    
+
     // Delete timeseries data
     stats.timeseries_deleted = conn.execute(
         "DELETE FROM timeseries WHERE source_id = ?1",
         params![node_id],
     )?;
-    
+
     // Delete websocket messages
     stats.websocket_messages_deleted = conn.execute(
         "DELETE FROM websocket_messages WHERE node_id = ?1",
         params![node_id],
     )?;
-    
+
     // Delete connections where this node is source or target
     stats.connections_deleted = conn.execute(
         "DELETE FROM connections WHERE source_node_id = ?1 OR target_node_id = ?1",
         params![node_id],
     )?;
-    
+
     // Delete scraper status
     stats.scraper_status_deleted = conn.execute(
         "DELETE FROM scraper_status WHERE node_id = ?1",
         params![node_id],
     )?;
-    
+
     // Delete positions (for market nodes)
     stats.positions_deleted = conn.execute(
         "DELETE FROM positions WHERE market_id = ?1",
         params![node_id],
     )?;
-    
+
     // Soft delete the node itself
     let node_deleted = conn.execute(
         "UPDATE nodes SET archived = 1, updated_at = ?1 WHERE id = ?2",
         params![now, node_id],
     )?;
-    
+
     stats.node_archived = node_deleted > 0;
-    
+
     println!("Node cascade delete completed for {}: {:?}", node_id, stats);
     Ok(stats)
 }
@@ -738,9 +730,7 @@ pub fn get_node_by_id(conn: &Connection, node_id: &str) -> SqliteResult<Node> {
          FROM nodes WHERE id = ?1 AND archived = 0"
     )?;
 
-    let node = stmt.query_row(params![node_id], |row| {
-        Ok(deserialize_node(row))
-    })?;
+    let node = stmt.query_row(params![node_id], |row| Ok(deserialize_node(row)))?;
 
     Ok(node)
 }
@@ -753,10 +743,9 @@ pub fn get_all_active_nodes(conn: &Connection) -> SqliteResult<Vec<Node>> {
          ORDER BY created_at DESC"
     )?;
 
-    let nodes = stmt.query_map([], |row| {
-        Ok(deserialize_node(row))
-    })?
-    .collect::<SqliteResult<Vec<Node>>>()?;
+    let nodes = stmt
+        .query_map([], |row| Ok(deserialize_node(row)))?
+        .collect::<SqliteResult<Vec<Node>>>()?;
 
     println!("Retrieved {} active nodes", nodes.len());
     Ok(nodes)
@@ -777,7 +766,7 @@ pub fn insert_connection(
     metadata: Option<JsonValue>,
 ) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
-    
+
     conn.execute(
         "INSERT INTO connections (id, source_node_id, target_node_id, strength, correlation, metadata, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -796,7 +785,10 @@ pub fn insert_connection(
         ],
     )?;
 
-    println!("Connection inserted/updated: {} -> {}", source_id, target_id);
+    println!(
+        "Connection inserted/updated: {} -> {}",
+        source_id, target_id
+    );
     Ok(())
 }
 
@@ -805,13 +797,12 @@ pub fn get_connections_for_node(conn: &Connection, node_id: &str) -> SqliteResul
     let mut stmt = conn.prepare(
         "SELECT target_node_id FROM connections WHERE source_node_id = ?1
          UNION
-         SELECT source_node_id FROM connections WHERE target_node_id = ?1"
+         SELECT source_node_id FROM connections WHERE target_node_id = ?1",
     )?;
 
-    let connections = stmt.query_map(params![node_id], |row| {
-        row.get(0)
-    })?
-    .collect::<SqliteResult<Vec<String>>>()?;
+    let connections = stmt
+        .query_map(params![node_id], |row| row.get(0))?
+        .collect::<SqliteResult<Vec<String>>>()?;
 
     Ok(connections)
 }
@@ -821,30 +812,38 @@ pub fn get_all_connections(conn: &Connection) -> SqliteResult<Vec<(String, Strin
     let mut stmt = conn.prepare(
         "SELECT source_node_id, target_node_id, strength FROM connections
          WHERE source_node_id IN (SELECT id FROM nodes WHERE archived = 0)
-           AND target_node_id IN (SELECT id FROM nodes WHERE archived = 0)"
+           AND target_node_id IN (SELECT id FROM nodes WHERE archived = 0)",
     )?;
 
-    let connections = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, f64>(2)?,
-        ))
-    })?
-    .collect::<SqliteResult<Vec<(String, String, f64)>>>()?;
+    let connections = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<SqliteResult<Vec<(String, String, f64)>>>()?;
 
     println!("Retrieved {} connections", connections.len());
     Ok(connections)
 }
 
 /// Delete a specific connection between two nodes
-pub fn delete_connection(conn: &Connection, source_id: &str, target_id: &str) -> SqliteResult<usize> {
+pub fn delete_connection(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+) -> SqliteResult<usize> {
     let deleted = conn.execute(
         "DELETE FROM connections WHERE source_node_id = ?1 AND target_node_id = ?2",
         params![source_id, target_id],
     )?;
 
-    println!("Connection deleted: {} -> {} (rows: {})", source_id, target_id, deleted);
+    println!(
+        "Connection deleted: {} -> {} (rows: {})",
+        source_id, target_id, deleted
+    );
     Ok(deleted)
 }
 
@@ -861,7 +860,7 @@ pub fn insert_timeseries(
     metadata: Option<JsonValue>,
 ) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
-    
+
     conn.execute(
         "INSERT INTO timeseries (timestamp, source_id, metric_type, value, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -883,11 +882,11 @@ pub fn batch_insert_timeseries(
     data_points: Vec<TimeseriesDataPoint>,
 ) -> SqliteResult<()> {
     let tx = conn.unchecked_transaction()?;
-    
+
     {
         let mut stmt = tx.prepare(
             "INSERT INTO timeseries (timestamp, source_id, metric_type, value, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5)"
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
 
         for point in data_points {
@@ -900,7 +899,7 @@ pub fn batch_insert_timeseries(
             ])?;
         }
     }
-    
+
     tx.commit()?;
     println!("Batch timeseries insert completed");
     Ok(())
@@ -923,50 +922,57 @@ pub fn query_timeseries(
     end_time: Option<i64>,
     limit: Option<usize>,
 ) -> SqliteResult<Vec<TimeseriesPoint>> {
-    let mut query = String::from("SELECT timestamp, source_id, metric_type, value, metadata FROM timeseries WHERE 1=1");
+    let mut query = String::from(
+        "SELECT timestamp, source_id, metric_type, value, metadata FROM timeseries WHERE 1=1",
+    );
     let mut params_vec: Vec<Value> = vec![];
-    
+
     if let Some(sid) = source_id {
         query.push_str(" AND source_id = ?");
         params_vec.push(Value::Text(sid.to_string()));
     }
-    
+
     if let Some(mt) = metric_type {
         query.push_str(" AND metric_type = ?");
         params_vec.push(Value::Text(mt.to_string()));
     }
-    
+
     if let Some(st) = start_time {
         query.push_str(" AND timestamp >= ?");
         params_vec.push(Value::Integer(st));
     }
-    
+
     if let Some(et) = end_time {
         query.push_str(" AND timestamp <= ?");
         params_vec.push(Value::Integer(et));
     }
-    
+
     query.push_str(" ORDER BY timestamp DESC");
-    
+
     if let Some(lim) = limit {
         query.push_str(&format!(" LIMIT {}", lim));
     }
 
     let mut stmt = conn.prepare(&query)?;
     // Convert Value references to &dyn ToSql
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    
-    let points = stmt.query_map(&param_refs[..], |row| {
-        Ok(TimeseriesPoint {
-            timestamp: row.get(0)?,
-            source_id: row.get(1)?,
-            metric_type: row.get(2)?,
-            value: row.get(3)?,
-            metadata: row.get::<_, Option<String>>(4)?
-                .and_then(|s| serde_json::from_str(&s).ok()),
-        })
-    })?
-    .collect::<SqliteResult<Vec<TimeseriesPoint>>>()?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
+
+    let points = stmt
+        .query_map(&param_refs[..], |row| {
+            Ok(TimeseriesPoint {
+                timestamp: row.get(0)?,
+                source_id: row.get(1)?,
+                metric_type: row.get(2)?,
+                value: row.get(3)?,
+                metadata: row
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+            })
+        })?
+        .collect::<SqliteResult<Vec<TimeseriesPoint>>>()?;
 
     println!("Queried {} timeseries points", points.len());
     Ok(points)
@@ -1020,40 +1026,41 @@ pub fn get_positions(
 ) -> SqliteResult<Vec<Position>> {
     let mut query = String::from("SELECT * FROM positions WHERE 1=1");
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
-    
+
     if let Some(mid) = market_id {
         query.push_str(" AND market_id = ?");
         params_vec.push(Box::new(mid.to_string()));
     }
-    
+
     if let Some(st) = status {
         query.push_str(" AND status = ?");
         params_vec.push(Box::new(st.to_string()));
     }
-    
+
     query.push_str(" ORDER BY entry_time DESC");
 
     let mut stmt = conn.prepare(&query)?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-    
-    let positions = stmt.query_map(&param_refs[..], |row| {
-        Ok(Position {
-            id: row.get(0)?,
-            market_id: row.get(1)?,
-            market_type: row.get(2)?,
-            position_type: row.get(3)?,
-            quantity: row.get(4)?,
-            entry_price: row.get(5)?,
-            exit_price: row.get(6)?,
-            entry_time: row.get(7)?,
-            exit_time: row.get(8)?,
-            realized_pnl: row.get(9)?,
-            fees: row.get(10)?,
-            status: row.get(11)?,
-            metadata: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
-        })
-    })?
-    .collect::<SqliteResult<Vec<Position>>>()?;
+
+    let positions = stmt
+        .query_map(&param_refs[..], |row| {
+            Ok(Position {
+                id: row.get(0)?,
+                market_id: row.get(1)?,
+                market_type: row.get(2)?,
+                position_type: row.get(3)?,
+                quantity: row.get(4)?,
+                entry_price: row.get(5)?,
+                exit_price: row.get(6)?,
+                entry_time: row.get(7)?,
+                exit_time: row.get(8)?,
+                realized_pnl: row.get(9)?,
+                fees: row.get(10)?,
+                status: row.get(11)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
+            })
+        })?
+        .collect::<SqliteResult<Vec<Position>>>()?;
 
     println!("Retrieved {} positions", positions.len());
     Ok(positions)
@@ -1072,7 +1079,7 @@ pub fn update_scraper_status(
     data_points_collected: u64,
 ) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
-    
+
     conn.execute(
         "INSERT INTO scraper_status (node_id, active, last_update, last_error, data_points_collected, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1091,7 +1098,7 @@ pub fn update_scraper_status(
 pub fn get_scraper_status(conn: &Connection, node_id: &str) -> SqliteResult<ScraperStatus> {
     let mut stmt = conn.prepare(
         "SELECT active, last_update, last_error, data_points_collected, uptime_seconds 
-         FROM scraper_status WHERE node_id = ?1"
+         FROM scraper_status WHERE node_id = ?1",
     )?;
 
     stmt.query_row(params![node_id], |row| {
@@ -1100,7 +1107,7 @@ pub fn get_scraper_status(conn: &Connection, node_id: &str) -> SqliteResult<Scra
         let last_error: Option<String> = row.get(2)?;
         let data_points_collected: i64 = row.get(3)?;
         let uptime_seconds: i64 = row.get(4)?;
-        
+
         Ok(ScraperStatus {
             active: active != 0,
             last_update,
@@ -1133,7 +1140,7 @@ pub fn log_event(
     severity: &str,
 ) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
-    
+
     conn.execute(
         "INSERT INTO event_log (timestamp, node_id, event_type, event_data, severity)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1155,20 +1162,22 @@ pub fn get_recent_events(conn: &Connection, limit: usize) -> SqliteResult<Vec<Ev
         "SELECT timestamp, node_id, event_type, event_data, severity 
          FROM event_log 
          ORDER BY timestamp DESC 
-         LIMIT ?1"
+         LIMIT ?1",
     )?;
 
-    let events = stmt.query_map(params![limit], |row| {
-        Ok(EventLogEntry {
-            timestamp: row.get(0)?,
-            node_id: row.get(1)?,
-            event_type: row.get(2)?,
-            event_data: row.get::<_, Option<String>>(3)?
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            severity: row.get(4)?,
-        })
-    })?
-    .collect::<SqliteResult<Vec<EventLogEntry>>>()?;
+    let events = stmt
+        .query_map(params![limit], |row| {
+            Ok(EventLogEntry {
+                timestamp: row.get(0)?,
+                node_id: row.get(1)?,
+                event_type: row.get(2)?,
+                event_data: row
+                    .get::<_, Option<String>>(3)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                severity: row.get(4)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<EventLogEntry>>>()?;
 
     Ok(events)
 }
@@ -1189,11 +1198,10 @@ pub struct EventLogEntry {
 /// Serialize NodeType to database-friendly format
 fn serialize_node_type(node_type: &NodeType) -> (String, String) {
     match node_type {
-        NodeType::InfoSource(info_type) => {
-            ("InfoSource".to_string(), format!("{:?}", info_type))
-        }
-        NodeType::Market(market_type) => {
-            ("Market".to_string(), format!("{:?}", market_type))
+        NodeType::InfoSource(info_type) => ("InfoSource".to_string(), format!("{:?}", info_type)),
+        NodeType::Market(market_type) => ("Market".to_string(), format!("{:?}", market_type)),
+        NodeType::Analyzer(analyzer_type) => {
+            ("Analyzer".to_string(), format!("{:?}", analyzer_type))
         }
     }
 }
@@ -1231,6 +1239,19 @@ fn deserialize_node(row: &Row) -> Node {
             };
             NodeType::Market(market_type)
         }
+        "Analyzer" => {
+            let analyzer_type = match node_subtype_str.as_str() {
+                "Correlation" => AnalyzerType::Correlation,
+                "Momentum" => AnalyzerType::Momentum,
+                "Arbitrage" => AnalyzerType::Arbitrage,
+                "Sentiment" => AnalyzerType::Sentiment,
+                "RSI" => AnalyzerType::RSI,
+                "Volatility" => AnalyzerType::Volatility,
+                "Custom" => AnalyzerType::Custom,
+                _ => AnalyzerType::Correlation, // Default fallback
+            };
+            NodeType::Analyzer(analyzer_type)
+        }
         _ => NodeType::InfoSource(InfoSourceType::CryptoPrices), // Default fallback
     };
 
@@ -1262,28 +1283,21 @@ pub fn vacuum_database(conn: &Connection) -> SqliteResult<()> {
 
 /// Get database statistics
 pub fn get_database_stats(conn: &Connection) -> SqliteResult<DatabaseStats> {
-    let total_nodes: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM nodes WHERE archived = 0",
-        [],
-        |row| row.get(0)
-    )?;
+    let total_nodes: i64 =
+        conn.query_row("SELECT COUNT(*) FROM nodes WHERE archived = 0", [], |row| {
+            row.get(0)
+        })?;
 
-    let total_timeseries: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM timeseries",
-        [],
-        |row| row.get(0)
-    )?;
+    let total_timeseries: i64 =
+        conn.query_row("SELECT COUNT(*) FROM timeseries", [], |row| row.get(0))?;
 
-    let total_positions: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM positions",
-        [],
-        |row| row.get(0)
-    )?;
+    let total_positions: i64 =
+        conn.query_row("SELECT COUNT(*) FROM positions", [], |row| row.get(0))?;
 
     let open_positions: i64 = conn.query_row(
         "SELECT COUNT(*) FROM positions WHERE status = 'open'",
         [],
-        |row| row.get(0)
+        |row| row.get(0),
     )?;
 
     Ok(DatabaseStats {
@@ -1330,11 +1344,11 @@ pub struct ApiKeyData {
 }
 
 /// Save or update API key for a platform
-/// 
+///
 /// Uses UPSERT (INSERT OR REPLACE) to handle both insert and update cases
 pub fn save_api_key(conn: &Connection, platform: &str, key_data: &ApiKeyData) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
-    
+
     conn.execute(
         "INSERT OR REPLACE INTO api_keys 
          (platform, api_key, api_secret, private_key, environment, additional_config, created_at, updated_at)
@@ -1371,7 +1385,8 @@ pub fn get_api_key(conn: &Connection, platform: &str) -> SqliteResult<Option<Sto
             api_secret: row.get(2)?,
             private_key: row.get(3)?,
             environment: row.get(4)?,
-            additional_config: row.get::<_, Option<String>>(5)?
+            additional_config: row
+                .get::<_, Option<String>>(5)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
@@ -1393,20 +1408,22 @@ pub fn get_all_api_keys(conn: &Connection) -> SqliteResult<Vec<StoredApiKey>> {
          FROM api_keys ORDER BY platform"
     )?;
 
-    let keys = stmt.query_map([], |row| {
-        Ok(StoredApiKey {
-            platform: row.get(0)?,
-            api_key: row.get(1)?,
-            api_secret: row.get(2)?,
-            private_key: row.get(3)?,
-            environment: row.get(4)?,
-            additional_config: row.get::<_, Option<String>>(5)?
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-        })
-    })?
-    .collect::<SqliteResult<Vec<StoredApiKey>>>()?;
+    let keys = stmt
+        .query_map([], |row| {
+            Ok(StoredApiKey {
+                platform: row.get(0)?,
+                api_key: row.get(1)?,
+                api_secret: row.get(2)?,
+                private_key: row.get(3)?,
+                environment: row.get(4)?,
+                additional_config: row
+                    .get::<_, Option<String>>(5)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<StoredApiKey>>>()?;
 
     Ok(keys)
 }
@@ -1435,8 +1452,9 @@ pub fn has_api_key(conn: &Connection, platform: &str) -> SqliteResult<bool> {
 /// Get list of platforms with configured API keys
 pub fn get_configured_platforms(conn: &Connection) -> SqliteResult<Vec<String>> {
     let mut stmt = conn.prepare("SELECT platform FROM api_keys ORDER BY platform")?;
-    
-    let platforms = stmt.query_map([], |row| row.get(0))?
+
+    let platforms = stmt
+        .query_map([], |row| row.get(0))?
         .collect::<SqliteResult<Vec<String>>>()?;
 
     Ok(platforms)
@@ -1446,7 +1464,7 @@ pub fn get_configured_platforms(conn: &Connection) -> SqliteResult<Vec<String>> 
 // ANALYZER NODE OPERATIONS
 // ============================================================================
 
-use crate::models::analyzer_node::{AnalyzerNode, AnalyzerResult, AnalyzerChain, AnalyzerType};
+use crate::models::analyzer_node::{AnalyzerChain, AnalyzerNode, AnalyzerResult, AnalyzerType};
 
 /// Insert a new analyzer node
 pub fn insert_analyzer_node(conn: &Connection, analyzer: &AnalyzerNode) -> SqliteResult<()> {
@@ -1520,15 +1538,16 @@ pub fn delete_analyzer_node(conn: &Connection, analyzer_id: &str) -> SqliteResul
 }
 
 /// Get an analyzer node by ID
-pub fn get_analyzer_by_id(conn: &Connection, analyzer_id: &str) -> SqliteResult<Option<AnalyzerNode>> {
+pub fn get_analyzer_by_id(
+    conn: &Connection,
+    analyzer_id: &str,
+) -> SqliteResult<Option<AnalyzerNode>> {
     let mut stmt = conn.prepare(
         "SELECT id, node_id, analyzer_type, config, enabled, name, created_at, updated_at
-         FROM analyzer_nodes WHERE id = ?1"
+         FROM analyzer_nodes WHERE id = ?1",
     )?;
 
-    let result = stmt.query_row(params![analyzer_id], |row| {
-        deserialize_analyzer_node(row)
-    });
+    let result = stmt.query_row(params![analyzer_id], |row| deserialize_analyzer_node(row));
 
     match result {
         Ok(node) => Ok(Some(node)),
@@ -1541,13 +1560,12 @@ pub fn get_analyzer_by_id(conn: &Connection, analyzer_id: &str) -> SqliteResult<
 pub fn get_analyzers_for_node(conn: &Connection, node_id: &str) -> SqliteResult<Vec<AnalyzerNode>> {
     let mut stmt = conn.prepare(
         "SELECT id, node_id, analyzer_type, config, enabled, name, created_at, updated_at
-         FROM analyzer_nodes WHERE node_id = ?1 ORDER BY created_at"
+         FROM analyzer_nodes WHERE node_id = ?1 ORDER BY created_at",
     )?;
 
-    let analyzers = stmt.query_map(params![node_id], |row| {
-        deserialize_analyzer_node(row)
-    })?
-    .collect::<SqliteResult<Vec<AnalyzerNode>>>()?;
+    let analyzers = stmt
+        .query_map(params![node_id], |row| deserialize_analyzer_node(row))?
+        .collect::<SqliteResult<Vec<AnalyzerNode>>>()?;
 
     Ok(analyzers)
 }
@@ -1558,11 +1576,9 @@ fn deserialize_analyzer_node(row: &Row) -> SqliteResult<AnalyzerNode> {
     let config_str: String = row.get(3)?;
     let enabled_int: i32 = row.get(4)?;
 
-    let analyzer_type = AnalyzerType::from_str(&analyzer_type_str)
-        .unwrap_or(AnalyzerType::Custom);
+    let analyzer_type = AnalyzerType::from_str(&analyzer_type_str).unwrap_or(AnalyzerType::Custom);
 
-    let config: JsonValue = serde_json::from_str(&config_str)
-        .unwrap_or(serde_json::json!({}));
+    let config: JsonValue = serde_json::from_str(&config_str).unwrap_or(serde_json::json!({}));
 
     Ok(AnalyzerNode {
         id: row.get(0)?,
@@ -1608,7 +1624,7 @@ pub fn get_analyzer_results(
 ) -> SqliteResult<Vec<AnalyzerResult>> {
     let mut sql = String::from(
         "SELECT id, analyzer_id, result_type, value, confidence, metadata, timestamp
-         FROM analyzer_results WHERE analyzer_id = ?1"
+         FROM analyzer_results WHERE analyzer_id = ?1",
     );
     let mut param_values: Vec<Value> = vec![Value::Text(analyzer_id.to_string())];
 
@@ -1633,22 +1649,23 @@ pub fn get_analyzer_results(
         .collect();
 
     let mut stmt = conn.prepare(&sql)?;
-    let results = stmt.query_map(params_refs.as_slice(), |row| {
-        let metadata_str: String = row.get(5)?;
-        let metadata: JsonValue = serde_json::from_str(&metadata_str)
-            .unwrap_or(serde_json::json!({}));
+    let results = stmt
+        .query_map(params_refs.as_slice(), |row| {
+            let metadata_str: String = row.get(5)?;
+            let metadata: JsonValue =
+                serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({}));
 
-        Ok(AnalyzerResult {
-            id: row.get(0)?,
-            analyzer_id: row.get(1)?,
-            result_type: row.get(2)?,
-            value: row.get(3)?,
-            confidence: row.get(4)?,
-            metadata,
-            timestamp: row.get(6)?,
-        })
-    })?
-    .collect::<SqliteResult<Vec<AnalyzerResult>>>()?;
+            Ok(AnalyzerResult {
+                id: row.get(0)?,
+                analyzer_id: row.get(1)?,
+                result_type: row.get(2)?,
+                value: row.get(3)?,
+                confidence: row.get(4)?,
+                metadata,
+                timestamp: row.get(6)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<AnalyzerResult>>>()?;
 
     Ok(results)
 }
@@ -1678,7 +1695,7 @@ pub fn insert_analyzer_chain(conn: &Connection, chain: &AnalyzerChain) -> Sqlite
 pub fn get_chain_by_id(conn: &Connection, chain_id: &str) -> SqliteResult<Option<AnalyzerChain>> {
     let mut stmt = conn.prepare(
         "SELECT id, source_analyzer_id, target_analyzer_id, transform, enabled, created_at
-         FROM analyzer_chains WHERE id = ?1"
+         FROM analyzer_chains WHERE id = ?1",
     )?;
 
     let result = stmt.query_row(params![chain_id], |row| {
@@ -1710,18 +1727,19 @@ pub fn get_chains_for_node(conn: &Connection, node_id: &str) -> SqliteResult<Vec
          GROUP BY c.id"
     )?;
 
-    let chains = stmt.query_map(params![node_id], |row| {
-        let enabled_int: i32 = row.get(4)?;
-        Ok(AnalyzerChain {
-            id: row.get(0)?,
-            source_analyzer_id: row.get(1)?,
-            target_analyzer_id: row.get(2)?,
-            transform: row.get(3)?,
-            enabled: enabled_int != 0,
-            created_at: row.get(5)?,
-        })
-    })?
-    .collect::<SqliteResult<Vec<AnalyzerChain>>>()?;
+    let chains = stmt
+        .query_map(params![node_id], |row| {
+            let enabled_int: i32 = row.get(4)?;
+            Ok(AnalyzerChain {
+                id: row.get(0)?,
+                source_analyzer_id: row.get(1)?,
+                target_analyzer_id: row.get(2)?,
+                transform: row.get(3)?,
+                enabled: enabled_int != 0,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<AnalyzerChain>>>()?;
 
     Ok(chains)
 }
@@ -1758,21 +1776,23 @@ mod tests {
     #[test]
     fn test_setup_schema() {
         let (_temp, conn) = setup_test_db();
-        
+
         // Verify tables exist
-        let table_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
-            [],
-            |row| row.get(0)
-        ).unwrap();
-        
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
         assert!(table_count >= 6); // Should have at least 6 tables
     }
 
     #[test]
     fn test_insert_and_get_node() {
         let (_temp, conn) = setup_test_db();
-        
+
         let node = Node {
             id: "test-node-1".to_string(),
             node_type: NodeType::InfoSource(InfoSourceType::CryptoPrices),
@@ -1781,10 +1801,10 @@ mod tests {
             connections: vec![],
             metadata: serde_json::json!({"test": "data"}),
         };
-        
+
         insert_node(&conn, &node).unwrap();
         let retrieved = get_node_by_id(&conn, "test-node-1").unwrap();
-        
+
         assert_eq!(retrieved.id, node.id);
         assert_eq!(retrieved.position, node.position);
     }
@@ -1792,7 +1812,7 @@ mod tests {
     #[test]
     fn test_insert_timeseries() {
         let (_temp, conn) = setup_test_db();
-        
+
         // First create a node
         let node = Node {
             id: "source-1".to_string(),
@@ -1803,10 +1823,10 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         insert_node(&conn, &node).unwrap();
-        
+
         // Insert timeseries data
         insert_timeseries(&conn, "source-1", "price", 50000.0, None).unwrap();
-        
+
         let points = query_timeseries(&conn, Some("source-1"), None, None, None, Some(10)).unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].value, 50000.0);
@@ -1815,7 +1835,7 @@ mod tests {
     #[test]
     fn test_batch_insert_timeseries() {
         let (_temp, conn) = setup_test_db();
-        
+
         let data_points = vec![
             TimeseriesDataPoint {
                 timestamp: 1000,
@@ -1832,9 +1852,9 @@ mod tests {
                 metadata: None,
             },
         ];
-        
+
         batch_insert_timeseries(&conn, data_points).unwrap();
-        
+
         let points = query_timeseries(&conn, Some("source-1"), None, None, None, None).unwrap();
         assert_eq!(points.len(), 2);
     }
@@ -1842,7 +1862,7 @@ mod tests {
     #[test]
     fn test_database_stats() {
         let (_temp, conn) = setup_test_db();
-        
+
         let stats = get_database_stats(&conn).unwrap();
         assert_eq!(stats.total_nodes, 0);
         assert_eq!(stats.total_timeseries_points, 0);

@@ -246,19 +246,19 @@ use serde_json::Value as JsonValue;
 pub struct Node {
     /// Unique identifier (UUID v4)
     pub id: String,
-    
+
     /// Discriminated union of node categories
     pub node_type: NodeType,
-    
+
     /// Visual position on Canvas (x, y coordinates in pixels)
     pub position: (f64, f64),
-    
+
     /// Node size for resizable nodes (width, optional height)
     pub size: Option<(f64, Option<f64>)>,
-    
+
     /// Graph edges: IDs of connected nodes
     pub connections: Vec<String>,
-    
+
     /// Flexible configuration (scraper settings, API keys, etc.)
     pub metadata: JsonValue,
 }
@@ -270,10 +270,14 @@ pub enum NodeType {
     /// Data input source (price feeds, news, etc.)
     #[serde(rename = "InfoSource")]
     InfoSource(InfoSourceType),
-    
+
     /// Prediction market trading venue
     #[serde(rename = "Market")]
     Market(MarketType),
+
+    /// Analysis node for processing data
+    #[serde(rename = "Analyzer")]
+    Analyzer(super::analyzer_node::AnalyzerType),
 }
 
 /// Specific types of information sources
@@ -281,28 +285,28 @@ pub enum NodeType {
 pub enum InfoSourceType {
     /// Cryptocurrency price data (Bitcoin, Ethereum, etc.)
     CryptoPrices,
-    
+
     /// Traditional financial markets (stocks, forex)
     FinancialPrices,
-    
+
     /// Physical commodity prices (gold, oil, agriculture)
     CommodityPrices,
-    
+
     /// News articles and headlines (Reuters, AP, etc.)
     NewsSource,
-    
+
     /// Social media sentiment (Twitter/X, Reddit)
     SocialMedia,
-    
+
     /// Weather data (temperature, storms, natural disasters)
     Weather,
-    
+
     /// Live video stream monitoring (debates, press conferences)
     Livestream,
-    
+
     /// Economic indicators (CPI, unemployment, GDP)
     EconomicIndicators,
-    
+
     /// On-chain metrics (transaction volume, gas fees)
     OnChainData,
 }
@@ -312,7 +316,7 @@ pub enum InfoSourceType {
 pub enum MarketType {
     /// Polymarket (Polygon blockchain-based)
     Polymarket,
-    
+
     /// Kalshi (regulated US exchange)
     Kalshi,
 }
@@ -331,11 +335,11 @@ mod tests {
             connections: vec!["market-456".to_string()],
             metadata: serde_json::json!({"test": "value"}),
         };
-        
+
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains("\"test-123\""));
         assert!(json.contains("CryptoPrices"));
-        
+
         let deserialized: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, node.id);
         assert_eq!(deserialized.position, (100.0, 200.0));
@@ -348,7 +352,7 @@ mod tests {
             NodeType::InfoSource(InfoSourceType::NewsSource),
             NodeType::Market(MarketType::Polymarket),
         ];
-        
+
         for node_type in types {
             let json = serde_json::to_string(&node_type).unwrap();
             let _: NodeType = serde_json::from_str(&json).unwrap();

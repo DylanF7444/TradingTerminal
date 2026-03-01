@@ -37,6 +37,7 @@ base64 = "0.21"
 pkcs8 = { version = "0.10", features = ["pem"] }
 pkcs1 = { version = "0.7", features = ["pem"] }
 async-trait = "0.1"
+urlencoding = "2.1"
 
 [features]
 default = ["custom-protocol"]

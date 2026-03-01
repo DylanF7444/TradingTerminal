@@ -266,7 +266,7 @@
 //
 // FUTURE ENHANCEMENTS:
 // - OAuth flow support (browser redirect for auth)
-// - Market browser/search (query available markets from API)
+// - Market browser/search (query available markets from API) ← IMPLEMENTED
 // - Paper trading mode toggle (connect to sandbox vs production)
 // - Import/export credentials (encrypted blob)
 // - Multi-account support (connect multiple Polymarket accounts)
@@ -303,11 +303,14 @@ import {
   RefreshCw,
   Unplug,
   Shield,
-  Key
+  Key,
+  Search,
+  Type
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
+import MarketBrowser from './MarketBrowser';
 
 // ============================================================================
 // API KEY TYPES
@@ -424,6 +427,8 @@ export default function MarketPanel({
   // Form state (sensitive - cleared aggressively)
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [marketId, setMarketId] = useState('');
+  const [selectedMarketTitle, setSelectedMarketTitle] = useState('');
+  const [marketInputMode, setMarketInputMode] = useState<'search' | 'manual'>('search');
   const [environment, setEnvironment] = useState<'demo' | 'production'>('demo');
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
   
@@ -451,6 +456,8 @@ export default function MarketPanel({
   const clearSensitiveData = useCallback(() => {
     setCredentials({});
     setMarketId('');
+    setSelectedMarketTitle('');
+    setMarketInputMode('search');
     setLocalError(null);
     setSelectedPlatform(null);
     setStep('select');
@@ -736,7 +743,7 @@ export default function MarketPanel({
       {/* Connection Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-gray-900 rounded-xl border border-gray-800 shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+          <div className="bg-gray-900 rounded-xl border border-gray-800 shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
               <div>
@@ -831,21 +838,86 @@ export default function MarketPanel({
                     </div>
                   )}
 
-                  {/* Market ID Input */}
+                  {/* Market Selection - Search or Manual Entry */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Market ID
-                    </label>
-                    <input
-                      type="text"
-                      value={marketId}
-                      onChange={(e) => setMarketId(e.target.value)}
-                      placeholder={selectedPlatform === MarketType.Polymarket ? "0x123... or slug-name" : "Event-contract-ticker"}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors"
-                    />
-                    <p className="mt-1.5 text-xs text-gray-500">
-                      The specific prediction market to trade on (e.g., "BTC-100K-2026" or contract address)
-                    </p>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-sm font-medium text-gray-300">
+                        Market
+                      </label>
+                      <div className="flex items-center bg-gray-800 rounded-lg p-0.5 border border-gray-700">
+                        <button
+                          type="button"
+                          onClick={() => setMarketInputMode('search')}
+                          className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                            marketInputMode === 'search'
+                              ? 'bg-emerald-600 text-white'
+                              : 'text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          <Search className="w-3 h-3" />
+                          Search
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setMarketInputMode('manual')}
+                          className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                            marketInputMode === 'manual'
+                              ? 'bg-emerald-600 text-white'
+                              : 'text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          <Type className="w-3 h-3" />
+                          Manual
+                        </button>
+                      </div>
+                    </div>
+
+                    {marketInputMode === 'search' ? (
+                      <div className="space-y-2">
+                        <MarketBrowser
+                          platform={selectedPlatform}
+                          onSelectMarket={(id, title) => {
+                            setMarketId(id);
+                            setSelectedMarketTitle(title);
+                            setLocalError(null);
+                          }}
+                        />
+                        {selectedMarketTitle && (
+                          <div className="flex items-center gap-2 p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm text-emerald-300 truncate">{selectedMarketTitle}</p>
+                              <p className="text-xs text-gray-500 font-mono truncate">{marketId}</p>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setMarketId('');
+                                setSelectedMarketTitle('');
+                              }}
+                              className="text-gray-500 hover:text-gray-300 flex-shrink-0"
+                            >
+                              <Link2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div>
+                        <input
+                          type="text"
+                          value={marketId}
+                          onChange={(e) => {
+                            setMarketId(e.target.value);
+                            setSelectedMarketTitle('');
+                          }}
+                          placeholder={selectedPlatform === MarketType.Polymarket ? "0x123... or slug-name" : "Event-contract-ticker"}
+                          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors"
+                        />
+                        <p className="mt-1.5 text-xs text-gray-500">
+                          Enter the market identifier directly (e.g., slug, condition ID, or ticker)
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   {/* Credential Fields - show if no stored key or user wants to enter new */}

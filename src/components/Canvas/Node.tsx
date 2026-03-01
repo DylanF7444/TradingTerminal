@@ -200,13 +200,16 @@ export default function NodeComponent({
   // Determine node style based on type (with null safety)
   const isInfoSource = node.node_type && 'InfoSource' in node.node_type;
   const isMarket = node.node_type && 'Market' in node.node_type;
+  const isAnalyzer = node.node_type && 'Analyzer' in node.node_type;
   
   // Get the source type string
   const sourceType = isInfoSource 
     ? (node.node_type as { InfoSource: string }).InfoSource 
-    : isMarket 
-      ? (node.node_type as { Market: string }).Market 
-      : 'Unknown';
+    : isAnalyzer
+      ? (node.node_type as { Analyzer: string }).Analyzer
+      : isMarket 
+        ? (node.node_type as { Market: string }).Market 
+        : 'Unknown';
   
   // Color scheme based on type and connection mode
   const colorScheme = isInfoSource 
@@ -217,7 +220,15 @@ export default function NodeComponent({
         accent: 'text-blue-400',
         glow: 'shadow-blue-500/20'
       }
-    : { 
+    : isAnalyzer
+      ? {
+          bg: 'bg-slate-800/95',
+          border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-purple-400' : 'border-slate-600',
+          header: 'bg-purple-600',
+          accent: 'text-purple-400',
+          glow: 'shadow-purple-500/20'
+        }
+      : { 
         bg: 'bg-slate-800/95', 
         border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-emerald-400' : 'border-slate-600',
         header: 'bg-emerald-600',

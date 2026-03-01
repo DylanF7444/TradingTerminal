@@ -322,6 +322,7 @@ fn main() {
             get_markets_cmd,
             get_orderbook_cmd,
             refresh_market_connection_cmd,
+            search_markets_cmd,
             
             // Trading commands
             place_order_cmd,
@@ -842,6 +843,19 @@ async fn add_node_cmd(
             };
             models::node::NodeType::Market(market_type)
         }
+        "Analyzer" => {
+            let analyzer_type = match node_subtype.as_str() {
+                "Correlation" => models::analyzer_node::AnalyzerType::Correlation,
+                "Momentum" => models::analyzer_node::AnalyzerType::Momentum,
+                "Arbitrage" => models::analyzer_node::AnalyzerType::Arbitrage,
+                "Sentiment" => models::analyzer_node::AnalyzerType::Sentiment,
+                "RSI" => models::analyzer_node::AnalyzerType::RSI,
+                "Volatility" => models::analyzer_node::AnalyzerType::Volatility,
+                "Custom" => models::analyzer_node::AnalyzerType::Custom,
+                _ => return Err(format!("Unknown Analyzer type: {}", node_subtype)),
+            };
+            models::node::NodeType::Analyzer(analyzer_type)
+        }
         _ => return Err(format!("Unknown node type: {}", node_type)),
     };
     
@@ -1073,6 +1087,17 @@ async fn refresh_market_connection_cmd(
     // TODO: Reconnect WebSocket
     
     Ok(())
+}
+
+/// Search for markets on Polymarket or Kalshi
+#[tauri::command]
+async fn search_markets_cmd(
+    platform: String,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<commands::MarketSearchResult>, String> {
+    info!("Searching {} markets for: {}", platform, query);
+    markets::search_markets(platform, query, limit).await
 }
 
 // -------------------------------------------------------------------------

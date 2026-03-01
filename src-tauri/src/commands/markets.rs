@@ -859,3 +859,295 @@ async fn remove_credentials(_creds_id: &str) -> Result<(), String> {
     println!("Removing credentials {}", _creds_id);
     Ok(())
 }
+
+// ============================================================================
+// MARKET SEARCH
+// ============================================================================
+
+/// A search result returned from market search APIs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketSearchResult {
+    /// Unique market identifier (slug for Polymarket, ticker for Kalshi)
+    pub id: String,
+    /// Human-readable market title/question
+    pub title: String,
+    /// Short description or subtitle
+    pub description: String,
+    /// URL to market image/icon (if available)
+    pub image_url: Option<String>,
+    /// Current YES price (probability 0.0 - 1.0)
+    pub yes_price: Option<f64>,
+    /// Current NO price
+    pub no_price: Option<f64>,
+    /// 24h trading volume
+    pub volume_24h: Option<f64>,
+    /// Total liquidity available
+    pub liquidity: Option<f64>,
+    /// Market category (e.g., "crypto", "politics")
+    pub category: Option<String>,
+    /// Market status ("open", "closed", "resolved")
+    pub status: String,
+    /// End date / close time (ISO 8601 string)
+    pub end_date: Option<String>,
+    /// Platform this result came from
+    pub platform: String,
+    /// The slug or ticker to use when adding this market
+    pub slug: String,
+}
+
+/// Search for markets on Polymarket or Kalshi
+///
+/// Polymarket: Uses the Gamma API (https://gamma-api.polymarket.com)
+/// Kalshi: Uses the public markets API (https://api.elections.kalshi.com/trade-api/v2)
+pub async fn search_markets(
+    platform: String,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<MarketSearchResult>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("PredictionMarketTerminal/1.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let max_results = limit.unwrap_or(20).min(50);
+
+    match platform.as_str() {
+        "Polymarket" => search_polymarket(&client, &query, max_results).await,
+        "Kalshi" => search_kalshi(&client, &query, max_results).await,
+        _ => Err(format!("Unknown platform: {}", platform)),
+    }
+}
+
+/// Search Polymarket markets via the Gamma API
+async fn search_polymarket(
+    client: &reqwest::Client,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<MarketSearchResult>, String> {
+    // Gamma API: GET /markets?closed=false&limit=N&_q=<query>
+    let url = format!(
+        "https://gamma-api.polymarket.com/markets?closed=false&limit={}&_q={}",
+        limit,
+        urlencoding::encode(query)
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Polymarket search request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Polymarket API returned {}: {}", status, body));
+    }
+
+    let data: Vec<JsonValue> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Polymarket response: {}", e))?;
+
+    let results: Vec<MarketSearchResult> = data
+        .into_iter()
+        .filter_map(|item| {
+            let id = item["id"].as_str()?.to_string();
+            let question = item["question"].as_str().unwrap_or("").to_string();
+            let description = item["description"].as_str().unwrap_or("").to_string();
+            let slug = item["slug"].as_str().unwrap_or(&id).to_string();
+            let image = item["image"].as_str().map(|s| s.to_string());
+            let active = item["active"].as_bool().unwrap_or(false);
+            let closed = item["closed"].as_bool().unwrap_or(true);
+
+            // Extract token IDs for CLOB - needed for orderbook subscription
+            // The condition_id or clob_token_ids field contains the market identifier
+            let clob_token_ids = item["clobTokenIds"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            // Use condition_id as the primary market identifier for CLOB
+            let condition_id = item["conditionId"]
+                .as_str()
+                .map(|s| s.to_string())
+                .or(clob_token_ids)
+                .unwrap_or_else(|| slug.clone());
+
+            // Parse outcomes/prices
+            let outcomes_prices: Vec<f64> = item["outcomePrices"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .map(|prices| {
+                    prices
+                        .iter()
+                        .filter_map(|p| p.parse::<f64>().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let yes_price = outcomes_prices.first().copied();
+            let no_price = outcomes_prices.get(1).copied();
+
+            let volume = item["volume"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| item["volume"].as_f64());
+            let liquidity = item["liquidity"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| item["liquidity"].as_f64());
+            let end_date = item["endDate"].as_str().map(|s| s.to_string());
+
+            let status = if closed {
+                "closed".to_string()
+            } else if active {
+                "open".to_string()
+            } else {
+                "inactive".to_string()
+            };
+
+            Some(MarketSearchResult {
+                id: condition_id,
+                title: question,
+                description: if description.len() > 200 {
+                    format!("{}...", &description[..200])
+                } else {
+                    description
+                },
+                image_url: image,
+                yes_price,
+                no_price,
+                volume_24h: volume,
+                liquidity,
+                category: item["category"].as_str().map(|s| s.to_string()),
+                status,
+                end_date,
+                platform: "Polymarket".to_string(),
+                slug,
+            })
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Search Kalshi markets via the public API
+async fn search_kalshi(
+    client: &reqwest::Client,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<MarketSearchResult>, String> {
+    // Kalshi public API: GET /trade-api/v2/events with search
+    // If direct market search: GET /trade-api/v2/markets?status=open&limit=N
+    let events_url = format!(
+        "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true&limit={}",
+        limit
+    );
+
+    let resp = client
+        .get(&events_url)
+        .send()
+        .await
+        .map_err(|e| format!("Kalshi search request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Kalshi API returned {}: {}", status, body));
+    }
+
+    let data: JsonValue = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Kalshi response: {}", e))?;
+
+    let query_lower = query.to_lowercase();
+    let mut results: Vec<MarketSearchResult> = Vec::new();
+
+    // Parse events and their nested markets
+    if let Some(events) = data["events"].as_array() {
+        for event in events {
+            let event_title = event["title"].as_str().unwrap_or("");
+            let event_category = event["category"].as_str().map(|s| s.to_string());
+
+            if let Some(markets) = event["markets"].as_array() {
+                for market in markets {
+                    let ticker = market["ticker"].as_str().unwrap_or("").to_string();
+                    let title = market["title"].as_str().unwrap_or("").to_string();
+                    let subtitle = market["subtitle"].as_str().unwrap_or("").to_string();
+
+                    // Client-side filtering by query (Kalshi doesn't have a direct search param)
+                    let search_text = format!(
+                        "{} {} {} {}",
+                        event_title, title, subtitle, ticker
+                    )
+                    .to_lowercase();
+
+                    if !query_lower.is_empty() && !search_text.contains(&query_lower) {
+                        continue;
+                    }
+
+                    let yes_price = market["yes_ask"]
+                        .as_f64()
+                        .or_else(|| market["last_price"].as_f64())
+                        .map(|p| p / 100.0); // Kalshi uses cents
+                    let no_price = market["no_ask"]
+                        .as_f64()
+                        .map(|p| p / 100.0);
+
+                    let volume = market["volume"]
+                        .as_f64()
+                        .or_else(|| market["volume_24h"].as_f64());
+
+                    let open_interest = market["open_interest"].as_f64();
+                    let close_time = market["close_time"]
+                        .as_str()
+                        .map(|s| s.to_string());
+
+                    let market_status = market["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    let image = event["image_url"]
+                        .as_str()
+                        .map(|s| s.to_string());
+
+                    let display_title = if title.is_empty() {
+                        event_title.to_string()
+                    } else {
+                        title.clone()
+                    };
+
+                    results.push(MarketSearchResult {
+                        id: ticker.clone(),
+                        title: display_title,
+                        description: subtitle,
+                        image_url: image,
+                        yes_price,
+                        no_price,
+                        volume_24h: volume,
+                        liquidity: open_interest,
+                        category: event_category.clone(),
+                        status: market_status,
+                        end_date: close_time,
+                        platform: "Kalshi".to_string(),
+                        slug: ticker,
+                    });
+
+                    if results.len() >= limit as usize {
+                        break;
+                    }
+                }
+            }
+
+            if results.len() >= limit as usize {
+                break;
+            }
+        }
+    }
+
+    Ok(results)
+}

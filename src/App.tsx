@@ -89,7 +89,7 @@ import { useStore, type StoreState } from './store';
 import { invoke } from '@tauri-apps/api/core';
 
 // API utilities
-import { removeNode as removeNodeFromDb, updateNodeSize } from './utils/api';
+import { removeNode as removeNodeFromDb, updateNodeSize, removeConnection as removeConnectionFromDb } from './utils/api';
 
 // Extracted utilities
 import { transformNodeFromBackend } from './utils/nodeTransform';
@@ -102,6 +102,7 @@ import { useInfoSourceEvents, useNodeQualityMetrics } from './hooks/useInfoSourc
 import Canvas from './components/Canvas/Canvas';
 import SourcePanel from './components/InfoSources/SourcePanel';
 import MarketPanel from './components/Markets/MarketPanel';
+import AnalyzerPanel from './components/Analyzers/AnalyzerPanel';
 import GlobalOrderbookOverlay from './components/Markets/GlobalOrderbookOverlay';
 import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
 import ApiKeySettings from './components/Settings/ApiKeySettings';
@@ -420,6 +421,22 @@ function App(): ReactNode {
     setConnectionMode(false);
   }, []);
 
+  const handleConnectionDelete = useCallback(async (source: string, target: string) => {
+    const { removeConnection } = useStore.getState();
+    removeConnection(source, target);
+    console.log(`[Connection] Deleted connection from ${source} to ${target}`);
+    
+    // Persist deletion to backend
+    try {
+      const result = await removeConnectionFromDb(source, target);
+      if (!result.ok) {
+        console.error('Failed to delete connection from database:', result.error);
+      }
+    } catch (err) {
+      console.error('Error deleting connection from database:', err);
+    }
+  }, []);
+
   const toggleRightSidebar = useCallback(() => setShowRightSidebar((p) => !p), []);
   const toggleBottomPanel = useCallback(() => setShowBottomPanel((p) => !p), []);
 
@@ -442,13 +459,14 @@ function App(): ReactNode {
       onNodeResize: handleNodeResize,
       connectionMode,
       onCreateConnection: handleCreateConnection,
+      onConnectionDelete: handleConnectionDelete,
     }),
     [
       nodesArray, connectionsArray, viewport, selectedNode?.id,
       handleNodeClick, handleNodeMove, handleNodeDelete,
       handleCanvasBackgroundClick, handleViewportChange,
       handleOpenOrderbook, handleNodeResize, connectionMode,
-      handleCreateConnection,
+      handleCreateConnection, handleConnectionDelete,
     ],
   );
 
@@ -456,14 +474,32 @@ function App(): ReactNode {
   // Shared Sub-Components (used across layouts)
   // -------------------------------------------------------------------------
 
+  const infoSources = useMemo(
+    () => Object.values(nodes).filter((node) => node?.node_type && 'InfoSource' in node.node_type),
+    [nodes],
+  );
+
+  const markets = useMemo(
+    () => Object.values(nodes).filter((node) => node?.node_type && 'Market' in node.node_type),
+    [nodes],
+  );
+
+  const analyzers = useMemo(
+    () => Object.values(nodes).filter((node) => node?.node_type && 'Analyzer' in node.node_type),
+    [nodes],
+  );
+
   /** Source/Market panels — shared between all 3 layouts */
   const controlPanels = (
     <>
       <PanelErrorBoundary panelName="Source Panel">
-        <SourcePanel onAddSource={handleAddNode} />
+        <SourcePanel onAddSource={handleAddNode} existingSources={infoSources} />
       </PanelErrorBoundary>
       <PanelErrorBoundary panelName="Market Panel">
-        <MarketPanel onAddMarket={handleAddNode} />
+        <MarketPanel onAddMarket={handleAddNode} existingMarkets={markets} />
+      </PanelErrorBoundary>
+      <PanelErrorBoundary panelName="Analyzer Panel">
+        <AnalyzerPanel onAddAnalyzer={handleAddNode} existingAnalyzers={analyzers} />
       </PanelErrorBoundary>
     </>
   );

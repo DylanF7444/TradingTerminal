@@ -88,6 +88,10 @@ pub async fn initialize_saved_nodes(
                     }
                 }
             }
+            NodeType::Analyzer(analyzer_type) => {
+                // Analyzer nodes don't require startup services yet
+                println!("[Startup] Skipping startup for analyzer node: {} ({:?})", node.id, analyzer_type);
+            }
         }
     }
     
@@ -182,6 +186,9 @@ pub async fn stop_node_services(
             if let Some(handle) = services.scrapers.remove(node_id) {
                 crate::services::scraper::stop_scraper(&handle).await?;
             }
+        }
+        NodeType::Analyzer(_) => {
+            // Analyzer nodes don't have services to stop
         }
     }
     Ok(())
