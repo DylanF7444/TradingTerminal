@@ -405,13 +405,13 @@ function logApiCall(
     error: error ? { type: error.type, message: error.message } : undefined,
   };
 
-  if (process.env.NODE_ENV === 'development') {
+  if (import.meta.env.DEV) {
     const style = success ? 'color: green' : 'color: red';
     console.log(`%c[API] ${command} (${duration.toFixed(0)}ms)`, style, logEntry);
   }
 
   // In production, send to backend logging
-  if (process.env.NODE_ENV === 'production' && !success) {
+  if (import.meta.env.PROD && !success) {
     // Fire and forget error logging to backend
     invoke('log_frontend_error', { error: logEntry }).catch(() => {
       // Silent fail - don't infinite loop on logging errors

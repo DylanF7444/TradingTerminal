@@ -398,6 +398,15 @@ export default function Canvas({
       return x >= minX && x <= maxX && y >= minY && y <= maxY;
     });
   }, [nodes, viewport, canvasSize, effectiveBounds]);
+
+  // O(1) node lookup map — eliminates O(n) find() in connection rendering & drag handling
+  const nodeMap = useMemo(() => {
+    const map = new Map<string, (typeof nodes)[number]>();
+    for (const node of nodes) {
+      if (node?.id) map.set(node.id, node);
+    }
+    return map;
+  }, [nodes]);
   useEffect(() => {
     const updateSize = () => {
       if (containerRef.current) {
@@ -460,8 +469,8 @@ export default function Canvas({
     ctx.scale(viewport.zoom, viewport.zoom);
 
     connections.forEach((conn) => {
-      const sourceNode = nodes.find((n) => n.id === conn.source);
-      const targetNode = nodes.find((n) => n.id === conn.target);
+      const sourceNode = nodeMap.get(conn.source);
+      const targetNode = nodeMap.get(conn.target);
 
       if (!sourceNode || !targetNode) return;
 
@@ -701,7 +710,7 @@ export default function Canvas({
       e.stopPropagation();
       setDraggingNode(nodeId);
 
-      const node = nodes.find((n) => n.id === nodeId);
+      const node = nodeMap.get(nodeId);
       if (!node) return;
 
       // Calculate drag offset in world coordinates
@@ -713,7 +722,7 @@ export default function Canvas({
         y: worldY - node.position[1],
       });
     },
-    [nodes, viewport]
+    [nodeMap, viewport]
   );
 
   // Handle global mouse move for node dragging

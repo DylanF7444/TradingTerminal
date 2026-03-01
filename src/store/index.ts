@@ -250,9 +250,13 @@ export interface UISlice {
 // Combined Store State
 export type StoreState = NodesSlice & MarketsSlice & PositionsSlice & UISlice;
 
-// Type helpers for slice creators - using any for simplicity with zustand middleware chain
-type StoreSet = any;
-type StoreGet = any;
+// Type helpers for slice creators
+// With the immer middleware, `set` receives a draft updater; `replace: true` is disallowed.
+type StoreSet = (
+  partial: StoreState | Partial<StoreState> | ((state: StoreState) => StoreState | Partial<StoreState> | void),
+  replace?: false,
+) => void;
+type StoreGet = () => StoreState;
 
 // ============================================================================
 // SLICE IMPLEMENTATIONS
