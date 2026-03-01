@@ -11,6 +11,35 @@
 // (sidebar controls, main canvas, detail panels) and manages global UI state
 // such as panel visibility, selected nodes, and responsive layout adaptations.
 //
+// MODULAR ARCHITECTURE:
+// Logic previously embedded in this file has been extracted into dedicated
+// modules to keep App.tsx focused purely on layout orchestration:
+//
+//   Extracted Components:
+//     components/UI/Clock.tsx           ← Real-time clock display
+//     components/UI/ErrorBoundary.tsx   ← Panel-level error isolation
+//     components/Nodes/NodeDetailsPanel.extracted.tsx
+//                                       ← Node detail panel (monitoring, config)
+//     components/Nodes/RawStreamTab.tsx  ← Raw data stream viewer
+//
+//   Extracted Hooks:
+//     hooks/useInfoSourceEvents.ts      ← Tauri event listener + data propagation
+//       • useInfoSourceEvents()          ← Global 'infosource:update' handler
+//       • useNodeQualityMetrics()        ← Periodic quality metric simulation
+//
+//   Extracted Utilities:
+//     utils/nodeTransform.ts            ← Backend→frontend node format transform
+//     utils/nodeHelpers.ts              ← Type guards, display names, color schemes
+//     utils/demoData.ts                 ← Demo node creation for first-time users
+//
+// LAYOUT DEDUPLICATION:
+// Three responsive renderers (desktop/tablet/mobile) share common JSX fragments
+// computed once and referenced in each layout:
+//   • controlPanels     — SourcePanel + MarketPanel (wrapped in ErrorBoundary)
+//   • canvasProps       — Memoized props object for Canvas component
+//   • detailPanelContent — Tabbed detail view (Details / Raw Stream / Stored Data)
+//   • bottomPanel       — Positions panel
+//
 // Architecture Pattern:
 // Compound Component Layout with Zustand State Integration
 //   App (layout shell)
@@ -46,7 +75,9 @@
 //   F11: Toggle fullscreen
 //
 // ERROR BOUNDARIES:
-// Each major panel is wrapped in PanelErrorBoundary to isolate failures.
+// Each major panel is wrapped in PanelErrorBoundary (components/UI/ErrorBoundary.tsx)
+// to isolate failures. A crash in Canvas, SourcePanel, or NodeDetails won't
+// bring down the entire application.
 // ============================================================================
 
 import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
@@ -179,7 +210,7 @@ function App(): ReactNode {
         if (!isMounted) return;
 
         const storeState = useStore.getState();
-        const { addNode, nodes: existingNodes } = storeState;
+        const { addNode, addConnection, nodes: existingNodes } = storeState;
 
         // Skip if nodes already exist (prevents duplicates from React StrictMode)
         if (Object.keys(existingNodes).length > 0) {
@@ -197,6 +228,24 @@ function App(): ReactNode {
             }),
           );
           console.log(`Loaded ${result.length} existing nodes from backend`);
+          
+          // Load connections from backend
+          try {
+            const connections = await invoke<any[]>('get_all_connections_cmd');
+            if (!isMounted) return;
+            if (connections?.length) {
+              connections.forEach((conn) => {
+                addConnection({
+                  source: conn.source as NodeId,
+                  target: conn.target as NodeId,
+                  strength: conn.strength ?? 0.5,
+                });
+              });
+              console.log(`Loaded ${connections.length} connections from backend`);
+            }
+          } catch (connError) {
+            console.error('Failed to load connections:', connError);
+          }
         } else {
           console.log('No existing nodes found, creating demo nodes...');
           createDemoNodesRef.current();
@@ -363,6 +412,11 @@ function App(): ReactNode {
     }
     addConnection({ source: sourceId as NodeId, target: targetId as NodeId, strength: 0.8 });
     console.log(`[Connection] Created connection from ${sourceId} to ${targetId}`);
+    
+    // Persist to backend
+    invoke('add_connection_cmd', { source: sourceId, target: targetId, strength: 0.8 })
+      .catch((err: unknown) => console.error('Failed to persist connection:', err));
+    
     setConnectionMode(false);
   }, []);
 

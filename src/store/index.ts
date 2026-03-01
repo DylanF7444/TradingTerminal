@@ -48,7 +48,7 @@
 //
 // State Shape:
 // {
-//   nodes: Node[],           // From nodesSlice
+//   nodes: Record<string, Node>, // From nodesSlice (keyed by node ID)
 //   connections: Connection[], // From nodesSlice
 //   selectedNodeId: string | null, // From nodesSlice
 //   markets: MarketConnection[], // From marketsSlice
@@ -101,7 +101,7 @@
 //
 // Selector Types:
 // Typed selectors prevent accessing non-existent properties.
-// const useNodes = () => useStore(state => state.nodes) // Type: Node[]
+// const useNodes = () => useStore(state => state.nodes) // Type: Record<string, Node>
 //
 // USAGE EXAMPLES:
 //
@@ -449,6 +449,32 @@ if (typeof window !== 'undefined') {
       }, 500);
     },
     { equalityFn: shallow }
+  );
+
+  // Track previous connections to detect removals
+  let previousConnections: StoreState['connections'] = [];
+  
+  useStore.subscribe(
+    (state: StoreState) => state.connections,
+    (connections) => {
+      // Detect removed connections and sync deletion to backend
+      const removedConnections = previousConnections.filter(
+        (prev) => !connections.some((curr) => curr.source === prev.source && curr.target === prev.target)
+      );
+      
+      if (removedConnections.length > 0) {
+        void import('@tauri-apps/api/core').then(({ invoke }) => {
+          removedConnections.forEach((conn) => {
+            void invoke('remove_connection_cmd', {
+              source: conn.source,
+              target: conn.target,
+            }).catch(console.error);
+          });
+        });
+      }
+      
+      previousConnections = connections;
+    },
   );
 
   // Log state changes in development

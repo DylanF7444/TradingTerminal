@@ -179,6 +179,7 @@ use crate::commands::{
     update_node_size_cmd,
     orderbook::{self, OrderbookState},
     api_keys,
+    analyzers,
 };
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
 use crate::services::{scraper, startup};
@@ -310,6 +311,11 @@ fn main() {
             update_node_size_cmd,
             add_node_cmd,
             
+            // Connection commands
+            add_connection_cmd,
+            remove_connection_cmd,
+            get_all_connections_cmd,
+            
             // Market commands
             add_market_cmd,
             remove_market_cmd,
@@ -382,6 +388,19 @@ fn main() {
             delete_api_key_cmd,
             has_api_key_cmd,
             get_configured_platforms_cmd,
+            
+            // Analyzer commands
+            create_analyzer_cmd,
+            update_analyzer_cmd,
+            delete_analyzer_cmd,
+            get_node_analyzers_cmd,
+            get_analyzer_results_cmd,
+            get_analyzer_cmd,
+            toggle_analyzer_cmd,
+            create_chain_cmd,
+            delete_chain_cmd,
+            get_node_chains_cmd,
+            get_analyzer_types_cmd,
         ])
         
         // Run the application
@@ -853,6 +872,76 @@ async fn add_node_cmd(
         "success": true,
         "node_id": node_id
     }))
+}
+
+// -------------------------------------------------------------------------
+// Connection Commands
+// -------------------------------------------------------------------------
+
+/// Add a connection between two nodes (persisted to SQLite)
+#[tauri::command]
+async fn add_connection_cmd(
+    source: String,
+    target: String,
+    strength: f64,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    info!("Adding connection: {} -> {} (strength: {})", source, target, strength);
+    
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::insert_connection(&conn, &connection_id, &source, &target, strength, None, None)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    Ok(serde_json::json!({
+        "id": connection_id,
+        "source": source,
+        "target": target,
+        "strength": strength,
+    }))
+}
+
+/// Remove a connection between two nodes
+#[tauri::command]
+async fn remove_connection_cmd(
+    source: String,
+    target: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Removing connection: {} -> {}", source, target);
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::delete_connection(&conn, &source, &target)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    Ok(())
+}
+
+/// Get all connections (for restoring graph on startup)
+#[tauri::command]
+async fn get_all_connections_cmd(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let connections = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_all_connections(&conn)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+    
+    let result: Vec<serde_json::Value> = connections.into_iter().map(|(source, target, strength)| {
+        serde_json::json!({
+            "source": source,
+            "target": target,
+            "strength": strength,
+        })
+    }).collect();
+    
+    Ok(result)
 }
 
 // -------------------------------------------------------------------------
@@ -1591,4 +1680,114 @@ async fn has_api_key_cmd(
 #[tauri::command]
 async fn get_configured_platforms_cmd() -> Result<Vec<String>, String> {
     api_keys::get_configured_platforms_command().await
+}
+
+// -------------------------------------------------------------------------
+// Analyzer Commands
+// -------------------------------------------------------------------------
+
+/// Create an analyzer attached to a node
+#[tauri::command]
+async fn create_analyzer_cmd(
+    request: analyzers::CreateAnalyzerRequest,
+    state: State<'_, AppState>,
+) -> Result<models::analyzer_node::AnalyzerNode, String> {
+    info!("Creating analyzer: {} for node {}", request.name, request.node_id);
+    analyzers::create_analyzer(state.db.clone(), request).await
+}
+
+/// Update an analyzer's configuration
+#[tauri::command]
+async fn update_analyzer_cmd(
+    request: analyzers::UpdateAnalyzerRequest,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Updating analyzer: {}", request.analyzer_id);
+    analyzers::update_analyzer(state.db.clone(), request).await
+}
+
+/// Delete an analyzer
+#[tauri::command]
+async fn delete_analyzer_cmd(
+    analyzer_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Deleting analyzer: {}", analyzer_id);
+    analyzers::delete_analyzer(state.db.clone(), analyzer_id).await
+}
+
+/// Get all analyzers for a node
+#[tauri::command]
+async fn get_node_analyzers_cmd(
+    node_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<models::analyzer_node::AnalyzerNode>, String> {
+    analyzers::get_node_analyzers(state.db.clone(), node_id).await
+}
+
+/// Get analyzer results
+#[tauri::command]
+async fn get_analyzer_results_cmd(
+    analyzer_id: String,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<models::analyzer_node::AnalyzerResult>, String> {
+    analyzers::get_analyzer_results(state.db.clone(), analyzer_id, start_time, end_time, limit).await
+}
+
+/// Get a single analyzer by ID
+#[tauri::command]
+async fn get_analyzer_cmd(
+    analyzer_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<models::analyzer_node::AnalyzerNode>, String> {
+    analyzers::get_analyzer(state.db.clone(), analyzer_id).await
+}
+
+/// Toggle analyzer enabled/disabled
+#[tauri::command]
+async fn toggle_analyzer_cmd(
+    analyzer_id: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Toggling analyzer {} to {}", analyzer_id, enabled);
+    analyzers::toggle_analyzer(state.db.clone(), analyzer_id, enabled).await
+}
+
+/// Create an analyzer chain
+#[tauri::command]
+async fn create_chain_cmd(
+    request: analyzers::CreateChainRequest,
+    state: State<'_, AppState>,
+) -> Result<models::analyzer_node::AnalyzerChain, String> {
+    info!("Creating chain: {} -> {}", request.source_analyzer_id, request.target_analyzer_id);
+    analyzers::create_chain(state.db.clone(), request).await
+}
+
+/// Delete an analyzer chain
+#[tauri::command]
+async fn delete_chain_cmd(
+    chain_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Deleting chain: {}", chain_id);
+    analyzers::delete_chain(state.db.clone(), chain_id).await
+}
+
+/// Get all chains for a node
+#[tauri::command]
+async fn get_node_chains_cmd(
+    node_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<models::analyzer_node::AnalyzerChain>, String> {
+    analyzers::get_node_chains(state.db.clone(), node_id).await
+}
+
+/// Get available analyzer types with defaults
+#[tauri::command]
+async fn get_analyzer_types_cmd() -> Result<Vec<serde_json::Value>, String> {
+    Ok(analyzers::get_analyzer_types())
 }

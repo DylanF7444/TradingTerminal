@@ -48,8 +48,8 @@
 //   - Error details (on failure)
 //
 // Logs are sent to:
-//   - Console (development)
-//   - Backend logging (production, via log::info! in Rust)
+//   - Console (when import.meta.env.DEV is true)
+//   - Backend logging (when import.meta.env.PROD, via log::info! in Rust)
 //
 // TYPE SAFETY:
 //

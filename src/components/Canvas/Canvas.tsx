@@ -205,7 +205,7 @@
 //    - All subsequent drawing uses world coordinates
 //
 // 4. Draw Connections:
-//    - Find source/target nodes by ID
+//    - Look up source/target nodes via nodeMap (O(1) Map lookup)
 //    - Calculate control points for bezier curves
 //    - Style based on strength (width 1-4px, opacity 0.2-1.0)
 //    - Add shadow blur for "glow" effect on strong connections
@@ -228,6 +228,8 @@
 // - Node dragging uses CSS transforms (GPU accelerated)
 // - Only re-renders when nodes/connections/viewport change
 // - Bounds clamping adds minimal overhead (simple math operations)
+// - nodeMap (useMemo'd Map) provides O(1) node lookups for connection
+//   rendering and drag handling, replacing prior O(n) find() calls
 //
 // MEMORY CONSIDERATIONS:
 //

@@ -181,14 +181,20 @@ export enum AnalyzerType {
   /** Correlation calculator between sources */
   Correlation = 'Correlation',
   
-  /** Moving average calculator */
-  MovingAverage = 'MovingAverage',
+  /** EMA-based momentum detection */
+  Momentum = 'Momentum',
   
   /** Sentiment analyzer */
   Sentiment = 'Sentiment',
   
   /** Arbitrage detector */
   Arbitrage = 'Arbitrage',
+  
+  /** Relative Strength Index (RSI) */
+  RSI = 'RSI',
+  
+  /** Price volatility measurement */
+  Volatility = 'Volatility',
   
   /** Custom formula/expression */
   Custom = 'Custom',

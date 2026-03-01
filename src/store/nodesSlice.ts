@@ -67,7 +67,7 @@
 //
 //   selectedIds: Set<string>
 //     - Currently selected node IDs (supports multi-select with Ctrl/Cmd)
-//     - Drives right sidebar content in App.tsx
+//     - Drives right sidebar content (NodeDetailsPanel.extracted.tsx)
 //     - Visual highlighting via selectedNodeId prop to Canvas
 //
 //   viewport: { x: number, y: number, zoom: number }
@@ -82,7 +82,7 @@
 //   rawDataStreams: Record<string, RawStreamEntry[]>
 //     - Raw input stream data per node for debugging
 //     - Key: node ID, Value: array of recent raw data entries
-//     - Used by RawStreamTab component in App.tsx
+//     - Used by RawStreamTab component (components/Nodes/RawStreamTab.tsx)
 //
 // Actions:
 //
@@ -127,7 +127,7 @@
 //
 // 8. selectNode(id: string, multi?: boolean): void
 //    - Sets selected node (or adds to selection if multi=true)
-//    - Drives right sidebar detail view in App.tsx
+//    - Drives right sidebar detail view (NodeDetailsPanel.extracted.tsx)
 //    - Clears selection if id is null
 //
 // 9. clearSelection(): void

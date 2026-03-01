@@ -141,3 +141,18 @@ pub use storage::{
 // Trading signal types
 pub mod trading_signal;
 pub use trading_signal::TradingSignal;
+
+// Analyzer node types
+pub mod analyzer_node;
+pub use analyzer_node::{
+    AnalyzerNode,
+    AnalyzerType,
+    AnalyzerResult,
+    AnalyzerChain,
+    CorrelationConfig,
+    MomentumConfig,
+    ArbitrageConfig,
+    SentimentConfig,
+    RSIConfig,
+    VolatilityConfig,
+};

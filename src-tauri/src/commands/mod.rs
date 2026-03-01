@@ -72,6 +72,7 @@ pub mod trading;
 pub mod storage;
 pub mod orderbook;
 pub mod api_keys;
+pub mod analyzers;
 
 // Re-export all commands for main.rs invoke_handler registration
 
@@ -127,6 +128,24 @@ pub use orderbook::{
     OrderbookState,
     SubscriptionInfo,
     ConsolidatedSubscriptionInfo,
+};
+
+// Analyzers: Analyzer node management
+pub use analyzers::{
+    create_analyzer,
+    update_analyzer,
+    delete_analyzer,
+    get_node_analyzers,
+    get_analyzer_results,
+    get_analyzer,
+    toggle_analyzer,
+    create_chain,
+    delete_chain,
+    get_node_chains,
+    get_analyzer_types,
+    CreateAnalyzerRequest,
+    UpdateAnalyzerRequest,
+    CreateChainRequest,
 };
 
 // API Keys: Secure credential storage for trading platforms

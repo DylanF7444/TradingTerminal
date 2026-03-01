@@ -183,6 +183,9 @@ pub mod orderbook;
 pub mod websocket_manager;
 pub mod websocket_scraper;
 pub mod startup;
+pub mod analyzers;
+pub mod analyzer_pipeline;
+pub mod node_analyzer_manager;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

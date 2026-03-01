@@ -430,6 +430,52 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         [],
     )?;
 
+    // Analyzer nodes table - stores analyzer configurations attached to graph nodes
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS analyzer_nodes (
+            id TEXT PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            analyzer_type TEXT NOT NULL,
+            config JSON NOT NULL DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (node_id) REFERENCES nodes(id)
+        )",
+        [],
+    )?;
+
+    // Analyzer results table - cached analysis results for UI display
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS analyzer_results (
+            id TEXT PRIMARY KEY,
+            analyzer_id TEXT NOT NULL,
+            result_type TEXT NOT NULL,
+            value REAL NOT NULL,
+            confidence REAL NOT NULL,
+            metadata JSON,
+            timestamp INTEGER NOT NULL,
+            FOREIGN KEY (analyzer_id) REFERENCES analyzer_nodes(id)
+        )",
+        [],
+    )?;
+
+    // Analyzer chains table - defines chaining relationships between analyzers
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS analyzer_chains (
+            id TEXT PRIMARY KEY,
+            source_analyzer_id TEXT NOT NULL,
+            target_analyzer_id TEXT NOT NULL,
+            transform TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (source_analyzer_id) REFERENCES analyzer_nodes(id),
+            FOREIGN KEY (target_analyzer_id) REFERENCES analyzer_nodes(id)
+        )",
+        [],
+    )?;
+
     // Create indexes for performance
     create_indexes(conn)?;
 
@@ -492,6 +538,27 @@ fn create_indexes(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_websocket_messages_type 
          ON websocket_messages(message_type, timestamp DESC)",
+        [],
+    )?;
+
+    // Index for analyzer nodes by node_id
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analyzer_nodes_node
+         ON analyzer_nodes(node_id)",
+        [],
+    )?;
+
+    // Index for analyzer results by analyzer_id and time
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analyzer_results_analyzer_time
+         ON analyzer_results(analyzer_id, timestamp DESC)",
+        [],
+    )?;
+
+    // Index for analyzer chains by source
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analyzer_chains_source
+         ON analyzer_chains(source_analyzer_id)",
         [],
     )?;
 
@@ -747,6 +814,38 @@ pub fn get_connections_for_node(conn: &Connection, node_id: &str) -> SqliteResul
     .collect::<SqliteResult<Vec<String>>>()?;
 
     Ok(connections)
+}
+
+/// Get all connections in the database (for graph restoration on startup)
+pub fn get_all_connections(conn: &Connection) -> SqliteResult<Vec<(String, String, f64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_node_id, target_node_id, strength FROM connections
+         WHERE source_node_id IN (SELECT id FROM nodes WHERE archived = 0)
+           AND target_node_id IN (SELECT id FROM nodes WHERE archived = 0)"
+    )?;
+
+    let connections = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    })?
+    .collect::<SqliteResult<Vec<(String, String, f64)>>>()?;
+
+    println!("Retrieved {} connections", connections.len());
+    Ok(connections)
+}
+
+/// Delete a specific connection between two nodes
+pub fn delete_connection(conn: &Connection, source_id: &str, target_id: &str) -> SqliteResult<usize> {
+    let deleted = conn.execute(
+        "DELETE FROM connections WHERE source_node_id = ?1 AND target_node_id = ?2",
+        params![source_id, target_id],
+    )?;
+
+    println!("Connection deleted: {} -> {} (rows: {})", source_id, target_id, deleted);
+    Ok(deleted)
 }
 
 // ============================================================================
@@ -1341,6 +1440,299 @@ pub fn get_configured_platforms(conn: &Connection) -> SqliteResult<Vec<String>> 
         .collect::<SqliteResult<Vec<String>>>()?;
 
     Ok(platforms)
+}
+
+// ============================================================================
+// ANALYZER NODE OPERATIONS
+// ============================================================================
+
+use crate::models::analyzer_node::{AnalyzerNode, AnalyzerResult, AnalyzerChain, AnalyzerType};
+
+/// Insert a new analyzer node
+pub fn insert_analyzer_node(conn: &Connection, analyzer: &AnalyzerNode) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO analyzer_nodes (id, node_id, analyzer_type, config, enabled, name, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            &analyzer.id,
+            &analyzer.node_id,
+            &analyzer.analyzer_type.to_string(),
+            serde_json::to_string(&analyzer.config).unwrap_or_default(),
+            analyzer.enabled as i32,
+            &analyzer.name,
+            analyzer.created_at,
+            analyzer.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Update analyzer node configuration
+pub fn update_analyzer_node_config(
+    conn: &Connection,
+    analyzer_id: &str,
+    config: &JsonValue,
+) -> SqliteResult<()> {
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "UPDATE analyzer_nodes SET config = ?1, updated_at = ?2 WHERE id = ?3",
+        params![
+            serde_json::to_string(config).unwrap_or_default(),
+            now,
+            analyzer_id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Toggle analyzer enabled state
+pub fn set_analyzer_enabled(
+    conn: &Connection,
+    analyzer_id: &str,
+    enabled: bool,
+) -> SqliteResult<()> {
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "UPDATE analyzer_nodes SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+        params![enabled as i32, now, analyzer_id],
+    )?;
+    Ok(())
+}
+
+/// Delete an analyzer node
+pub fn delete_analyzer_node(conn: &Connection, analyzer_id: &str) -> SqliteResult<()> {
+    // Delete associated results
+    conn.execute(
+        "DELETE FROM analyzer_results WHERE analyzer_id = ?1",
+        params![analyzer_id],
+    )?;
+    // Delete associated chains
+    conn.execute(
+        "DELETE FROM analyzer_chains WHERE source_analyzer_id = ?1 OR target_analyzer_id = ?1",
+        params![analyzer_id],
+    )?;
+    // Delete the analyzer
+    conn.execute(
+        "DELETE FROM analyzer_nodes WHERE id = ?1",
+        params![analyzer_id],
+    )?;
+    Ok(())
+}
+
+/// Get an analyzer node by ID
+pub fn get_analyzer_by_id(conn: &Connection, analyzer_id: &str) -> SqliteResult<Option<AnalyzerNode>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, node_id, analyzer_type, config, enabled, name, created_at, updated_at
+         FROM analyzer_nodes WHERE id = ?1"
+    )?;
+
+    let result = stmt.query_row(params![analyzer_id], |row| {
+        deserialize_analyzer_node(row)
+    });
+
+    match result {
+        Ok(node) => Ok(Some(node)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Get all analyzers for a specific graph node
+pub fn get_analyzers_for_node(conn: &Connection, node_id: &str) -> SqliteResult<Vec<AnalyzerNode>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, node_id, analyzer_type, config, enabled, name, created_at, updated_at
+         FROM analyzer_nodes WHERE node_id = ?1 ORDER BY created_at"
+    )?;
+
+    let analyzers = stmt.query_map(params![node_id], |row| {
+        deserialize_analyzer_node(row)
+    })?
+    .collect::<SqliteResult<Vec<AnalyzerNode>>>()?;
+
+    Ok(analyzers)
+}
+
+/// Deserialize an analyzer node from a database row
+fn deserialize_analyzer_node(row: &Row) -> SqliteResult<AnalyzerNode> {
+    let analyzer_type_str: String = row.get(2)?;
+    let config_str: String = row.get(3)?;
+    let enabled_int: i32 = row.get(4)?;
+
+    let analyzer_type = AnalyzerType::from_str(&analyzer_type_str)
+        .unwrap_or(AnalyzerType::Custom);
+
+    let config: JsonValue = serde_json::from_str(&config_str)
+        .unwrap_or(serde_json::json!({}));
+
+    Ok(AnalyzerNode {
+        id: row.get(0)?,
+        node_id: row.get(1)?,
+        analyzer_type,
+        config,
+        enabled: enabled_int != 0,
+        name: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+// ============================================================================
+// ANALYZER RESULT OPERATIONS
+// ============================================================================
+
+/// Insert an analyzer result
+pub fn insert_analyzer_result(conn: &Connection, result: &AnalyzerResult) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO analyzer_results (id, analyzer_id, result_type, value, confidence, metadata, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &result.id,
+            &result.analyzer_id,
+            &result.result_type,
+            result.value,
+            result.confidence,
+            serde_json::to_string(&result.metadata).unwrap_or_default(),
+            result.timestamp,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get analyzer results with optional time range and limit
+pub fn get_analyzer_results(
+    conn: &Connection,
+    analyzer_id: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: Option<usize>,
+) -> SqliteResult<Vec<AnalyzerResult>> {
+    let mut sql = String::from(
+        "SELECT id, analyzer_id, result_type, value, confidence, metadata, timestamp
+         FROM analyzer_results WHERE analyzer_id = ?1"
+    );
+    let mut param_values: Vec<Value> = vec![Value::Text(analyzer_id.to_string())];
+
+    if let Some(start) = start_time {
+        sql.push_str(" AND timestamp >= ?");
+        param_values.push(Value::Integer(start));
+    }
+    if let Some(end) = end_time {
+        sql.push_str(" AND timestamp <= ?");
+        param_values.push(Value::Integer(end));
+    }
+
+    sql.push_str(" ORDER BY timestamp DESC");
+
+    if let Some(lim) = limit {
+        sql.push_str(&format!(" LIMIT {}", lim));
+    }
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let results = stmt.query_map(params_refs.as_slice(), |row| {
+        let metadata_str: String = row.get(5)?;
+        let metadata: JsonValue = serde_json::from_str(&metadata_str)
+            .unwrap_or(serde_json::json!({}));
+
+        Ok(AnalyzerResult {
+            id: row.get(0)?,
+            analyzer_id: row.get(1)?,
+            result_type: row.get(2)?,
+            value: row.get(3)?,
+            confidence: row.get(4)?,
+            metadata,
+            timestamp: row.get(6)?,
+        })
+    })?
+    .collect::<SqliteResult<Vec<AnalyzerResult>>>()?;
+
+    Ok(results)
+}
+
+// ============================================================================
+// ANALYZER CHAIN OPERATIONS
+// ============================================================================
+
+/// Insert an analyzer chain
+pub fn insert_analyzer_chain(conn: &Connection, chain: &AnalyzerChain) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO analyzer_chains (id, source_analyzer_id, target_analyzer_id, transform, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            &chain.id,
+            &chain.source_analyzer_id,
+            &chain.target_analyzer_id,
+            &chain.transform,
+            chain.enabled as i32,
+            chain.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get a chain by ID
+pub fn get_chain_by_id(conn: &Connection, chain_id: &str) -> SqliteResult<Option<AnalyzerChain>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source_analyzer_id, target_analyzer_id, transform, enabled, created_at
+         FROM analyzer_chains WHERE id = ?1"
+    )?;
+
+    let result = stmt.query_row(params![chain_id], |row| {
+        let enabled_int: i32 = row.get(4)?;
+        Ok(AnalyzerChain {
+            id: row.get(0)?,
+            source_analyzer_id: row.get(1)?,
+            target_analyzer_id: row.get(2)?,
+            transform: row.get(3)?,
+            enabled: enabled_int != 0,
+            created_at: row.get(5)?,
+        })
+    });
+
+    match result {
+        Ok(chain) => Ok(Some(chain)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Get all chains involving analyzers for a specific node
+pub fn get_chains_for_node(conn: &Connection, node_id: &str) -> SqliteResult<Vec<AnalyzerChain>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.source_analyzer_id, c.target_analyzer_id, c.transform, c.enabled, c.created_at
+         FROM analyzer_chains c
+         JOIN analyzer_nodes a ON c.source_analyzer_id = a.id OR c.target_analyzer_id = a.id
+         WHERE a.node_id = ?1
+         GROUP BY c.id"
+    )?;
+
+    let chains = stmt.query_map(params![node_id], |row| {
+        let enabled_int: i32 = row.get(4)?;
+        Ok(AnalyzerChain {
+            id: row.get(0)?,
+            source_analyzer_id: row.get(1)?,
+            target_analyzer_id: row.get(2)?,
+            transform: row.get(3)?,
+            enabled: enabled_int != 0,
+            created_at: row.get(5)?,
+        })
+    })?
+    .collect::<SqliteResult<Vec<AnalyzerChain>>>()?;
+
+    Ok(chains)
+}
+
+/// Delete an analyzer chain
+pub fn delete_analyzer_chain(conn: &Connection, chain_id: &str) -> SqliteResult<()> {
+    conn.execute(
+        "DELETE FROM analyzer_chains WHERE id = ?1",
+        params![chain_id],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

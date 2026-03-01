@@ -25,13 +25,22 @@ Alternative crypto providers available:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           FRONTEND (React + TypeScript)                      │
 ├──────────────────┬──────────────────┬──────────────────┬────────────────────┤
-│    Canvas/       │     Markets/     │   InfoSources/   │     Metrics/       │
-│  (Node Graph)    │    (Trading)     │  (Data Feeds)    │   (P&L, Stats)     │
+│    Canvas/       │     Markets/     │   InfoSources/   │     Nodes/         │
+│  (Node Graph)    │    (Trading)     │  (Data Feeds)    │   (Detail Panels)  │
 │                  │                  │                  │                    │
-│ • Canvas.tsx     │ • MarketPanel    │ • SourcePanel    │ • PerformanceMet.. │
-│ • Node.tsx       │ • OrderbookView  │ • SourceTypes    │                    │
-│                  │ • GlobalOrderb.. │                  │                    │
-└──────────────────┴──────────────────┴──────────────────┴────────────────────┘
+│ • Canvas.tsx     │ • MarketPanel    │ • SourcePanel    │ • NodeDetailsPanel │
+│ • Node.tsx       │ • OrderbookView  │ • SourceTypes    │ • RawStreamTab     │
+│                  │ • GlobalOrderb.. │                  │ • NodeDataPanel    │
+├──────────────────┴──────────────────┴──────────────────┴────────────────────┤
+│  UI/               │  hooks/              │  utils/                         │
+│ • Clock.tsx        │ • useInfoSource..    │ • nodeTransform.ts              │
+│ • ErrorBoundary    │ • useOrderbook.ts    │ • nodeHelpers.ts                │
+│ • Modal.tsx        │ • useWebSocket.ts    │ • demoData.ts                   │
+│ • Button.tsx       │ • useApiKeys.ts      │ • api.ts / graphLayout.ts       │
+├────────────────────┴──────────────────────┴─────────────────────────────────┤
+│  Metrics/            │  Settings/                                           │
+│ • PerformanceMetrics │ • ApiKeySettings                                     │
+└──────────────────────┴──────────────────────────────────────────────────────┘
                               │
                     ┌─────────▼─────────┐
                     │   Zustand Store   │
@@ -40,6 +49,7 @@ Alternative crypto providers available:
                     │ • nodesSlice      │
                     │ • marketsSlice    │
                     │ • positionsSlice  │
+                    │ • uiSlice         │
                     └─────────┬─────────┘
                               │
                     ═══════════════════════
@@ -90,12 +100,14 @@ pnpm tauri build
 | `components/Canvas/` | Interactive node graph visualization | `Canvas.tsx`, `Node.tsx` |
 | `components/Markets/` | Market panels, orderbooks, trading UI | `MarketPanel.tsx`, `OrderbookView.tsx` |
 | `components/InfoSources/` | Data source configuration panels | `SourcePanel.tsx`, `SourceTypes.tsx` |
+| `components/Nodes/` | Node detail panels (details, raw stream, stored data) | `NodeDetailsPanel.extracted.tsx`, `RawStreamTab.tsx`, `NodeDataPanel.tsx` |
 | `components/Metrics/` | Performance tracking, P&L display | `PerformanceMetrics.tsx` |
 | `components/Settings/` | API key management, configuration | `ApiKeySettings.tsx` |
-| `hooks/` | React hooks for data fetching and WebSocket | `useWebSocket.ts`, `useOrderbook.ts` |
+| `components/UI/` | Reusable UI primitives and error boundaries | `Modal.tsx`, `Button.tsx`, `Clock.tsx`, `ErrorBoundary.tsx` |
+| `hooks/` | React hooks for data fetching, WebSocket, and events | `useInfoSourceEvents.ts`, `useWebSocket.ts`, `useOrderbook.ts` |
 | `store/` | Zustand state slices | `nodesSlice.ts`, `marketsSlice.ts`, `positionsSlice.ts` |
 | `types/` | TypeScript interfaces and enums | `nodes.ts`, `markets.ts`, `sources.ts` |
-| `utils/` | API wrappers, graph layout algorithms | `api.ts`, `graphLayout.ts` |
+| `utils/` | API wrappers, transforms, helpers, layout algorithms | `api.ts`, `nodeTransform.ts`, `nodeHelpers.ts`, `demoData.ts`, `graphLayout.ts` |
 
 ### Backend (`src-tauri/src/`)
 
@@ -168,9 +180,11 @@ try {
 ### Add a New Info Source Type
 
 1. [ ] Add enum variant to `src/types/nodes.ts` → `InfoSourceType`
-2. [ ] Add configuration interface in `src/types/sources.ts`
-3. [ ] Add backend scraper logic in `src-tauri/src/services/scraper.rs`
-4. [ ] Add UI component in `src/components/InfoSources/SourceTypes.tsx`
+2. [ ] Add display name in `src/utils/nodeHelpers.ts` → `TYPE_DISPLAY_NAMES`
+3. [ ] Add monitoring config in `src/components/Nodes/NodeDetailsPanel.extracted.tsx` → `MONITORING_CONFIG`
+4. [ ] Add configuration interface in `src/types/sources.ts`
+5. [ ] Add backend scraper logic in `src-tauri/src/services/scraper.rs`
+6. [ ] Add UI component in `src/components/InfoSources/SourceTypes.tsx`
 5. [ ] Update connection validation rules in `src/utils/graphLayout.ts`
 6. [ ] Add model variant in `src-tauri/src/models/node.rs`
 
@@ -208,9 +222,16 @@ try {
 
 | File | Purpose | When to Modify |
 |------|---------|----------------|
-| `src/App.tsx` | Main layout shell, panel orchestration | Adding new panels, changing layout |
-| `src/store/index.ts` | Zustand store configuration | Adding new slices, middleware |
-| `src/utils/api.ts` | All backend communication | Adding new Tauri commands |
+| `src/App.tsx` | Layout shell, responsive renderers, shared callbacks | Adding new panels, changing layout |
+| `src/utils/nodeHelpers.ts` | Type guards, display names, color schemes | Adding new node types or categories |
+| `src/utils/nodeTransform.ts` | Backend→frontend node data transform | Changing node data schema |
+| `src/utils/demoData.ts` | Demo node creation for first-time users | Changing default nodes/connections |
+| `src/hooks/useInfoSourceEvents.ts` | Global Tauri event listener, quality metrics | Changing data propagation or metrics |
+| `src/components/Nodes/NodeDetailsPanel.extracted.tsx` | Node detail panel (monitoring, config, connections) | Adding new node metadata displays |
+| `src/components/Nodes/RawStreamTab.tsx` | Raw data stream viewer for nodes | Changing stream display or simulation |
+| `src/components/UI/ErrorBoundary.tsx` | Panel-level error boundary wrapper | Changing error recovery behavior |
+| `src/store/index.ts` | Zustand store configuration, typed slice creators | Adding new slices, middleware |
+| `src/utils/api.ts` | All backend communication (Result pattern) | Adding new Tauri commands |
 | `src/types/nodes.ts` | Core type definitions | Adding node/market types |
 | `src-tauri/main.rs` | Backend initialization, command registration | Adding new commands, services |
 | `src-tauri/services/mod.rs` | Background service coordination | Adding new services |
@@ -227,6 +248,10 @@ try {
 | Blocking main thread | UI freezes | Use async operations for heavy work |
 | Skipping error handling | Uncaught promise rejections | Use `Result<T, ApiError>` pattern |
 | Mismatched Rust/TS types | Serialization errors | Check type mappings table above |
+| Duplicating type guards inline | Inconsistency, stale code | Use helpers from `src/utils/nodeHelpers.ts` |
+| Adding components inside App.tsx | Monolith regression | Extract to dedicated files under `components/` |
+| Forgetting `nodeHelpers` display name | New types show raw enum value | Update `TYPE_DISPLAY_NAMES` in `nodeHelpers.ts` |
+| Using `process.env.NODE_ENV` | Undefined in Vite builds | Use `import.meta.env.DEV` / `import.meta.env.PROD` |
 
 ---
 
