@@ -97,6 +97,7 @@ import { createDemoNodes } from './utils/demoData';
 
 // Extracted hooks
 import { useInfoSourceEvents, useNodeQualityMetrics, useMarketOrderbookEvents, useAutoMarketSubscriptions } from './hooks/useInfoSourceEvents';
+import { usePersistentOrderbooks } from './hooks/usePersistentOrderbooks';
 
 // Layout components
 import Canvas from './components/Canvas/Canvas';
@@ -192,6 +193,7 @@ function App(): ReactNode {
   useNodeQualityMetrics();
   useMarketOrderbookEvents();
   useAutoMarketSubscriptions();
+  usePersistentOrderbooks();
 
   // -------------------------------------------------------------------------
   // Shared add-node callback (eliminates duplication across layouts)

@@ -187,6 +187,7 @@ pub mod analyzers;
 pub mod analyzer_pipeline;
 pub mod node_analyzer_manager;
 pub mod remote_gateway;
+pub mod persistent_orderbook;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

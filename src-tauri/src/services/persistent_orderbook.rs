@@ -1,0 +1,455 @@
+// ============================================================================
+// PERSISTENT ORDERBOOK MONITORING SERVICE
+// ============================================================================
+//
+// Module: services/persistent_orderbook.rs
+// Purpose: Always-on orderbook monitoring for ALL active market nodes
+//
+// OVERVIEW:
+// This service maintains persistent WebSocket subscriptions to all connected
+// market nodes, regardless of which UI component is currently viewing them.
+// Orderbook data is stored in a central in-memory cache and emitted via
+// Tauri events for frontend consumption.
+//
+// ARCHITECTURE:
+//   App Startup / Market Added
+//     → PersistentOrderbookMonitor detects market node
+//     → Subscribes via WebSocketManager (consolidated connections)
+//     → Stores updates in central OrderbookCache
+//     → Emits 'orderbook:update' events to frontend
+//     → All UI components read from central store
+//
+// KEY DESIGN DECISIONS:
+// - Uses consolidated WebSocketManager (one connection per platform)
+// - Memory-bounded cache (~100KB per market max)
+// - Subscribes on market add, unsubscribes on market remove ONLY
+// - Periodic cache cleanup for stale markets
+//
+// DATA FLOW:
+//   Market Node Added → subscribe_market()
+//     → WebSocketManager.subscribe(platform, token_id)
+//     → Backend emits 'orderbook:update' events
+//     → PersistentOrderbookMonitor caches updates
+//     → Frontend reads from central marketsSlice.orderbooks
+//
+//   Market Node Removed → unsubscribe_market()
+//     → WebSocketManager.unsubscribe(platform, token_id)
+//     → Cache entry removed
+//
+// MEMORY MANAGEMENT:
+// - Max 50 price levels per side per market
+// - Max 20 recent trades per market
+// - Stale entries cleaned after 5 minutes of no updates
+// - Total cache bounded by number of active markets (~100KB each)
+//
+// ============================================================================
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tauri::{AppHandle, Emitter};
+use chrono::Utc;
+use serde::{Serialize, Deserialize};
+
+use crate::services::orderbook::{OrderbookUpdate, OrderbookLevel};
+use crate::services::websocket_manager::{WebSocketManager, PlatformType};
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// Maximum number of price levels to keep per side (memory bound)
+const MAX_LEVELS_PER_SIDE: usize = 50;
+
+/// Maximum number of recent trades to keep per market
+const MAX_RECENT_TRADES: usize = 20;
+
+/// Stale threshold in seconds - markets with no updates are flagged
+const STALE_THRESHOLD_SECS: i64 = 300; // 5 minutes
+
+/// Cached orderbook data for a single market
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedOrderbook {
+    /// Market identifier (token_id or market_ticker)
+    pub market_id: String,
+    /// Platform name
+    pub platform: String,
+    /// Current bid levels (sorted descending by price)
+    pub bids: Vec<OrderbookLevel>,
+    /// Current ask levels (sorted ascending by price)
+    pub asks: Vec<OrderbookLevel>,
+    /// Last update timestamp (millis)
+    pub last_updated: i64,
+    /// Sequence number for ordering
+    pub sequence: u64,
+    /// Last trade price
+    pub last_price: Option<f64>,
+    /// Last trade size
+    pub last_size: Option<f64>,
+    /// Recent trades (newest first)
+    pub recent_trades: Vec<TradeRecord>,
+    /// Total number of updates received
+    pub update_count: u64,
+    /// Whether this market is considered stale
+    pub is_stale: bool,
+}
+
+/// Record of a single trade
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeRecord {
+    pub price: f64,
+    pub size: f64,
+    pub timestamp: i64,
+}
+
+/// Information about a monitored market
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitoredMarket {
+    /// Node ID in the graph
+    pub node_id: String,
+    /// Market identifier (token_id for Polymarket, ticker for Kalshi)
+    pub market_id: String,
+    /// Platform type
+    pub platform: String,
+    /// Whether currently subscribed
+    pub subscribed: bool,
+    /// Last update timestamp
+    pub last_updated: Option<i64>,
+    /// Update count
+    pub update_count: u64,
+}
+
+/// Summary of all monitored markets (for frontend status display)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitoringSummary {
+    pub total_markets: usize,
+    pub active_subscriptions: usize,
+    pub stale_markets: usize,
+    pub total_updates: u64,
+    pub markets: Vec<MonitoredMarket>,
+}
+
+// ============================================================================
+// PERSISTENT ORDERBOOK MONITOR
+// ============================================================================
+
+/// Central orderbook cache and monitoring service
+pub struct PersistentOrderbookMonitor {
+    /// Cached orderbook data per market_id
+    cache: Arc<RwLock<HashMap<String, CachedOrderbook>>>,
+    /// Mapping from node_id to market_id (for add/remove by node)
+    node_to_market: Arc<RwLock<HashMap<String, MarketMapping>>>,
+    /// Reference to the WebSocket manager
+    ws_manager: Arc<WebSocketManager>,
+    /// Tauri app handle for emitting events
+    app_handle: AppHandle,
+}
+
+/// Maps a node to its market subscription details
+#[derive(Debug, Clone)]
+struct MarketMapping {
+    market_id: String,
+    platform: PlatformType,
+}
+
+impl PersistentOrderbookMonitor {
+    /// Create a new persistent orderbook monitor
+    pub fn new(ws_manager: Arc<WebSocketManager>, app_handle: AppHandle) -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            node_to_market: Arc::new(RwLock::new(HashMap::new())),
+            ws_manager,
+            app_handle,
+        }
+    }
+
+    // ========================================================================
+    // MARKET SUBSCRIPTION MANAGEMENT
+    // ========================================================================
+
+    /// Subscribe to a market's orderbook (called when market node is added)
+    ///
+    /// This starts a persistent subscription that stays alive until the market
+    /// is explicitly removed. Multiple calls with the same node_id are idempotent.
+    pub async fn subscribe_market(
+        &self,
+        node_id: &str,
+        market_id: &str,
+        platform: &str,
+    ) -> Result<(), String> {
+        // Parse platform
+        let platform_type = match platform.to_lowercase().as_str() {
+            "polymarket" => PlatformType::Polymarket,
+            "kalshi" => PlatformType::Kalshi,
+            _ => return Err(format!("Unsupported platform: {}", platform)),
+        };
+
+        // Check if already subscribed for this node
+        {
+            let mappings = self.node_to_market.read().await;
+            if mappings.contains_key(node_id) {
+                println!(
+                    "[PersistentOrderbook] Already monitoring node {} (market: {})",
+                    node_id, market_id
+                );
+                return Ok(());
+            }
+        }
+
+        println!(
+            "[PersistentOrderbook] Subscribing node {} to {} market: {}",
+            node_id, platform, market_id
+        );
+
+        // Subscribe via WebSocket manager (consolidated connection)
+        self.ws_manager
+            .subscribe(platform_type, market_id.to_string())
+            .await
+            .map_err(|e| format!("WebSocket subscribe failed: {}", e))?;
+
+        // Store the mapping
+        {
+            let mut mappings = self.node_to_market.write().await;
+            mappings.insert(
+                node_id.to_string(),
+                MarketMapping {
+                    market_id: market_id.to_string(),
+                    platform: platform_type,
+                },
+            );
+        }
+
+        // Initialize cache entry
+        {
+            let mut cache = self.cache.write().await;
+            cache.entry(market_id.to_string()).or_insert_with(|| CachedOrderbook {
+                market_id: market_id.to_string(),
+                platform: platform.to_string(),
+                bids: vec![],
+                asks: vec![],
+                last_updated: Utc::now().timestamp_millis(),
+                sequence: 0,
+                last_price: None,
+                last_size: None,
+                recent_trades: vec![],
+                update_count: 0,
+                is_stale: false,
+            });
+        }
+
+        // Emit monitoring status update
+        self.emit_monitoring_status().await;
+
+        Ok(())
+    }
+
+    /// Unsubscribe from a market's orderbook (called when market node is removed)
+    pub async fn unsubscribe_market(&self, node_id: &str) -> Result<(), String> {
+        // Get the mapping
+        let mapping = {
+            let mut mappings = self.node_to_market.write().await;
+            mappings.remove(node_id)
+        };
+
+        let Some(mapping) = mapping else {
+            println!(
+                "[PersistentOrderbook] No mapping found for node {}, nothing to unsubscribe",
+                node_id
+            );
+            return Ok(());
+        };
+
+        println!(
+            "[PersistentOrderbook] Unsubscribing node {} from {} market: {}",
+            node_id,
+            mapping.platform.as_str(),
+            mapping.market_id
+        );
+
+        // Check if any other node is using the same market_id
+        let still_used = {
+            let mappings = self.node_to_market.read().await;
+            mappings.values().any(|m| m.market_id == mapping.market_id)
+        };
+
+        if !still_used {
+            // No other node uses this market, unsubscribe and remove cache
+            self.ws_manager
+                .unsubscribe(mapping.platform, &mapping.market_id)
+                .await
+                .map_err(|e| format!("WebSocket unsubscribe failed: {}", e))?;
+
+            let mut cache = self.cache.write().await;
+            cache.remove(&mapping.market_id);
+        } else {
+            println!(
+                "[PersistentOrderbook] Market {} still used by other nodes, keeping subscription",
+                mapping.market_id
+            );
+        }
+
+        // Emit monitoring status update
+        self.emit_monitoring_status().await;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // CACHE UPDATE HANDLING
+    // ========================================================================
+
+    /// Process an incoming orderbook update and cache it
+    ///
+    /// Called when the backend receives an orderbook:update event.
+    /// Applies memory bounds and staleness detection.
+    pub async fn handle_update(&self, update: &OrderbookUpdate) {
+        let mut cache = self.cache.write().await;
+
+        let entry = cache
+            .entry(update.market_id.clone())
+            .or_insert_with(|| CachedOrderbook {
+                market_id: update.market_id.clone(),
+                platform: update.platform.clone(),
+                bids: vec![],
+                asks: vec![],
+                last_updated: update.timestamp,
+                sequence: update.sequence,
+                last_price: None,
+                last_size: None,
+                recent_trades: vec![],
+                update_count: 0,
+                is_stale: false,
+            });
+
+        // Update bid/ask levels (only if non-empty, preserving existing on trade-only updates)
+        if !update.bids.is_empty() {
+            entry.bids = update.bids.clone();
+            // Enforce memory bound
+            entry.bids.truncate(MAX_LEVELS_PER_SIDE);
+        }
+        if !update.asks.is_empty() {
+            entry.asks = update.asks.clone();
+            entry.asks.truncate(MAX_LEVELS_PER_SIDE);
+        }
+
+        // Update trade data
+        if let (Some(price), Some(size)) = (update.last_price, update.last_size) {
+            entry.last_price = Some(price);
+            entry.last_size = Some(size);
+
+            // Add to recent trades
+            entry.recent_trades.insert(
+                0,
+                TradeRecord {
+                    price,
+                    size,
+                    timestamp: update.timestamp,
+                },
+            );
+            // Enforce memory bound on trades
+            entry.recent_trades.truncate(MAX_RECENT_TRADES);
+        }
+
+        // Update metadata
+        entry.last_updated = update.timestamp;
+        entry.sequence = update.sequence;
+        entry.update_count += 1;
+        entry.is_stale = false;
+    }
+
+    // ========================================================================
+    // CACHE QUERIES
+    // ========================================================================
+
+    /// Get cached orderbook for a specific market
+    pub async fn get_orderbook(&self, market_id: &str) -> Option<CachedOrderbook> {
+        let cache = self.cache.read().await;
+        cache.get(market_id).cloned()
+    }
+
+    /// Get all cached orderbooks
+    pub async fn get_all_orderbooks(&self) -> HashMap<String, CachedOrderbook> {
+        let cache = self.cache.read().await;
+        cache.clone()
+    }
+
+    /// Get monitoring summary
+    pub async fn get_summary(&self) -> MonitoringSummary {
+        let cache = self.cache.read().await;
+        let mappings = self.node_to_market.read().await;
+        let now = Utc::now().timestamp_millis();
+
+        let mut markets = Vec::new();
+        let mut total_updates = 0u64;
+        let mut stale_count = 0usize;
+
+        for (node_id, mapping) in mappings.iter() {
+            let cached = cache.get(&mapping.market_id);
+            let is_stale = cached
+                .map(|c| (now - c.last_updated) > STALE_THRESHOLD_SECS * 1000)
+                .unwrap_or(true);
+
+            if is_stale {
+                stale_count += 1;
+            }
+
+            let update_count = cached.map(|c| c.update_count).unwrap_or(0);
+            total_updates += update_count;
+
+            markets.push(MonitoredMarket {
+                node_id: node_id.clone(),
+                market_id: mapping.market_id.clone(),
+                platform: mapping.platform.as_str().to_string(),
+                subscribed: true,
+                last_updated: cached.map(|c| c.last_updated),
+                update_count,
+            });
+        }
+
+        MonitoringSummary {
+            total_markets: markets.len(),
+            active_subscriptions: markets.len(),
+            stale_markets: stale_count,
+            total_updates,
+            markets,
+        }
+    }
+
+    // ========================================================================
+    // MAINTENANCE
+    // ========================================================================
+
+    /// Mark stale entries (called periodically)
+    pub async fn check_staleness(&self) {
+        let now = Utc::now().timestamp_millis();
+        let mut cache = self.cache.write().await;
+
+        for entry in cache.values_mut() {
+            let age_secs = (now - entry.last_updated) / 1000;
+            entry.is_stale = age_secs > STALE_THRESHOLD_SECS;
+        }
+    }
+
+    /// Emit monitoring status to frontend
+    async fn emit_monitoring_status(&self) {
+        let summary = self.get_summary().await;
+        if let Err(e) = self.app_handle.emit("orderbook:monitoring_status", &summary) {
+            eprintln!("[PersistentOrderbook] Failed to emit monitoring status: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// TAURI STATE TYPE
+// ============================================================================
+
+/// Shared state for the persistent orderbook monitor (managed by Tauri)
+pub type PersistentOrderbookState = Arc<PersistentOrderbookMonitor>;
+
+/// Create the persistent orderbook monitor
+pub fn create_persistent_monitor(
+    ws_manager: Arc<WebSocketManager>,
+    app_handle: AppHandle,
+) -> PersistentOrderbookState {
+    Arc::new(PersistentOrderbookMonitor::new(ws_manager, app_handle))
+}

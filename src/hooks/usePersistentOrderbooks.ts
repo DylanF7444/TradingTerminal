@@ -1,0 +1,291 @@
+// ============================================================================
+// PERSISTENT ORDERBOOK MONITORING HOOK
+// ============================================================================
+//
+// Module: hooks/usePersistentOrderbooks.ts
+// Purpose: React hook for always-on orderbook monitoring across ALL market nodes
+//
+// OVERVIEW:
+// This hook manages persistent orderbook subscriptions for all connected
+// market nodes. Unlike useOrderbook (which subscribes per-component),
+// this hook:
+//   - Subscribes to ALL active markets automatically
+//   - Keeps subscriptions alive regardless of which UI is open
+//   - Stores data in the central Zustand store (marketsSlice.orderbooks)
+//   - Only unsubscribes when a market is removed/deleted
+//
+// USAGE:
+// Mount this hook ONCE at the App level (or a top-level layout component).
+// It will automatically:
+//   1. Listen for orderbook:update events from the backend
+//   2. Update the central marketsSlice.orderbooks store
+//   3. Subscribe new markets when they're added
+//   4. Unsubscribe markets when they're removed
+//
+// All other UI components (OrderbookView, GlobalOrderbookOverlay,
+// NodeOrderbookPopup) should READ from the central store instead of
+// creating their own subscriptions.
+//
+// ARCHITECTURE:
+//   App.tsx mounts usePersistentOrderbooks()
+//     → Listens for 'orderbook:update' Tauri events
+//     → Updates marketsSlice.orderbooks for ALL markets
+//     → Watches marketsSlice.markets for add/remove
+//     → Invokes monitor_market_orderbook_cmd on add
+//     → Invokes unmonitor_market_orderbook_cmd on remove
+//
+// MEMORY MANAGEMENT:
+// - Max 50 levels per side stored in central state
+// - Max 20 recent trades per market
+// - Stale data flagged after 5 minutes
+// - Cleanup automatic on market removal
+//
+// ============================================================================
+
+import { useEffect, useRef, useCallback } from 'react';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { useStore } from '../store';
+import type { Orderbook, Level } from '../types/markets';
+import type { OrderbookUpdate } from './useOrderbook';
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/** Max price levels per side to store in central state */
+const MAX_LEVELS_PER_SIDE = 50;
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/** Monitoring summary from backend */
+export interface MonitoringSummary {
+  total_markets: number;
+  active_subscriptions: number;
+  stale_markets: number;
+  total_updates: number;
+  markets: MonitoredMarket[];
+}
+
+/** Individual monitored market info */
+export interface MonitoredMarket {
+  node_id: string;
+  market_id: string;
+  platform: string;
+  subscribed: boolean;
+  last_updated: number | null;
+  update_count: number;
+}
+
+// ============================================================================
+// HELPER: Convert backend OrderbookUpdate to frontend Orderbook
+// ============================================================================
+
+function toOrderbook(update: OrderbookUpdate, existing?: Orderbook): Orderbook {
+  // Convert backend OrderbookLevel[] to frontend Level[]
+  const bidsRaw = update.bids.length > 0 ? update.bids : (existing?.bids ?? []);
+  const asksRaw = update.asks.length > 0 ? update.asks : (existing?.asks ?? []);
+
+  const bids: Level[] = bidsRaw.slice(0, MAX_LEVELS_PER_SIDE).map((l) => ({
+    price: 'price' in l ? l.price : (l as Level).price,
+    size: 'size' in l ? l.size : (l as Level).size,
+    orderCount: ('order_count' in l ? (l as any).order_count : (l as Level).orderCount) ?? 1,
+    value: (('price' in l ? l.price : 0) * ('size' in l ? l.size : 0)),
+  }));
+
+  const asks: Level[] = asksRaw.slice(0, MAX_LEVELS_PER_SIDE).map((l) => ({
+    price: 'price' in l ? l.price : (l as Level).price,
+    size: 'size' in l ? l.size : (l as Level).size,
+    orderCount: ('order_count' in l ? (l as any).order_count : (l as Level).orderCount) ?? 1,
+    value: (('price' in l ? l.price : 0) * ('size' in l ? l.size : 0)),
+  }));
+
+  // Sort: bids descending, asks ascending
+  bids.sort((a, b) => b.price - a.price);
+  asks.sort((a, b) => a.price - b.price);
+
+  const bestBid = bids[0]?.price ?? 0;
+  const bestAsk = asks[0]?.price ?? 0;
+  const spread = bestAsk - bestBid;
+  const liquidity =
+    bids.reduce((sum, l) => sum + l.value, 0) +
+    asks.reduce((sum, l) => sum + l.value, 0);
+
+  return {
+    marketId: update.market_id,
+    timestamp: update.timestamp,
+    bids,
+    asks,
+    liquidity,
+    spread,
+    lastPrice: update.last_price,
+    lastSize: update.last_size,
+    lastTradeAt: update.last_price ? update.timestamp : existing?.lastTradeAt,
+    sequence: update.sequence || (existing?.sequence ?? 0) + 1,
+  };
+}
+
+// ============================================================================
+// HOOK: usePersistentOrderbooks
+// ============================================================================
+
+/**
+ * Always-on orderbook monitoring hook.
+ *
+ * Mount ONCE at the App level. Automatically subscribes to all market nodes
+ * and feeds orderbook data into the central marketsSlice store.
+ *
+ * @returns void - data is stored in Zustand, not returned directly
+ */
+export function usePersistentOrderbooks(): void {
+  const updateOrderbook = useStore((s) => s.updateOrderbook);
+  const setMarketStatus = useStore((s) => s.setMarketStatus);
+  const markets = useStore((s) => s.markets);
+
+  // Track which markets we've already subscribed to
+  const subscribedRef = useRef<Set<string>>(new Set());
+  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const unlistenStatusRef = useRef<UnlistenFn | null>(null);
+
+  // -------------------------------------------------------------------------
+  // STEP 1: Listen for orderbook:update events and feed into central store
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    let mounted = true;
+
+    const setupListeners = async () => {
+      // Listen for ALL orderbook updates (from any market)
+      unlistenRef.current = await listen<OrderbookUpdate>(
+        'orderbook:update',
+        (event) => {
+          if (!mounted) return;
+          const update = event.payload;
+          if (!update.market_id) return;
+
+          // Get existing orderbook from store for merging
+          const existing = useStore.getState().orderbooks[update.market_id];
+
+          // Convert to frontend Orderbook and update central store
+          const orderbook = toOrderbook(update, existing);
+          updateOrderbook(update.market_id, orderbook);
+
+          // Update market status to connected
+          setMarketStatus(update.market_id, {
+            connected: true,
+            connecting: false,
+            errorMessage: null,
+          });
+        }
+      );
+
+      // Listen for monitoring status updates
+      unlistenStatusRef.current = await listen<MonitoringSummary>(
+        'orderbook:monitoring_status',
+        (event) => {
+          if (!mounted) return;
+          // Status updates can be logged or used for UI indicators
+          console.log(
+            '[PersistentOrderbooks] Monitoring status:',
+            event.payload.total_markets, 'markets,',
+            event.payload.active_subscriptions, 'active'
+          );
+        }
+      );
+    };
+
+    setupListeners();
+
+    return () => {
+      mounted = false;
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      unlistenStatusRef.current?.();
+      unlistenStatusRef.current = null;
+    };
+  }, [updateOrderbook, setMarketStatus]);
+
+  // -------------------------------------------------------------------------
+  // STEP 2: Auto-subscribe/unsubscribe when markets change
+  // -------------------------------------------------------------------------
+
+  // Extract market IDs for the effect
+  const subscribeMarket = useCallback(
+    async (nodeId: string, marketId: string, platform: string) => {
+      try {
+        await invoke<string>('monitor_market_orderbook_cmd', {
+          nodeId,
+          marketId,
+          platform,
+        });
+        subscribedRef.current.add(nodeId);
+        console.log(
+          `[PersistentOrderbooks] Subscribed: ${platform}/${marketId} (node: ${nodeId})`
+        );
+      } catch (e) {
+        console.error(
+          `[PersistentOrderbooks] Failed to subscribe ${marketId}:`,
+          e
+        );
+      }
+    },
+    []
+  );
+
+  const unsubscribeMarket = useCallback(async (nodeId: string) => {
+    try {
+      await invoke<string>('unmonitor_market_orderbook_cmd', { nodeId });
+      subscribedRef.current.delete(nodeId);
+      console.log(`[PersistentOrderbooks] Unsubscribed node: ${nodeId}`);
+    } catch (e) {
+      console.error(
+        `[PersistentOrderbooks] Failed to unsubscribe ${nodeId}:`,
+        e
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    // Determine which markets need subscribing/unsubscribing
+    const currentMarketNodeIds = new Set<string>();
+
+    for (const market of markets) {
+      currentMarketNodeIds.add(market.id);
+
+      // If not yet subscribed, subscribe now
+      if (!subscribedRef.current.has(market.id)) {
+        // Extract platform and market_id from the market node
+        const nodeType = market.node_type;
+        let platform = 'polymarket';
+        if ('Market' in nodeType) {
+          const marketType = String(nodeType.Market).toLowerCase();
+          if (marketType.includes('kalshi')) platform = 'kalshi';
+          else platform = 'polymarket';
+        }
+
+        // Get market_id from metadata (MarketMetadata uses camelCase 'marketId')
+        const meta = market.metadata as Record<string, any>;
+        const marketId =
+          meta?.marketId ??
+          meta?.market_id ??
+          meta?.condition_id ??
+          meta?.slug ??
+          '';
+
+        if (marketId) {
+          subscribeMarket(market.id, String(marketId), platform);
+        }
+      }
+    }
+
+    // Unsubscribe removed markets
+    for (const nodeId of subscribedRef.current) {
+      if (!currentMarketNodeIds.has(nodeId)) {
+        unsubscribeMarket(nodeId);
+      }
+    }
+  }, [markets, subscribeMarket, unsubscribeMarket]);
+}
+
+export default usePersistentOrderbooks;

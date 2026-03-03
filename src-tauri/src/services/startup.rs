@@ -36,6 +36,19 @@ pub struct ActiveServices {
     pub scrapers: std::collections::HashMap<String, ScraperHandle>,
     /// WebSocket manager reference
     pub ws_manager: Arc<WebSocketManager>,
+    /// Market subscriptions info for persistent orderbook monitoring
+    pub market_subscriptions: Vec<MarketSubscriptionInfo>,
+}
+
+/// Information about a market subscription (for persistent orderbook monitoring)
+#[derive(Debug, Clone)]
+pub struct MarketSubscriptionInfo {
+    /// Node ID in the graph
+    pub node_id: String,
+    /// Market identifier (token_id for Polymarket, ticker for Kalshi)
+    pub market_id: String,
+    /// Platform name ("polymarket" or "kalshi")
+    pub platform: String,
 }
 
 /// Initialize all services for saved nodes on startup
@@ -59,11 +72,34 @@ pub async fn initialize_saved_nodes(
     let mut scrapers = std::collections::HashMap::new();
     let mut market_count = 0;
     let mut source_count = 0;
+    let mut market_subscriptions = Vec::new();
     
     // Process each node
     for node in nodes {
         match &node.node_type {
             NodeType::Market(market_type) => {
+                // Extract market ID for persistent monitoring
+                let market_id = node.metadata.get("market_id")
+                    .or_else(|| node.metadata.get("condition_id"))
+                    .or_else(|| node.metadata.get("slug"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                
+                let platform_str = match market_type {
+                    MarketType::Polymarket => "polymarket",
+                    MarketType::Kalshi => "kalshi",
+                };
+                
+                // Track for persistent orderbook monitoring
+                if !market_id.is_empty() {
+                    market_subscriptions.push(MarketSubscriptionInfo {
+                        node_id: node.id.clone(),
+                        market_id: market_id.clone(),
+                        platform: platform_str.to_string(),
+                    });
+                }
+                
                 // Start websocket connection for market nodes
                 match start_market_websocket(&node, market_type, &ws_manager, &app_handle).await {
                     Ok(_) => {
@@ -107,6 +143,7 @@ pub async fn initialize_saved_nodes(
     Ok(ActiveServices {
         scrapers,
         ws_manager,
+        market_subscriptions,
     })
 }
 

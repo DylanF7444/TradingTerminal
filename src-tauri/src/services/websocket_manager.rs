@@ -194,9 +194,15 @@ pub struct NetworkMetricsSnapshot {
 }
 
 // ============================================================================
-// POLYMARKET CONSOLIDATED CONNECTION
+// POLYMARKET CONSOLIDATED CONNECTION (FIXED)
+// ============================================================================
+//
+// Uses the correct Polymarket CLOB WebSocket endpoint and subscription format.
+// Subscription: { "assets_ids": ["<token_id>"], "type": "market" }
+// Keepalive: Send "PING", expect "PONG" text response.
 // ============================================================================
 
+/// Polymarket CLOB WebSocket endpoint (market/orderbook/trade data)
 const POLYMARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
 /// Polymarket subscription message format

@@ -153,17 +153,43 @@ pub type ActiveSubscriptions = Arc<RwLock<HashMap<String, OrderbookSubscription>
 // POLYMARKET WEBSOCKET
 // ============================================================================
 
-/// Polymarket WebSocket endpoint (orderbook channel)
-/// Note: This endpoint doesn't exist - use /ws/market instead
-/// Keeping for backwards compatibility but it will fail
+// ============================================================================
+// POLYMARKET WEBSOCKET ENDPOINTS (FIXED)
+// ============================================================================
+//
+// Polymarket CLOB API WebSocket endpoints (2024/2025):
+//   - /ws/market  : Market-level data (trades, orderbook updates)
+//   - /ws/user    : User-specific data (fills, positions)
+//
+// Subscription format for /ws/market:
+//   { "assets_ids": ["<token_id>"], "type": "market" }
+//
+// The assets_ids are CLOB token IDs (long numeric strings), NOT condition IDs.
+// Each binary market has two token IDs: one for YES, one for NO.
+//
+// Response types:
+//   - event_type: "book"         → full orderbook snapshot
+//   - event_type: "book_update"  → incremental orderbook delta
+//   - event_type: "trade"        → trade execution
+//   - event_type: "price_change" → last price change
+//   - type: "subscribed"         → subscription confirmation
+//
+// Keepalive: Send text "PING", expect text "PONG" response.
+// ============================================================================
+
+/// Polymarket CLOB WebSocket endpoint
+/// Used for orderbook/trade/market data subscriptions.
+/// Subscription uses assets_ids (token IDs) with type "market".
 const POLYMARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
-/// Polymarket WebSocket endpoint (market channel - for price updates)
-/// This is the correct endpoint per Polymarket API
+/// Alias for clarity - same endpoint handles both orderbook and market data
 const POLYMARKET_MARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
-/// Polymarket subscription message format (orderbook channel)
+/// Polymarket subscription message format (DEPRECATED - use PolymarketMarketSubscribe)
+/// The old format with "channel" and "markets" fields is no longer used.
+/// Kept for reference only.
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct PolymarketSubscribe {
     #[serde(rename = "type")]
     msg_type: String,
@@ -333,29 +359,57 @@ async fn run_polymarket_connection(market_id: &str, app_handle: &AppHandle) -> R
     
     let (ws_stream, _) = match ws_result {
         Ok(stream) => {
-            println!("Successfully connected to Polymarket WebSocket");
+            println!("[Polymarket] WebSocket connected successfully");
             stream
         }
         Err(e) => {
-            eprintln!("Failed to connect to Polymarket WebSocket: {:?}", e);
-            return Err(anyhow!("Failed to connect to Polymarket WebSocket: {}. Check your network connection and ensure the WebSocket endpoint is accessible.", e));
+            // ================================================================
+            // POLYMARKET CONNECTION ERROR DIAGNOSTICS (IMPROVED)
+            // ================================================================
+            let err_str = format!("{:?}", e);
+            let diagnostic = if err_str.contains("403") {
+                "HTTP 403 Forbidden - possible IP block or rate limit"
+            } else if err_str.contains("404") {
+                "HTTP 404 Not Found - endpoint may have changed"
+            } else if err_str.contains("429") {
+                "HTTP 429 Too Many Requests - rate limited, back off"
+            } else if err_str.contains("dns") || err_str.contains("resolve") {
+                "DNS resolution failed - check internet connection"
+            } else if err_str.contains("tls") || err_str.contains("certificate") {
+                "TLS/SSL error - certificate verification failed"
+            } else if err_str.contains("timeout") || err_str.contains("timed out") {
+                "Connection timed out - server may be down or blocked"
+            } else {
+                "Network error - check firewall and internet connection"
+            };
+            eprintln!("[Polymarket] WebSocket connection failed: {:?}", e);
+            eprintln!("[Polymarket] Diagnostic: {}", diagnostic);
+            return Err(anyhow!(
+                "Polymarket WebSocket connection failed: {}. Diagnostic: {}. URL: {}",
+                e, diagnostic, POLYMARKET_WS_URL
+            ));
         }
     };
     
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     
-    // Send subscription message using the market format (assets_ids + type: "market")
-    // The old format (type: "subscribe", channel: "book", markets: [...]) is deprecated
+    // ========================================================================
+    // POLYMARKET SUBSCRIPTION FORMAT (FIXED)
+    // ========================================================================
+    // Correct format: { "assets_ids": ["<token_id>"], "type": "market" }
+    // The assets_ids field expects CLOB token IDs (long numeric strings).
+    // type must be "market" (not "subscribe", not "orderbook").
+    // ========================================================================
     let subscribe_msg = PolymarketMarketSubscribe {
         assets_ids: vec![market_id.to_string()],
         msg_type: "market".to_string(),
     };
     
     let subscribe_json = serde_json::to_string(&subscribe_msg)?;
-    println!("Sending subscription: {}", subscribe_json);
+    println!("[Polymarket] Sending subscription: {}", subscribe_json);
     ws_sender.send(WsMessage::Text(subscribe_json)).await?;
     
-    println!("Sent subscription for Polymarket market {}", market_id);
+    println!("[Polymarket] Subscribed to market {}", market_id);
     
     // Track last update time for staleness detection
     let mut last_update = std::time::Instant::now();
@@ -658,38 +712,58 @@ pub async fn subscribe_polymarket_market(
     Ok(())
 }
 
-/// Run a single Polymarket market WebSocket connection
+/// Run a single Polymarket market WebSocket connection (improved diagnostics)
 async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &AppHandle) -> Result<()> {
-    println!("Connecting to Polymarket market WebSocket for assets {:?}", asset_ids);
-    println!("WebSocket URL: {}", POLYMARKET_MARKET_WS_URL);
+    println!("[Polymarket] Connecting for assets {:?}", asset_ids);
+    println!("[Polymarket] WebSocket URL: {}", POLYMARKET_MARKET_WS_URL);
     
-    // Connect to WebSocket with detailed error handling
+    // Connect to WebSocket with improved error diagnostics
     let ws_result = connect_async(POLYMARKET_MARKET_WS_URL).await;
     
     let (ws_stream, _) = match ws_result {
         Ok(stream) => {
-            println!("Successfully connected to Polymarket market WebSocket");
+            println!("[Polymarket] WebSocket connected for market subscription");
             stream
         }
         Err(e) => {
-            eprintln!("Failed to connect to Polymarket market WebSocket: {:?}", e);
-            return Err(anyhow!("Failed to connect to Polymarket market WebSocket: {}. Check your network connection.", e));
+            let err_str = format!("{:?}", e);
+            let diagnostic = if err_str.contains("403") {
+                "HTTP 403 Forbidden - possible IP block or rate limit"
+            } else if err_str.contains("429") {
+                "HTTP 429 Too Many Requests - rate limited"
+            } else if err_str.contains("dns") || err_str.contains("resolve") {
+                "DNS resolution failed - check internet connection"
+            } else if err_str.contains("timeout") {
+                "Connection timed out - server may be unreachable"
+            } else {
+                "Network error - check firewall and internet"
+            };
+            eprintln!("[Polymarket] Market WebSocket failed: {:?}", e);
+            eprintln!("[Polymarket] Diagnostic: {}", diagnostic);
+            return Err(anyhow!(
+                "Polymarket market WebSocket failed: {}. Diagnostic: {}",
+                e, diagnostic
+            ));
         }
     };
     
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     
-    // Send subscription message using the market format
+    // ========================================================================
+    // POLYMARKET MARKET SUBSCRIPTION (CORRECT FORMAT)
+    // ========================================================================
+    // Format: { "assets_ids": ["<token_id_1>", "<token_id_2>"], "type": "market" }
+    // ========================================================================
     let subscribe_msg = PolymarketMarketSubscribe {
         assets_ids: asset_ids.to_vec(),
         msg_type: "market".to_string(),
     };
     
     let subscribe_json = serde_json::to_string(&subscribe_msg)?;
-    println!("Sending market subscription: {}", subscribe_json);
+    println!("[Polymarket] Sending market subscription: {}", subscribe_json);
     ws_sender.send(WsMessage::Text(subscribe_json)).await?;
     
-    println!("Sent market subscription for Polymarket assets {:?}", asset_ids);
+    println!("[Polymarket] Subscribed to {} assets", asset_ids.len());
     
     // Track last update time for staleness detection and PING/PONG
     let mut last_update = std::time::Instant::now();

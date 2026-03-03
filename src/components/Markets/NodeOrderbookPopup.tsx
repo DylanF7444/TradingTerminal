@@ -7,14 +7,19 @@
 //
 // OVERVIEW:
 // This component provides a compact, inline orderbook view that can be
-// displayed when clicking/selecting on a market node. It shows real-time
-// orderbook data in a condensed format suitable for overlay display.
+// displayed when clicking/selecting on a market node. It reads real-time
+// orderbook data from the central Zustand store (populated by the always-on
+// persistent orderbook monitor) in a condensed format suitable for overlay display.
+//
+// DATA FLOW:
+// - Reads from store.orderbooks[marketId] (populated by usePersistentOrderbooks)
+// - No per-component WebSocket subscription needed
+// - Raw stream view still uses useRawOrderbookMessages listener
 //
 // INTEGRATION:
 // - Used by Node.tsx to display orderbook when market node is selected/hovered
-// - Subscribes to live WebSocket data via useMarketOrderbook hook
-// - Auto-unsubscribes when popup is hidden
-// - For Kalshi, uses authenticated subscription for orderbook_delta channel
+// - Reads from central Zustand store for live data
+// - For Kalshi, auth is handled by the persistent monitor
 //
 // FEATURES:
 // - Displays top 3-5 bid/ask levels (configurable via compact prop)
@@ -44,9 +49,10 @@
 //
 // ============================================================================
 
-import React, { useMemo, useEffect, useState } from 'react';
-import { useOrderbook, useRawOrderbookMessages } from '../../hooks/useOrderbook';
-import { useApiKeys } from '../../hooks/useApiKeys';
+import React, { useMemo, useState } from 'react';
+import { useRawOrderbookMessages } from '../../hooks/useOrderbook';
+import { useStore } from '../../store';
+import type { Orderbook } from '../../types/markets';
 
 // =============================================================================
 // TYPES
@@ -97,62 +103,29 @@ function formatTimestamp(timestamp: number): string {
 
 export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
   marketId,
-  platform,
+  platform: _platform,
   position = { x: 0, y: 0 },
   compact = true,
   className = '',
 }) => {
-  const { orderbook, status, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth } = useOrderbook();
+  // ---------------------------------------------------------------------------
+  // Central Store Orderbook Data
+  // ---------------------------------------------------------------------------
+  const orderbook: Orderbook | undefined = useStore((s) => s.orderbooks[marketId]);
+  const marketStatusObj = useStore((s) => s.marketStatus[marketId]);
   const { rawMessages, clearMessages } = useRawOrderbookMessages(20, marketId);
-  const { getKey } = useApiKeys();
-  const [subscribed, setSubscribed] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('orderbook');
 
-  // Subscribe with credentials for Kalshi, or Polymarket market subscription
-  useEffect(() => {
-    if (subscribed) return;
-    
-    const doSubscribe = async () => {
-      console.log('NodeOrderbookPopup: doSubscribe called for', platform, marketId);
-      
-      if (platform === 'kalshi') {
-        // Try to get stored Kalshi credentials
-        const creds = await getKey('Kalshi');
-        console.log('NodeOrderbookPopup: Kalshi creds:', creds ? { 
-          has_key: creds.has_key, 
-          has_api_key: !!creds.api_key, 
-          has_private_key: !!creds.private_key,
-          environment: creds.environment 
-        } : 'null');
-        
-        if (creds && creds.api_key && creds.private_key) {
-          console.log('NodeOrderbookPopup: Subscribing to Kalshi with auth for', marketId);
-          await subscribeKalshiWithAuth(
-            marketId,
-            creds.api_key,
-            creds.private_key,
-            creds.environment === 'demo'
-          );
-        } else {
-          // Fall back to public subscription
-          console.log('NodeOrderbookPopup: No Kalshi credentials found, using public subscription');
-          await subscribe(platform, marketId);
-        }
-      } else {
-        // Polymarket: use subscribePolymarketMarket with asset IDs
-        // The marketId should already be a CLOB token ID
-        console.log('NodeOrderbookPopup: Subscribing to Polymarket market with asset ID:', marketId);
-        await subscribePolymarketMarket([marketId]);
-      }
-      setSubscribed(true);
-    };
-    
-    doSubscribe();
-    
-    return () => {
-      // Cleanup handled by parent hook
-    };
-  }, [platform, marketId, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth, getKey, subscribed]);
+  // Derive connection status from store data
+  const status = useMemo((): 'connected' | 'connecting' | 'stale' | 'error' | 'idle' => {
+    if (!orderbook || (orderbook.bids.length === 0 && orderbook.asks.length === 0)) {
+      return marketStatusObj?.connecting ? 'connecting' : 'connecting';
+    }
+    if (marketStatusObj?.errorMessage) return 'error';
+    const age = Date.now() - orderbook.timestamp;
+    if (age > 30_000) return 'stale';
+    return 'connected';
+  }, [orderbook, marketStatusObj]);
   
   // Get top levels
   const topBids = useMemo(() => {
@@ -278,10 +251,10 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
           </div>
           
           {/* Last trade */}
-          {orderbook?.last_price && (
+          {orderbook?.lastPrice && (
             <div className="flex items-center justify-center py-1 bg-gray-800/30 border-t border-gray-700/50">
               <span className="text-[10px] text-gray-400">
-                Last: {formatPrice(orderbook.last_price)} × {formatSize(orderbook.last_size || 0)}
+                Last: {formatPrice(orderbook.lastPrice)} × {formatSize(orderbook.lastSize || 0)}
               </span>
             </div>
           )}

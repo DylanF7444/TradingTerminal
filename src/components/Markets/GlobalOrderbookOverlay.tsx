@@ -7,9 +7,15 @@
 //
 // OVERVIEW:
 // This component provides an expanded orderbook view that appears as an overlay
-// on top of the canvas when a market node is selected. It shows real-time
-// orderbook data, price charts, and raw WebSocket message streams in a
-// comprehensive layout suitable for detailed analysis.
+// on top of the canvas when a market node is selected. It reads real-time
+// orderbook data from the central Zustand store (populated by the always-on
+// persistent orderbook monitor) and displays price charts, raw WebSocket
+// message streams in a comprehensive layout suitable for detailed analysis.
+//
+// DATA FLOW:
+// - Reads from store.orderbooks[marketId] (populated by usePersistentOrderbooks)
+// - No per-component WebSocket subscription needed
+// - Raw stream view still uses useRawOrderbookMessages listener
 //
 // FEATURES:
 // - Full orderbook view with multiple price levels
@@ -22,8 +28,9 @@
 // ============================================================================
 
 import React, { useMemo, useEffect, useState, useCallback } from 'react';
-import { useOrderbook, useRawOrderbookMessages } from '../../hooks/useOrderbook';
-import { useApiKeys } from '../../hooks/useApiKeys';
+import { useRawOrderbookMessages } from '../../hooks/useOrderbook';
+import { useStore } from '../../store';
+import type { Orderbook } from '../../types/markets';
 
 // =============================================================================
 // TYPES
@@ -88,48 +95,33 @@ export const GlobalOrderbookOverlay: React.FC<GlobalOrderbookOverlayProps> = ({
   marketId,
   platform,
   marketQuestion,
-  tokenIds,
+  tokenIds: _tokenIds,
   onClose,
   className = '',
 }) => {
-  const { orderbook, status, error, recentTrades, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth } = useOrderbook();
+  // ---------------------------------------------------------------------------
+  // Central Store Orderbook Data
+  // ---------------------------------------------------------------------------
+  const orderbook: Orderbook | undefined = useStore((s) => s.orderbooks[marketId]);
+  const marketStatusObj = useStore((s) => s.marketStatus[marketId]);
   const { rawMessages, clearMessages } = useRawOrderbookMessages(100, marketId);
-  const { getKey } = useApiKeys();
-  const [subscribed, setSubscribed] = useState(false);
   const [activeTab, setActiveTab] = useState<ViewTab>('orderbook');
 
-  // Subscribe with credentials for Kalshi, or Polymarket market subscription
-  useEffect(() => {
-    if (subscribed) return;
-    
-    const doSubscribe = async () => {
-      console.log('GlobalOrderbookOverlay: doSubscribe called for', platform, marketId, tokenIds);
-      
-      if (platform === 'kalshi') {
-        const creds = await getKey('Kalshi');
-        if (creds && creds.api_key && creds.private_key) {
-          console.log('GlobalOrderbookOverlay: Subscribing to Kalshi with auth');
-          await subscribeKalshiWithAuth(
-            marketId,
-            creds.api_key,
-            creds.private_key,
-            creds.environment === 'demo'
-          );
-        } else {
-          await subscribe(platform, marketId);
-        }
-      } else {
-        // Polymarket: use subscribePolymarketMarket with CLOB token IDs (asset IDs)
-        // Prefer tokenIds from metadata, fall back to marketId
-        const assetId = tokenIds && tokenIds.length > 0 ? tokenIds[0] : marketId;
-        console.log('GlobalOrderbookOverlay: Subscribing to Polymarket market with asset ID:', assetId);
-        await subscribePolymarketMarket([assetId]);
-      }
-      setSubscribed(true);
-    };
-    
-    doSubscribe();
-  }, [platform, marketId, tokenIds, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth, getKey, subscribed]);
+  // Derive connection status from store data
+  const status = useMemo((): 'connected' | 'connecting' | 'stale' | 'error' => {
+    if (!orderbook || (orderbook.bids.length === 0 && orderbook.asks.length === 0)) {
+      return 'connecting';
+    }
+    if (marketStatusObj?.errorMessage) return 'error';
+    const age = Date.now() - orderbook.timestamp;
+    if (age > 30_000) return 'stale';
+    return 'connected';
+  }, [orderbook, marketStatusObj]);
+
+  const error = marketStatusObj?.errorMessage ?? null;
+
+  // Recent trades placeholder (derived from orderbook if available)
+  const recentTrades: Array<{ price: number; size: number; side: 'buy' | 'sell'; time: number }> = [];
 
   // Handle escape key to close
   useEffect(() => {
@@ -370,13 +362,13 @@ export const GlobalOrderbookOverlay: React.FC<GlobalOrderbookOverlayProps> = ({
               {/* Right side: Last trade & info */}
               <div className="w-64 border-l border-gray-700 p-4 flex flex-col">
                 <h3 className="text-sm font-medium text-gray-300 mb-3">Last Trade</h3>
-                {orderbook?.last_price ? (
+                {orderbook?.lastPrice ? (
                   <div className="bg-gray-800/30 rounded-lg p-3 mb-4">
                     <div className="text-2xl font-mono font-medium text-white mb-1">
-                      {formatPrice(orderbook.last_price)}
+                      {formatPrice(orderbook.lastPrice)}
                     </div>
                     <div className="text-sm text-gray-400">
-                      Size: {formatSize(orderbook.last_size || 0)}
+                      Size: {formatSize(orderbook.lastSize || 0)}
                     </div>
                   </div>
                 ) : (

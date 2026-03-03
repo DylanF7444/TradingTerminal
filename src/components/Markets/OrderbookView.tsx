@@ -12,14 +12,14 @@
 // market formats with normalized display.
 //
 // LIVE DATA INTEGRATION:
-// The component now uses the useMarketOrderbook hook to subscribe to real-time
-// WebSocket data from the backend. Data flows as follows:
-//   1. Component mounts with market prop (contains platform and id)
-//   2. useMarketOrderbook hook invokes Tauri command to start subscription
-//   3. Backend connects to exchange WebSocket (Polymarket/Kalshi)
-//   4. Backend emits 'orderbook:update' events
-//   5. Hook updates orderbook state
-//   6. Component re-renders with live data
+// The component reads orderbook data from the central Zustand store, which is
+// populated by the always-on persistent orderbook monitor. Data flows as follows:
+//   1. usePersistentOrderbooks hook (mounted in App.tsx) subscribes all markets
+//   2. Backend PersistentOrderbookMonitor subscribes via WebSocket manager
+//   3. Backend emits 'orderbook:update' events
+//   4. usePersistentOrderbooks converts updates to Orderbook type in store
+//   5. Component reads from store.orderbooks[market.id] via selector
+//   6. Component re-renders with live data (no per-component subscription)
 //
 // The component implements several visualization modes:
 //   - Standard: Traditional bid/ask columns
@@ -28,9 +28,9 @@
 //   - Compact: Minimal view for small spaces
 //
 // Architecture Pattern:
-// Container/Presenter with Real-time Data Stream
-//   Container: Manages WebSocket connection via useMarketOrderbook hook
-//   Presenter: Pure rendering of orderbook state
+// Store-Driven Presenter with Real-time Data Stream
+//   Store: Central orderbooks cache populated by usePersistentOrderbooks
+//   Presenter: Pure rendering of orderbook state from Zustand store
 //   Integration: Direct order placement via trading API
 //
 // ORDERBOOK STRUCTURE:
@@ -107,9 +107,6 @@ import { useStore } from '../../store';
 
 // API utilities
 import { placeOrder } from '../../utils/api';
-
-// Orderbook hook
-import { useMarketOrderbook, type OrderbookLevel } from '../../hooks/useOrderbook';
 
 // Types
 import type { Orderbook, Level, Market } from '../../types/markets';
@@ -428,24 +425,27 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
   const [selectedLevel, setSelectedLevel] = useState<{ side: 'bid' | 'ask'; price: number } | null>(null);
   
   // -------------------------------------------------------------------------
-  // Real-time Orderbook Subscription
+  // Real-time Orderbook from Central Store
   // -------------------------------------------------------------------------
   
-  // Determine platform from market type
-  const platform = useMemo((): 'polymarket' | 'kalshi' | null => {
-    if (!market.type) return null;
-    const typeStr = String(market.type).toLowerCase();
-    if (typeStr.includes('polymarket')) return 'polymarket';
-    if (typeStr.includes('kalshi')) return 'kalshi';
-    return null;
-  }, [market.type]);
+  // Read orderbook from central store (populated by usePersistentOrderbooks)
+  const storeOrderbook = useStore((s) => s.orderbooks[market.id]);
+  const marketStatusObj = useStore((s) => s.marketStatus[market.id]);
   
-  // Subscribe to real-time orderbook updates
-  const {
-    orderbook: liveOrderbook,
-    status: connectionStatus,
-    recentTrades,
-  } = useMarketOrderbook(platform, market.id);
+  // Derive connection status from store data
+  const connectionStatus = useMemo((): 'connected' | 'connecting' | 'stale' | 'error' => {
+    if (!storeOrderbook || (storeOrderbook.bids.length === 0 && storeOrderbook.asks.length === 0)) {
+      return marketStatusObj?.connecting ? 'connecting' : 'connecting';
+    }
+    if (marketStatusObj?.errorMessage) return 'error';
+    // Stale if last update > 30 seconds ago
+    const age = Date.now() - storeOrderbook.timestamp;
+    if (age > 30_000) return 'stale';
+    return 'connected';
+  }, [storeOrderbook, marketStatusObj]);
+  
+  // Recent trades from store (if available)
+  const recentTrades: Array<{ price: number; size: number; side: 'buy' | 'sell'; time: number }> = [];
   
   // -------------------------------------------------------------------------
   // Global State
@@ -461,50 +461,15 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
   }, [getPositionsByMarket, market.nodeId]);
   
   // -------------------------------------------------------------------------
-  // Convert live orderbook to display format
+  // Orderbook from Central Store (already in Orderbook format)
   // -------------------------------------------------------------------------
   
   const orderbook = useMemo((): Orderbook | null => {
-    if (!liveOrderbook) return null;
-    
-    // Convert OrderbookLevel[] to Level[]
-    const bids: Level[] = liveOrderbook.bids.map((level: OrderbookLevel) => ({
-      price: level.price,
-      size: level.size,
-      orderCount: level.order_count || 1,
-      value: level.price * level.size,
-    }));
-    
-    const asks: Level[] = liveOrderbook.asks.map((level: OrderbookLevel) => ({
-      price: level.price,
-      size: level.size,
-      orderCount: level.order_count || 1,
-      value: level.price * level.size,
-    }));
-    
-    // Calculate spread
-    const bestBid = bids[0]?.price || 0;
-    const bestAsk = asks[0]?.price || 0;
-    const spread = bestAsk - bestBid;
-    
-    // Calculate total liquidity
-    const totalBidValue = bids.reduce((sum, b) => sum + b.value, 0);
-    const totalAskValue = asks.reduce((sum, a) => sum + a.value, 0);
-    const liquidity = totalBidValue + totalAskValue;
-    
-    return {
-      marketId: liveOrderbook.market_id,
-      timestamp: liveOrderbook.timestamp,
-      bids,
-      asks,
-      lastPrice: liveOrderbook.last_price,
-      lastSize: liveOrderbook.last_size,
-      lastTradeAt: liveOrderbook.timestamp,
-      sequence: liveOrderbook.sequence,
-      liquidity,
-      spread,
-    };
-  }, [liveOrderbook]);
+    if (!storeOrderbook) return null;
+    // Store data is already in Orderbook format with Level[] arrays
+    // Return directly (already sorted by updateOrderbook in marketsSlice)
+    return storeOrderbook;
+  }, [storeOrderbook]);
   
   // -------------------------------------------------------------------------
   // Derived Data

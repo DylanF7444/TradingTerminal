@@ -186,6 +186,10 @@ use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply
 use crate::services::{scraper, startup};
 use crate::services::websocket_manager::{WebSocketManager, create_websocket_manager, NetworkMetricsSnapshot};
 use crate::services::remote_gateway::{RemoteConnectionManager, create_remote_manager};
+use crate::services::persistent_orderbook::{
+    PersistentOrderbookState,
+    create_persistent_monitor,
+};
 use sysinfo::SystemExt;
 use rusqlite::params;
 
@@ -370,6 +374,12 @@ fn main() {
             set_kalshi_credentials_cmd,
             clear_kalshi_credentials_cmd,
             
+            // Persistent orderbook monitoring commands (ALWAYS-ON)
+            monitor_market_orderbook_cmd,
+            unmonitor_market_orderbook_cmd,
+            get_cached_orderbook_cmd,
+            get_orderbook_monitoring_summary_cmd,
+            
             // WebSocket commands
             reconnect_websocket_cmd,
             disconnect_websocket_cmd,
@@ -490,9 +500,13 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     let orderbook_state = orderbook::init_state(app.handle().clone(), ws_manager.clone());
     app.manage(orderbook_state);
     
+    // 5c. Initialize persistent orderbook monitor (ALWAYS-ON monitoring)
+    let persistent_monitor = create_persistent_monitor(ws_manager.clone(), app.handle().clone());
+    app.manage(persistent_monitor.clone());
+    
     // 6. Start background services (scraper supervisor, analyzer, executor)
     // Initialize all saved nodes and start their websockets/scrapers
-    tauri::async_runtime::spawn(start_background_services(app.handle().clone(), ws_manager));
+    tauri::async_runtime::spawn(start_background_services(app.handle().clone(), ws_manager, persistent_monitor));
     
     info!("Application initialization complete");
     Ok(())
@@ -502,7 +516,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
 /// 
 /// Spawns analyzer and executor services. Scrapers are started on-demand
 /// when users add data sources.
-async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc<WebSocketManager>) {
+async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc<WebSocketManager>, persistent_monitor: PersistentOrderbookState) {
     info!("Starting background services...");
     
     let state: State<'_, AppState> = app_handle.state();
@@ -518,11 +532,68 @@ async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc
             let mut scrapers = state.active_scrapers.lock().await;
             *scrapers = active_services.scrapers;
             info!("Saved nodes initialized successfully");
+            
+            // ================================================================
+            // AUTO-SUBSCRIBE EXISTING MARKET NODES (ALWAYS-ON MONITORING)
+            // ================================================================
+            // After loading saved nodes, subscribe their orderbooks
+            // so monitoring begins immediately at startup.
+            // ================================================================
+            for market_info in &active_services.market_subscriptions {
+                if let Err(e) = persistent_monitor
+                    .subscribe_market(
+                        &market_info.node_id,
+                        &market_info.market_id,
+                        &market_info.platform,
+                    )
+                    .await
+                {
+                    eprintln!(
+                        "[PersistentOrderbook] Failed to auto-subscribe market {} ({}): {}",
+                        market_info.market_id, market_info.platform, e
+                    );
+                }
+            }
         }
         Err(e) => {
             eprintln!("Failed to initialize saved nodes: {}", e);
         }
     }
+    
+    // ====================================================================
+    // START ORDERBOOK UPDATE CACHE LISTENER
+    // ====================================================================
+    // Listen for all orderbook:update events and cache them in the
+    // persistent monitor. This ensures the central cache is always
+    // up-to-date regardless of which UI components are mounted.
+    // ====================================================================
+    let monitor_for_listener = persistent_monitor.clone();
+    let app_for_listener = app_handle.clone();
+    tokio::spawn(async move {
+        use tauri::Listener;
+        // Listen for orderbook updates and cache them
+        app_for_listener.listen("orderbook:update", move |event| {
+            let monitor = monitor_for_listener.clone();
+            // In Tauri 2, event.payload() returns &str directly
+            let payload_str = event.payload();
+            if let Ok(update) = serde_json::from_str::<crate::services::orderbook::OrderbookUpdate>(payload_str) {
+                tokio::spawn(async move {
+                    monitor.handle_update(&update).await;
+                });
+            }
+        });
+    });
+    
+    // ====================================================================
+    // PERIODIC STALENESS CHECK
+    // ====================================================================
+    let monitor_for_stale = persistent_monitor.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            monitor_for_stale.check_staleness().await;
+        }
+    });
     
     // Start analyzer service (consumes data, produces signals)
     // TODO: Create channels between analyzer and executor
@@ -1652,6 +1723,87 @@ async fn clear_kalshi_credentials_cmd(
 ) -> Result<String, String> {
     info!("Clearing Kalshi credentials");
     orderbook::clear_kalshi_credentials_cmd(state).await
+}
+
+// -------------------------------------------------------------------------
+// Persistent Orderbook Monitoring Commands (ALWAYS-ON)
+// -------------------------------------------------------------------------
+//
+// These commands manage the persistent orderbook monitoring service that
+// maintains subscriptions to ALL active market nodes at all times.
+// Orderbook data is centrally cached and available to all UI components
+// without requiring per-component subscriptions.
+// -------------------------------------------------------------------------
+
+/// Start persistent orderbook monitoring for a market node
+///
+/// Called automatically when a market node is added to the graph.
+/// Subscribes via the consolidated WebSocket manager.
+///
+/// Frontend: await invoke('monitor_market_orderbook_cmd', {
+///   nodeId: 'node-uuid',
+///   marketId: 'token-id-or-ticker',
+///   platform: 'polymarket'
+/// })
+#[tauri::command]
+async fn monitor_market_orderbook_cmd(
+    node_id: String,
+    market_id: String,
+    platform: String,
+    state: State<'_, PersistentOrderbookState>,
+) -> Result<String, String> {
+    info!(
+        "[PersistentOrderbook] Starting monitoring for node {} (market: {}, platform: {})",
+        node_id, market_id, platform
+    );
+    state
+        .subscribe_market(&node_id, &market_id, &platform)
+        .await?;
+    Ok(format!(
+        "OrderBook monitoring started for {} on {}",
+        market_id, platform
+    ))
+}
+
+/// Stop persistent orderbook monitoring for a market node
+///
+/// Called when a market node is removed from the graph.
+///
+/// Frontend: await invoke('unmonitor_market_orderbook_cmd', { nodeId: 'node-uuid' })
+#[tauri::command]
+async fn unmonitor_market_orderbook_cmd(
+    node_id: String,
+    state: State<'_, PersistentOrderbookState>,
+) -> Result<String, String> {
+    info!(
+        "[PersistentOrderbook] Stopping monitoring for node {}",
+        node_id
+    );
+    state.unsubscribe_market(&node_id).await?;
+    Ok(format!("OrderBook monitoring stopped for node {}", node_id))
+}
+
+/// Get cached orderbook for a specific market
+///
+/// Returns the current cached orderbook data without creating a subscription.
+///
+/// Frontend: await invoke('get_cached_orderbook_cmd', { marketId: 'token-id' })
+#[tauri::command]
+async fn get_cached_orderbook_cmd(
+    market_id: String,
+    state: State<'_, PersistentOrderbookState>,
+) -> Result<Option<crate::services::persistent_orderbook::CachedOrderbook>, String> {
+    Ok(state.get_orderbook(&market_id).await)
+}
+
+/// Get monitoring summary (all markets status)
+///
+/// Frontend: await invoke('get_orderbook_monitoring_summary_cmd')
+#[tauri::command]
+async fn get_orderbook_monitoring_summary_cmd(
+    state: State<'_, PersistentOrderbookState>,
+) -> Result<crate::services::persistent_orderbook::MonitoringSummary, String> {
+    Ok(state.get_summary().await)
 }
 
 // -------------------------------------------------------------------------
