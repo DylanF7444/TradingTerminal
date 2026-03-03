@@ -73,6 +73,7 @@ pub mod storage;
 pub mod orderbook;
 pub mod api_keys;
 pub mod analyzers;
+pub mod remote;
 
 // Re-export all commands for main.rs invoke_handler registration
 
@@ -161,4 +162,17 @@ pub use api_keys::{
     SaveApiKeyRequest,
     ApiKeyResponse,
     ApiKeySummary,
+};
+
+// Remote Access: Remote desktop gateway management
+pub use remote::{
+    enable_remote_access,
+    disable_remote_access,
+    get_remote_status,
+    generate_pairing_code,
+    revoke_remote_device,
+    get_paired_devices,
+    update_relay_config,
+    EnableRemoteRequest,
+    PairedDeviceSummary,
 };

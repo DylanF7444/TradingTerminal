@@ -180,10 +180,12 @@ use crate::commands::{
     orderbook::{self, OrderbookState},
     api_keys,
     analyzers,
+    remote,
 };
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
 use crate::services::{scraper, startup};
 use crate::services::websocket_manager::{WebSocketManager, create_websocket_manager, NetworkMetricsSnapshot};
+use crate::services::remote_gateway::{RemoteConnectionManager, create_remote_manager};
 use sysinfo::SystemExt;
 use rusqlite::params;
 
@@ -235,6 +237,13 @@ pub struct AppState {
     
     /// WebSocket manager for market data streams
     pub ws_manager: Arc<WebSocketManager>,
+    
+    /// Remote connection manager for remote desktop gateway
+    /// 
+    /// Manages WebSocket relay connections for remote device access.
+    /// Enables the trading terminal to be accessed from remote devices
+    /// through a relay server, proxying market data and commands.
+    pub remote_manager: Arc<RemoteConnectionManager>,
 }
 
 /// Application configuration structure
@@ -402,6 +411,22 @@ fn main() {
             delete_chain_cmd,
             get_node_chains_cmd,
             get_analyzer_types_cmd,
+            
+            // Remote access commands (gateway management for remote desktop connections)
+            // - enable_remote_access_cmd: Connect to relay server, begin accepting remotes
+            // - disable_remote_access_cmd: Disconnect relay and all remote sessions
+            // - get_remote_status_cmd: Current gateway status (connections, uptime, etc.)
+            // - generate_pairing_code_cmd: Create 6-digit code for device enrollment
+            // - revoke_remote_device_cmd: Revoke a paired device's access
+            // - get_paired_devices_cmd: List all paired devices (sans auth tokens)
+            // - update_relay_config_cmd: Change relay server URL/settings
+            enable_remote_access_cmd,
+            disable_remote_access_cmd,
+            get_remote_status_cmd,
+            generate_pairing_code_cmd,
+            revoke_remote_device_cmd,
+            get_paired_devices_cmd,
+            update_relay_config_cmd,
         ])
         
         // Run the application
@@ -455,6 +480,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         executor_handle: Arc::new(Mutex::new(None)),
         config: Arc::new(Mutex::new(AppConfig::default())),
         ws_manager: ws_manager.clone(),
+        remote_manager: create_remote_manager(app.handle().clone()),
     };
     
     // 5. Manage state (accessible to all commands via State<'_, AppState>)
@@ -580,7 +606,13 @@ async fn graceful_shutdown(app_handle: tauri::AppHandle) {
         handle.abort();
     }
     
-    // 4. Database cleanup (VACUUM if needed, close connections)
+    // 4. Shutdown remote gateway
+    if let Err(e) = state.remote_manager.shutdown().await {
+        eprintln!("Error shutting down remote gateway: {}", e);
+    }
+    info!("Remote gateway shut down");
+    
+    // 5. Database cleanup (VACUUM if needed, close connections)
     {
         let _db = state.db.lock().await;
         // sqlite::vacuum_database(&db).ok();
@@ -1829,4 +1861,97 @@ async fn get_node_chains_cmd(
 #[tauri::command]
 async fn get_analyzer_types_cmd() -> Result<Vec<serde_json::Value>, String> {
     Ok(analyzers::get_analyzer_types())
+}
+
+// -------------------------------------------------------------------------
+// Remote Access Commands
+// -------------------------------------------------------------------------
+// These commands manage the remote desktop gateway feature, allowing
+// the trading terminal to be accessed from remote devices via a WebSocket
+// relay server.
+//
+// Architecture:
+//   [Remote Device] <--WS Relay--> [Home Desktop (this app)] <---> [Market APIs]
+//
+// Features added:
+//   - enable_remote_access_cmd: Connect to relay, begin accepting remotes
+//   - disable_remote_access_cmd: Disconnect relay and all remote sessions
+//   - get_remote_status_cmd: Current gateway status snapshot
+//   - generate_pairing_code_cmd: Create 6-digit code for device enrollment
+//   - revoke_remote_device_cmd: Revoke paired device access
+//   - get_paired_devices_cmd: List paired devices (sans auth tokens)
+//   - update_relay_config_cmd: Change relay server URL/settings
+// -------------------------------------------------------------------------
+
+/// Enable remote access and connect to the relay server.
+///
+/// Frontend: await invoke('enable_remote_access_cmd', { request: { relayUrl: 'wss://...', ... } })
+#[tauri::command]
+async fn enable_remote_access_cmd(
+    request: commands::remote::EnableRemoteRequest,
+    state: State<'_, AppState>,
+) -> Result<models::remote::RemoteStatus, String> {
+    remote::enable_remote_access(request, state.remote_manager.clone()).await
+}
+
+/// Disable remote access and disconnect all remote devices.
+///
+/// Frontend: await invoke('disable_remote_access_cmd')
+#[tauri::command]
+async fn disable_remote_access_cmd(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    remote::disable_remote_access(state.remote_manager.clone()).await
+}
+
+/// Get the current status of the remote gateway.
+///
+/// Frontend: await invoke('get_remote_status_cmd')
+#[tauri::command]
+async fn get_remote_status_cmd(
+    state: State<'_, AppState>,
+) -> Result<models::remote::RemoteStatus, String> {
+    remote::get_remote_status(state.remote_manager.clone()).await
+}
+
+/// Generate a new pairing code for device enrollment.
+///
+/// Frontend: await invoke('generate_pairing_code_cmd')
+#[tauri::command]
+async fn generate_pairing_code_cmd(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    remote::generate_pairing_code(state.remote_manager.clone()).await
+}
+
+/// Revoke a paired device's access and disconnect it.
+///
+/// Frontend: await invoke('revoke_remote_device_cmd', { deviceId: '...' })
+#[tauri::command]
+async fn revoke_remote_device_cmd(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    remote::revoke_remote_device(device_id, state.remote_manager.clone()).await
+}
+
+/// Get all paired devices (without sensitive auth tokens).
+///
+/// Frontend: await invoke('get_paired_devices_cmd')
+#[tauri::command]
+async fn get_paired_devices_cmd(
+    state: State<'_, AppState>,
+) -> Result<Vec<commands::remote::PairedDeviceSummary>, String> {
+    remote::get_paired_devices(state.remote_manager.clone()).await
+}
+
+/// Update the relay server configuration.
+///
+/// Frontend: await invoke('update_relay_config_cmd', { request: { relayUrl: 'wss://...', ... } })
+#[tauri::command]
+async fn update_relay_config_cmd(
+    request: commands::remote::EnableRemoteRequest,
+    state: State<'_, AppState>,
+) -> Result<models::remote::RemoteStatus, String> {
+    remote::update_relay_config(request, state.remote_manager.clone()).await
 }

@@ -143,6 +143,16 @@ pub mod trading_signal;
 pub use trading_signal::TradingSignal;
 
 // Analyzer node types
+pub mod remote;
+pub use remote::{
+    RemoteSession,
+    DeviceCredentials,
+    RemoteStatus,
+    RemoteCommand,
+    RelayConfig,
+    SessionStatus,
+};
+
 pub mod analyzer_node;
 pub use analyzer_node::{
     AnalyzerNode,

@@ -106,6 +106,7 @@ import AnalyzerPanel from './components/Analyzers/AnalyzerPanel';
 import GlobalOrderbookOverlay from './components/Markets/GlobalOrderbookOverlay';
 import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
 import ApiKeySettings from './components/Settings/ApiKeySettings';
+import { RemoteAccessPanel } from './components/Remote/RemoteAccessPanel';
 import { NodeDataPanel } from './components/Nodes/NodeDataPanel';
 
 // Extracted components
@@ -868,6 +869,9 @@ function SettingsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => vo
         </div>
         <div className="flex-1 overflow-y-auto p-6">
           <ApiKeySettings />
+          <div className="mt-6 pt-6 border-t border-gray-800">
+            <RemoteAccessPanel />
+          </div>
         </div>
       </div>
     </div>

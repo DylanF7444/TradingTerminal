@@ -65,8 +65,9 @@ Alternative crypto providers available:
 │ • markets.rs     │ • scraper.rs     │ • node.rs        │ • sqlite.rs        │
 │ • trading.rs     │ • analyzer.rs    │ • market.rs      │                    │
 │ • orderbook.rs   │ • executor.rs    │ • position.rs    │                    │
-│ • storage.rs     │ • orderbook.rs   │                  │                    │
-│                  │ • websocket_m..  │                  │                    │
+│ • storage.rs     │ • orderbook.rs   │ • remote.rs      │                    │
+│ • remote.rs      │ • websocket_m..  │                  │                    │
+│                  │ • remote_gate..  │                  │                    │
 └──────────────────┴──────────────────┴──────────────────┴────────────────────┘
 ```
 
@@ -103,20 +104,94 @@ pnpm tauri build
 | `components/Nodes/` | Node detail panels (details, raw stream, stored data) | `NodeDetailsPanel.extracted.tsx`, `RawStreamTab.tsx`, `NodeDataPanel.tsx` |
 | `components/Metrics/` | Performance tracking, P&L display | `PerformanceMetrics.tsx` |
 | `components/Settings/` | API key management, configuration | `ApiKeySettings.tsx` |
+| `components/Remote/` | Remote desktop access management panel | `RemoteAccessPanel.tsx` |
 | `components/UI/` | Reusable UI primitives and error boundaries | `Modal.tsx`, `Button.tsx`, `Clock.tsx`, `ErrorBoundary.tsx` |
-| `hooks/` | React hooks for data fetching, WebSocket, and events | `useInfoSourceEvents.ts`, `useWebSocket.ts`, `useOrderbook.ts` |
+| `hooks/` | React hooks for data fetching, WebSocket, and events | `useInfoSourceEvents.ts`, `useWebSocket.ts`, `useOrderbook.ts`, `useRemoteAccess.ts` |
 | `store/` | Zustand state slices | `nodesSlice.ts`, `marketsSlice.ts`, `positionsSlice.ts` |
-| `types/` | TypeScript interfaces and enums | `nodes.ts`, `markets.ts`, `sources.ts` |
+| `types/` | TypeScript interfaces and enums | `nodes.ts`, `markets.ts`, `sources.ts`, `remote.ts` |
 | `utils/` | API wrappers, transforms, helpers, layout algorithms | `api.ts`, `nodeTransform.ts`, `nodeHelpers.ts`, `demoData.ts`, `graphLayout.ts` |
 
 ### Backend (`src-tauri/src/`)
 
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
-| `commands/` | Tauri IPC command handlers | `markets.rs`, `trading.rs`, `orderbook.rs` |
-| `services/` | Background tasks (scrapers, analyzer, executor) | `scraper.rs`, `analyzer.rs`, `executor.rs` |
-| `models/` | Data structures matching TypeScript types | `node.rs`, `market.rs`, `position.rs` |
+| `commands/` | Tauri IPC command handlers | `markets.rs`, `trading.rs`, `orderbook.rs`, `remote.rs` |
+| `services/` | Background tasks (scrapers, analyzer, executor, remote gateway) | `scraper.rs`, `analyzer.rs`, `executor.rs`, `remote_gateway.rs` |
+| `models/` | Data structures matching TypeScript types | `node.rs`, `market.rs`, `position.rs`, `remote.rs` |
 | `db/` | SQLite database operations | `sqlite.rs` |
+
+---
+
+## Remote Access (Remote Desktop Gateway)
+
+### Overview
+
+The trading terminal supports remote access, allowing you to connect to your home desktop running the app from a remote device (laptop, tablet, etc.) via a WebSocket relay server.
+
+```
+[Remote Device] <──WebSocket──> [Relay Server] <──WebSocket──> [Home Desktop]
+                                                                     │
+                                                              [Market APIs]
+```
+
+### Architecture
+
+- **Home Desktop**: Runs the full trading terminal. Connects *outbound* to the relay server (no port forwarding needed).
+- **Relay Server**: Lightweight signaling/bridge server. Handles NAT traversal. Can be self-hosted or managed.
+- **Remote Device**: Connects to the same relay. Authenticates with pairing credentials. Commands are proxied to home desktop.
+
+### Key Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `RemoteConnectionManager` | `services/remote_gateway.rs` | Central gateway manager (spawns relay connection task) |
+| `RemoteCommand` | `models/remote.rs` | Protocol messages (auth, pair, forward, heartbeat) |
+| `remote.rs` commands | `commands/remote.rs` | Tauri IPC handlers for frontend control |
+| `useRemoteAccess` | `hooks/useRemoteAccess.ts` | React hook for gateway state management |
+| `RemoteAccessPanel` | `components/Remote/RemoteAccessPanel.tsx` | Settings UI for enabling/managing remote access |
+| `remote.ts` types | `types/remote.ts` | TypeScript type definitions for remote data |
+
+### Remote Access Commands
+
+| Command | Frontend Invoke | Description |
+|---------|----------------|-------------|
+| `enable_remote_access_cmd` | `invoke('enable_remote_access_cmd', { request })` | Connect to relay, accept remotes |
+| `disable_remote_access_cmd` | `invoke('disable_remote_access_cmd')` | Disconnect all, stop gateway |
+| `get_remote_status_cmd` | `invoke('get_remote_status_cmd')` | Gateway status snapshot |
+| `generate_pairing_code_cmd` | `invoke('generate_pairing_code_cmd')` | Create 6-digit pairing code |
+| `revoke_remote_device_cmd` | `invoke('revoke_remote_device_cmd', { deviceId })` | Revoke paired device |
+| `get_paired_devices_cmd` | `invoke('get_paired_devices_cmd')` | List paired devices |
+| `update_relay_config_cmd` | `invoke('update_relay_config_cmd', { request })` | Change relay settings |
+
+### Security
+
+- **TLS Encryption**: All relay traffic uses `wss://` (WebSocket Secure)
+- **Device Pairing**: 6-digit code displayed on home desktop (physical access required)
+- **Auth Tokens**: 256-bit random hex tokens generated on pairing, stored locally
+- **Command Whitelist**: Only read-only commands allowed via remote by default (trading requires explicit opt-in)
+- **Session Timeouts**: Idle sessions expire after configurable timeout (default: 5 minutes)
+- **Device Revocation**: Paired devices can be revoked at any time, immediately disconnecting them
+
+### Usage
+
+1. Open **Settings** → scroll to **Remote Access**
+2. Enter relay server URL (or use the default localhost for testing)
+3. Toggle the gateway **on**
+4. Click **Generate Code** to create a 6-digit pairing code
+5. On your remote device, enter the pairing code to connect
+6. Monitor connected devices and statistics in the panel
+
+### Tauri Events (Backend → Frontend)
+
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `remote:status_update` | `RemoteStatus` | Periodic gateway status update |
+| `remote:pairing_code` | `{ code, expiresInSeconds }` | New pairing code generated |
+| `remote:device_connected` | `{ deviceId, sessionId }` | Remote device authenticated |
+| `remote:device_disconnected` | `{ reason }` | Remote device disconnected |
+| `remote:relay_connected` | `()` | Relay WebSocket connected |
+| `remote:relay_disconnected` | `()` | Relay WebSocket disconnected |
+| `remote:reconnect_failed` | `{ attempt, maxAttempts, error }` | Reconnection attempt failed |
 
 ---
 
@@ -236,6 +311,12 @@ try {
 | `src-tauri/main.rs` | Backend initialization, command registration | Adding new commands, services |
 | `src-tauri/services/mod.rs` | Background service coordination | Adding new services |
 | `src-tauri/db/sqlite.rs` | Database schema and operations | Schema changes, new queries |
+| `src-tauri/services/remote_gateway.rs` | Remote desktop gateway relay service | Remote access features, relay protocol |
+| `src-tauri/commands/remote.rs` | Remote access IPC command handlers | Adding remote control commands |
+| `src-tauri/models/remote.rs` | Remote access data structures | Remote protocol, session, credential types |
+| `src/hooks/useRemoteAccess.ts` | React hook for remote gateway control | Remote access UI state/operations |
+| `src/components/Remote/RemoteAccessPanel.tsx` | Remote access settings UI panel | Remote access UI changes |
+| `src/types/remote.ts` | TypeScript remote access type definitions | Remote data structure changes |
 
 ---
 
