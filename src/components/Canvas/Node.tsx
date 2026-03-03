@@ -39,7 +39,7 @@ export interface NodeComponentProps {
   onMouseDown: (e: React.MouseEvent) => void;
   onDelete: () => void;
   /** Callback to open orderbook overlay for market nodes */
-  onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
+  onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string, tokenIds?: string[]) => void;
   /** Callback for node resize */
   onResize?: (id: string, size: { width: number; height: number | null }) => void;
   /** Node is the source of a pending connection */
@@ -239,8 +239,16 @@ export default function NodeComponent({
   // Extract metadata
   const metadata = node.metadata as InfoSourceMetadata | MarketMetadata | undefined;
   
-  // Get display name
-  const displayName = node.name || (isInfoSource ? sourceType : sourceType);
+  // Get display name - for market nodes, prefer the question/title from metadata
+  const displayName = useMemo(() => {
+    if (node.name) return node.name;
+    if (isMarket) {
+      const rawMeta = node.metadata as Record<string, any> | undefined;
+      const question = rawMeta?.question || rawMeta?.marketQuestion;
+      if (question) return question;
+    }
+    return isInfoSource ? sourceType : sourceType;
+  }, [node.name, node.metadata, isInfoSource, isMarket, sourceType]);
   
   // Extract metrics based on node type
   const metrics = useMemo(() => {
@@ -295,17 +303,22 @@ export default function NodeComponent({
       const marketState = marketMeta?.marketState;
       const trading = marketMeta?.trading;
       
+      // Also read directly from top-level metadata fields (backend stores status/question there)
+      const rawMeta = metadata as Record<string, any> | undefined;
+      const topLevelStatus = rawMeta?.status;
+      
       return {
-        primary: marketState?.lastPrice !== undefined 
+        primary: marketState?.lastPrice !== undefined && marketState.lastPrice > 0
           ? formatPrice(marketState.lastPrice)
           : '--',
-        secondary: marketState?.volume24h !== undefined 
+        secondary: marketState?.volume24h !== undefined && marketState.volume24h > 0
           ? `Vol: ${formatNumber(marketState.volume24h)}`
-          : '--',
-        status: marketState?.status || 'Unknown',
-        bid: marketState?.bestBid !== undefined ? formatPrice(marketState.bestBid) : '--',
-        ask: marketState?.bestAsk !== undefined ? formatPrice(marketState.bestAsk) : '--',
+          : rawMeta?.question || '--',
+        status: marketState?.status || topLevelStatus || 'Unknown',
+        bid: marketState?.bestBid !== undefined && marketState.bestBid > 0 ? formatPrice(marketState.bestBid) : '--',
+        ask: marketState?.bestAsk !== undefined && marketState.bestAsk > 0 ? formatPrice(marketState.bestAsk) : '--',
         autoTrade: trading?.autoTrade || false,
+        hasError: topLevelStatus === 'error',
       };
     }
     
@@ -321,12 +334,16 @@ export default function NodeComponent({
     const platform = typeStr.includes('polymarket') ? 'polymarket' as const :
                      typeStr.includes('kalshi') ? 'kalshi' as const : null;
     
-    // Get market ID from metadata - check both camelCase and snake_case formats
-    const meta = node.metadata as { marketId?: string; market_id?: string; question?: string; marketQuestion?: string } | undefined;
+    // Get market ID and token_ids from metadata - check both camelCase and snake_case formats
+    const meta = node.metadata as { 
+      marketId?: string; market_id?: string; 
+      question?: string; marketQuestion?: string;
+      token_ids?: string[];
+    } | undefined;
     const marketId = meta?.marketId || meta?.market_id || node.id;
     const marketQuestion = meta?.question || meta?.marketQuestion;
     
-    return platform ? { platform, marketId, marketQuestion } : null;
+    return platform ? { platform, marketId, marketQuestion, tokenIds: meta?.token_ids } : null;
   }, [isMarket, node.node_type, node.metadata, node.id]);
 
   // Handle click with propagation stop to prevent background click clearing selection
@@ -339,7 +356,7 @@ export default function NodeComponent({
   const handleDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (isMarket && marketInfo && onOpenOrderbook) {
-      onOpenOrderbook(marketInfo.marketId, marketInfo.platform, marketInfo.marketQuestion);
+      onOpenOrderbook(marketInfo.marketId, marketInfo.platform, marketInfo.marketQuestion, marketInfo.tokenIds);
     }
   };
 
@@ -449,10 +466,17 @@ export default function NodeComponent({
             }`} />
           )}
           
-          {/* Live indicator for market nodes */}
-          {isMarket && !isConnectionSource && !isValidConnectionTarget && (
-            <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse flex-shrink-0" />
-          )}
+          {/* Live indicator for market nodes - reflects actual metadata status */}
+          {isMarket && !isConnectionSource && !isValidConnectionTarget && (() => {
+            const meta = node.metadata as Record<string, any> | undefined;
+            const metaStatus = meta?.status;
+            // "connected" means node was configured/saved, not that WS is live
+            const dotColor = metaStatus === 'connected' ? 'bg-yellow-400' :
+                             metaStatus === 'error' ? 'bg-red-400' :
+                             metaStatus === 'live' ? 'bg-green-400 animate-pulse' :
+                             'bg-gray-400';
+            return <div className={`w-2 h-2 ${dotColor} rounded-full flex-shrink-0`} />;
+          })()}
         </div>
         
         {/* Content Section */}
@@ -467,7 +491,7 @@ export default function NodeComponent({
             <span className="text-white text-lg font-bold">
               {metrics.primary}
             </span>
-            {isMarket && metrics.bid && metrics.ask && (
+            {isMarket && metrics.bid && metrics.ask && metrics.bid !== '--' && metrics.ask !== '--' && (
               <span className="text-gray-400 text-xs">
                 Bid: {metrics.bid} / Ask: {metrics.ask}
               </span>

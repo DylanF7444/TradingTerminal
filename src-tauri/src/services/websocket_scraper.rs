@@ -168,9 +168,7 @@ pub async fn run_coinbase_scraper(
     let mut retry_count = 0u32;
     let max_retries = 10u32;
     
-    println!("[Coinbase Scraper {}] Starting", config.node_id);
-    
-    // Current WebSocket state
+
     let mut ws_sender: Option<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>> = None;
     let mut ws_receiver: Option<futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>> = None;
     
@@ -188,7 +186,6 @@ pub async fn run_coinbase_scraper(
     
     loop {
         // DEBUG: Log loop iteration
-        println!("[Coinbase Scraper {}] Loop iteration", config.node_id);
         
         tokio::select! {
             // Handle commands
@@ -196,7 +193,6 @@ pub async fn run_coinbase_scraper(
                 match cmd {
                     Some(ScraperCommand::AddSymbols(symbols)) => {
                         // DEBUG: Print add symbols command
-                        println!("[Coinbase Scraper {}] AddSymbols command: {:?}", config.node_id, symbols);
                         
                         for symbol in &symbols {
                             if !subscribed_symbols.contains(symbol) {
@@ -211,7 +207,6 @@ pub async fn run_coinbase_scraper(
                                 channels: vec!["ticker".to_string()],
                             };
                             if let Ok(json) = serde_json::to_string(&subscribe_msg) {
-                                println!("[Coinbase Scraper {}] Dynamic subscribe: {}", config.node_id, json);
                                 let _ = sender.send(WsMessage::Text(json.clone())).await;
                                 config.network_metrics.record_sent(json.len() as u64);
                             }
@@ -219,7 +214,6 @@ pub async fn run_coinbase_scraper(
                     }
                     Some(ScraperCommand::RemoveSymbols(symbols)) => {
                         // DEBUG: Print remove symbols command
-                        println!("[Coinbase Scraper {}] RemoveSymbols command: {:?}", config.node_id, symbols);
                         
                         subscribed_symbols.retain(|s| !symbols.contains(s));
                         
@@ -230,7 +224,6 @@ pub async fn run_coinbase_scraper(
                                 channels: vec!["ticker".to_string()],
                             };
                             if let Ok(json) = serde_json::to_string(&unsubscribe_msg) {
-                                println!("[Coinbase Scraper {}] Dynamic unsubscribe: {}", config.node_id, json);
                                 let _ = sender.send(WsMessage::Text(json.clone())).await;
                                 config.network_metrics.record_sent(json.len() as u64);
                             }
@@ -238,10 +231,8 @@ pub async fn run_coinbase_scraper(
                     }
                     Some(ScraperCommand::SetStorageInterval(ms)) => {
                         storage_timer = interval(Duration::from_millis(ms));
-                        println!("[Coinbase Scraper {}] Storage interval updated to {}ms", config.node_id, ms);
                     }
                     Some(ScraperCommand::Shutdown) | None => {
-                        println!("[Coinbase Scraper {}] Shutdown command received", config.node_id);
                         if let Some(ref mut sender) = ws_sender {
                             let _ = sender.close().await;
                         }
@@ -262,7 +253,6 @@ pub async fn run_coinbase_scraper(
                 }
             } => {
                 // DEBUG: We received something from the WebSocket
-                println!("[Coinbase Scraper {}] Received WebSocket message", config.node_id);
                 
                 // When using pending(), the msg is never Some, so this branch runs when pending() doesn't fire
                 // But we still need to handle the case - let's check ws_receiver directly
@@ -273,7 +263,6 @@ pub async fn run_coinbase_scraper(
                             config.network_metrics.record_received(text.len() as u64);
                             
                             // DEBUG: Print raw WebSocket message
-                            println!("[Coinbase Scraper {}] Raw message: {}", config.node_id, text);
                             
                             // Parse message
                             if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
@@ -286,8 +275,7 @@ pub async fn run_coinbase_scraper(
                                             let timestamp = Utc::now().timestamp_millis();
                                             
                                             // DEBUG: Print parsed ticker data
-                                            println!("[Coinbase Scraper {}] TICKER: symbol={} price={} bid={} ask={}", 
-                                                config.node_id, ticker.product_id, price, ticker.best_bid, ticker.best_ask);
+                                            
                                             
                                             // Emit to frontend immediately
                                             let price_update = serde_json::json!({
@@ -358,15 +346,12 @@ pub async fn run_coinbase_scraper(
             // Connection maintenance
             _ = connection_timer.tick() => {
                 // DEBUG: Log the connection maintenance check
-                println!("[Coinbase Scraper {}] Connection maintenance check: ws_sender={:?} ws_receiver={:?} symbols={:?}", 
-                    config.node_id, ws_sender.is_some(), ws_receiver.is_some(), subscribed_symbols);
                 
                 if ws_sender.is_none() && ws_receiver.is_none() && !subscribed_symbols.is_empty() {
-                    println!("[Coinbase Scraper {}] Attempting connection (retry {})", config.node_id, retry_count);
                     
                     match connect_async(COINBASE_WS_URL).await {
                         Ok((ws_stream, _)) => {
-                            println!("[Coinbase Scraper {}] Connected successfully", config.node_id);
+                            
                             let (sender, receiver) = ws_stream.split();
                             ws_sender = Some(sender);
                             ws_receiver = Some(receiver);
@@ -386,7 +371,6 @@ pub async fn run_coinbase_scraper(
                                 };
                                 if let Ok(json) = serde_json::to_string(&subscribe_msg) {
                                     // DEBUG: Print subscription message being sent
-                                    println!("[Coinbase Scraper {}] Sending subscribe: {}", config.node_id, json);
                                     let _ = sender.send(WsMessage::Text(json.clone())).await;
                                     config.network_metrics.record_sent(json.len() as u64);
                                 }

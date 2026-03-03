@@ -55,7 +55,11 @@ export async function createDemoNodes(): Promise<void> {
 
   // --- 2. Polymarket Market Node ---
   const polymarketId = 'demo-polymarket' as NodeId;
-  const polyMetadata = { autoTrade: false };
+  const polyMetadata = { 
+    autoTrade: false,
+    market_id: 'TRUMPWIN',
+    token_ids: ['67430193937421313378757728516616366410435441098528733783944476455755027579805'],
+  };
   const polymarketNode = {
     id: polymarketId,
     node_type: { Market: MarketType.Polymarket } as NodeType,

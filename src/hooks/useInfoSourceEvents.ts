@@ -14,8 +14,26 @@
 //       → Propagation to connected Market nodes
 // ============================================================================
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useStore, type StoreState } from '../store';
+
+type OrderbookLevel = {
+  price: number;
+  size: number;
+  order_count?: number;
+};
+
+type OrderbookUpdate = {
+  market_id: string;
+  platform: string;
+  bids: OrderbookLevel[];
+  asks: OrderbookLevel[];
+  timestamp: number;
+  sequence: number;
+  last_price?: number;
+  last_size?: number;
+};
 
 /**
  * Hook that subscribes to the global 'infosource:update' Tauri event.
@@ -85,6 +103,7 @@ export function useInfoSourceEvents(): void {
             },
           };
 
+          const currentLatency = currentMetadata.quality?.avgLatency ?? 0;
           updateNodeMetadata(payload.nodeId, {
             ...currentMetadata,
             lastData: {
@@ -95,7 +114,7 @@ export function useInfoSourceEvents(): void {
             quality: {
               ...(currentMetadata.quality || {}),
               successRate: 1.0,
-              avgLatency: 0,
+              avgLatency: currentLatency,
               lastError: undefined,
             },
           });
@@ -252,4 +271,175 @@ export function useNodeQualityMetrics(): void {
 
     return () => clearInterval(updateInterval);
   }, [updateNodeMetadata]);
+}
+
+/**
+ * Hook that subscribes to the global 'orderbook:update' Tauri event.
+ * 
+ * When orderbook updates arrive from the backend WebSocket connections
+ * (for Polymarket/Kalshi markets), this hook:
+ * 1. Finds the market node that corresponds to the market_id
+ * 2. Updates the node's metadata with marketState (lastPrice, bestBid, bestAsk)
+ * 
+ * This enables the market node to display ticker/price values on the canvas.
+ */
+export function useMarketOrderbookEvents(): void {
+  const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const setup = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+
+        unlisten = await listen<OrderbookUpdate>('orderbook:update', (event) => {
+          const update = event.payload;
+          
+          console.log('[Global] Received orderbook:update for market:', update.market_id);
+
+          const { nodes } = useStore.getState();
+          
+          const marketNode = Object.values(nodes).find((node) => {
+            if (!node?.node_type || !('Market' in node.node_type)) return false;
+            
+            const meta = node.metadata as Record<string, any> | undefined;
+            const nodeMarketId = meta?.marketId || meta?.market_id;
+            
+            return nodeMarketId === update.market_id || 
+                   node.id === update.market_id ||
+                   (meta?.token_ids && meta.token_ids.includes(update.market_id));
+          });
+
+          if (!marketNode) {
+            return;
+          }
+
+          const currentMetadata = (marketNode.metadata as Record<string, any>) || {};
+          
+          const bestBid = update.bids?.[0]?.price;
+          const bestAsk = update.asks?.[0]?.price;
+          const lastPrice = update.last_price || bestBid || bestAsk;
+
+          updateNodeMetadata(marketNode.id, {
+            ...currentMetadata,
+            status: 'live',
+            marketState: {
+              status: 'open',
+              bestBid: bestBid ?? 0,
+              bestAsk: bestAsk ?? 0,
+              lastPrice: lastPrice ?? 0,
+              volume24h: 0,
+            },
+            lastData: {
+              timestamp: update.timestamp,
+              value: lastPrice,
+            },
+          });
+        });
+
+        console.log('[Global] orderbook:update listener registered');
+      } catch (error) {
+        console.warn('[Global] Failed to setup orderbook:update listener:', error);
+      }
+    };
+
+    setup();
+    return () => {
+      unlisten?.();
+    };
+  }, [updateNodeMetadata]);
+}
+
+// ============================================================================
+// AUTO MARKET SUBSCRIPTION HOOK
+// ============================================================================
+
+/**
+ * Hook that automatically subscribes to orderbook WebSocket feeds for all
+ * market nodes. It watches the store for new market nodes and subscribes
+ * them when they appear.
+ *
+ * For Polymarket: uses subscribe_polymarket_market_cmd with token IDs
+ * For Kalshi: uses subscribe_kalshi_orderbook_auth_cmd (if credentials stored)
+ *             or subscribe_orderbook_cmd (public channels) as fallback
+ *
+ * Combined with useMarketOrderbookEvents (which routes incoming orderbook:update
+ * events to the correct node's metadata), this ensures market nodes always
+ * display live ticker data on the canvas.
+ *
+ * Should be called exactly once, in the root App component.
+ */
+export function useAutoMarketSubscriptions(): void {
+  const subscribedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    // Check for new market nodes every 2 seconds
+    const interval = setInterval(() => {
+      const { nodes } = useStore.getState();
+
+      Object.values(nodes).forEach(async (node) => {
+        if (!node?.node_type || !('Market' in node.node_type)) return;
+        if (subscribedRef.current.has(node.id)) return;
+
+        // Mark as subscribed immediately to avoid double-subscription
+        subscribedRef.current.add(node.id);
+
+        const meta = node.metadata as Record<string, any> | undefined;
+        const marketId = meta?.market_id || meta?.marketId || '';
+        const tokenIds: string[] = meta?.token_ids || [];
+        const marketType = (node.node_type as { Market: string }).Market;
+
+        if (!marketId && tokenIds.length === 0) {
+          console.warn(`[AutoSub] Market node ${node.id} has no market_id or token_ids, skipping`);
+          return;
+        }
+
+        try {
+          if (marketType === 'Polymarket') {
+            // For Polymarket, use the ws/market endpoint with CLOB token IDs
+            const assetIds = tokenIds.length > 0 ? tokenIds : [marketId];
+            console.log(`[AutoSub] Subscribing Polymarket node ${node.id} with asset IDs:`, assetIds);
+            await invoke<string>('subscribe_polymarket_market_cmd', { assetIds });
+            console.log(`[AutoSub] Polymarket subscription started for node ${node.id}`);
+          } else if (marketType === 'Kalshi') {
+            // Try to get stored Kalshi credentials for authenticated subscription
+            try {
+              const creds = await invoke<{
+                platform: string;
+                has_key: boolean;
+                api_key: string | null;
+                private_key: string | null;
+                environment: string | null;
+              }>('get_api_key_cmd', { platform: 'Kalshi' });
+
+              if (creds && creds.api_key && creds.private_key) {
+                console.log(`[AutoSub] Subscribing Kalshi node ${node.id} with auth`);
+                await invoke<string>('subscribe_kalshi_orderbook_auth_cmd', {
+                  marketId,
+                  apiKey: creds.api_key,
+                  privateKeyPem: creds.private_key,
+                  demo: creds.environment === 'demo',
+                });
+              } else {
+                console.log(`[AutoSub] Subscribing Kalshi node ${node.id} (public)`);
+                await invoke<string>('subscribe_orderbook_cmd', { platform: 'kalshi', marketId });
+              }
+            } catch {
+              // No stored credentials, use public subscription
+              console.log(`[AutoSub] Subscribing Kalshi node ${node.id} (public, no creds)`);
+              await invoke<string>('subscribe_orderbook_cmd', { platform: 'kalshi', marketId });
+            }
+            console.log(`[AutoSub] Kalshi subscription started for node ${node.id}`);
+          }
+        } catch (e) {
+          console.error(`[AutoSub] Failed to subscribe market node ${node.id}:`, e);
+          // Remove from subscribed set so it can retry
+          subscribedRef.current.delete(node.id);
+        }
+      });
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, []);
 }

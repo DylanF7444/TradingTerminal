@@ -378,7 +378,7 @@ async fn run_polymarket_connection(market_id: &str, app_handle: &AppHandle) -> R
                     timestamp: Utc::now().timestamp_millis(),
                     msg_type: serde_json::from_str::<JsonValue>(&text)
                         .ok()
-                        .and_then(|v| v.get("type").and_then(|t| t.as_str().map(|s| s.to_string()))),
+                        .and_then(|v| v.get("event_type").or_else(|| v.get("type")).and_then(|t| t.as_str().map(|s| s.to_string()))),
                 };
                 if let Err(e) = app_handle.emit("orderbook:raw", &raw_msg) {
                     eprintln!("Failed to emit raw orderbook message: {}", e);
@@ -428,7 +428,7 @@ pub fn parse_polymarket_message(text: &str, market_id: &str) -> Result<Option<Or
     let value: JsonValue = serde_json::from_str(text)?;
     
     // Check message type
-    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let msg_type = value.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
     
     match msg_type {
         "book" | "book_update" => {
@@ -728,7 +728,7 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
                     timestamp: Utc::now().timestamp_millis(),
                     msg_type: serde_json::from_str::<JsonValue>(&text)
                         .ok()
-                        .and_then(|v| v.get("type").and_then(|t| t.as_str().map(|s| s.to_string()))),
+                        .and_then(|v| v.get("event_type").or_else(|| v.get("type")).and_then(|t| t.as_str().map(|s| s.to_string()))),
                 };
                 if let Err(e) = app_handle.emit("orderbook:raw", &raw_msg) {
                     eprintln!("Failed to emit raw orderbook message: {}", e);
@@ -788,7 +788,8 @@ fn parse_polymarket_market_message(text: &str, asset_ids: &[String]) -> Result<O
     };
     
     // Check for subscription confirmation
-    if value.get("type").and_then(|v| v.as_str()) == Some("subscribed") {
+    let msg_type = value.get("event_type").or_else(|| value.get("type")).and_then(|v| v.as_str());
+    if msg_type == Some("subscribed") {
         println!("Polymarket market subscription confirmed: {}", text);
         return Ok(None);
     }

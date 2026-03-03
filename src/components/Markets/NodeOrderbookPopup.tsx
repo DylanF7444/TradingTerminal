@@ -102,13 +102,13 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
   compact = true,
   className = '',
 }) => {
-  const { orderbook, status, subscribe, subscribeKalshiWithAuth } = useOrderbook();
+  const { orderbook, status, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth } = useOrderbook();
   const { rawMessages, clearMessages } = useRawOrderbookMessages(20, marketId);
   const { getKey } = useApiKeys();
   const [subscribed, setSubscribed] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('orderbook');
 
-  // Subscribe with credentials for Kalshi, or regular subscribe for Polymarket
+  // Subscribe with credentials for Kalshi, or Polymarket market subscription
   useEffect(() => {
     if (subscribed) return;
     
@@ -139,8 +139,10 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
           await subscribe(platform, marketId);
         }
       } else {
-        console.log('NodeOrderbookPopup: Subscribing to Polymarket for', marketId);
-        await subscribe(platform, marketId);
+        // Polymarket: use subscribePolymarketMarket with asset IDs
+        // The marketId should already be a CLOB token ID
+        console.log('NodeOrderbookPopup: Subscribing to Polymarket market with asset ID:', marketId);
+        await subscribePolymarketMarket([marketId]);
       }
       setSubscribed(true);
     };
@@ -150,7 +152,7 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
     return () => {
       // Cleanup handled by parent hook
     };
-  }, [platform, marketId, subscribe, subscribeKalshiWithAuth, getKey, subscribed]);
+  }, [platform, marketId, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth, getKey, subscribed]);
   
   // Get top levels
   const topBids = useMemo(() => {

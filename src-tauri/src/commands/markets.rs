@@ -867,7 +867,7 @@ async fn remove_credentials(_creds_id: &str) -> Result<(), String> {
 /// A search result returned from market search APIs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketSearchResult {
-    /// Unique market identifier (slug for Polymarket, ticker for Kalshi)
+    /// Unique market identifier (CLOB token ID for Polymarket, ticker for Kalshi)
     pub id: String,
     /// Human-readable market title/question
     pub title: String,
@@ -893,6 +893,13 @@ pub struct MarketSearchResult {
     pub platform: String,
     /// The slug or ticker to use when adding this market
     pub slug: String,
+    /// CLOB token IDs for Polymarket (needed for WebSocket orderbook subscription)
+    /// For binary markets: [YES_token_id, NO_token_id]
+    #[serde(default)]
+    pub token_ids: Vec<String>,
+    /// Condition ID for Polymarket (used for REST API queries)
+    #[serde(default)]
+    pub condition_id: Option<String>,
 }
 
 /// Search for markets on Polymarket or Kalshi
@@ -960,19 +967,24 @@ async fn search_polymarket(
             let active = item["active"].as_bool().unwrap_or(false);
             let closed = item["closed"].as_bool().unwrap_or(true);
 
-            // Extract token IDs for CLOB - needed for orderbook subscription
-            // The condition_id or clob_token_ids field contains the market identifier
-            let clob_token_ids = item["clobTokenIds"]
+            // Extract ALL token IDs for CLOB - needed for orderbook subscription
+            // The clobTokenIds field contains the asset IDs for the WebSocket
+            let clob_token_ids: Vec<String> = item["clobTokenIds"]
                 .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.as_str())
+                .map(|arr| arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect())
+                .unwrap_or_default();
+
+            // Condition ID for REST API queries
+            let condition_id_val = item["conditionId"]
+                .as_str()
                 .map(|s| s.to_string());
 
-            // Use condition_id as the primary market identifier for CLOB
-            let condition_id = item["conditionId"]
-                .as_str()
-                .map(|s| s.to_string())
-                .or(clob_token_ids)
+            // Use first CLOB token ID as primary identifier (needed for orderbook WS)
+            // Fall back to condition_id, then slug
+            let primary_id = clob_token_ids.first().cloned()
+                .or_else(|| condition_id_val.clone())
                 .unwrap_or_else(|| slug.clone());
 
             // Parse outcomes/prices
@@ -1009,7 +1021,7 @@ async fn search_polymarket(
             };
 
             Some(MarketSearchResult {
-                id: condition_id,
+                id: primary_id,
                 title: question,
                 description: if description.len() > 200 {
                     format!("{}...", &description[..200])
@@ -1026,6 +1038,8 @@ async fn search_polymarket(
                 end_date,
                 platform: "Polymarket".to_string(),
                 slug,
+                token_ids: clob_token_ids,
+                condition_id: condition_id_val,
             })
         })
         .collect();
@@ -1135,6 +1149,8 @@ async fn search_kalshi(
                         end_date: close_time,
                         platform: "Kalshi".to_string(),
                         slug: ticker,
+                        token_ids: vec![],
+                        condition_id: None,
                     });
 
                     if results.len() >= limit as usize {

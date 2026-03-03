@@ -313,7 +313,7 @@ export interface CanvasProps {
   onBackgroundClick: () => void;
   onViewportChange: (viewport: Viewport) => void;
   /** Callback to open orderbook overlay for market nodes */
-  onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => void;
+  onOpenOrderbook?: (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string, tokenIds?: string[]) => void;
   /** Callback to resize a node */
   onNodeResize?: (id: string, size: { width: number; height: number | null }) => void;
   /** Connection mode state */

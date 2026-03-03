@@ -96,7 +96,7 @@ import { transformNodeFromBackend } from './utils/nodeTransform';
 import { createDemoNodes } from './utils/demoData';
 
 // Extracted hooks
-import { useInfoSourceEvents, useNodeQualityMetrics } from './hooks/useInfoSourceEvents';
+import { useInfoSourceEvents, useNodeQualityMetrics, useMarketOrderbookEvents, useAutoMarketSubscriptions } from './hooks/useInfoSourceEvents';
 
 // Layout components
 import Canvas from './components/Canvas/Canvas';
@@ -189,6 +189,8 @@ function App(): ReactNode {
 
   useInfoSourceEvents();
   useNodeQualityMetrics();
+  useMarketOrderbookEvents();
+  useAutoMarketSubscriptions();
 
   // -------------------------------------------------------------------------
   // Shared add-node callback (eliminates duplication across layouts)
@@ -277,6 +279,7 @@ function App(): ReactNode {
     marketId: string;
     platform: 'polymarket' | 'kalshi';
     marketQuestion?: string;
+    tokenIds?: string[];
   } | null>(null);
   const [detailPanelTab, setDetailPanelTab] = useState<'details' | 'raw-stream' | 'stored-data'>('details');
   const [connectionMode, setConnectionMode] = useState(false);
@@ -393,8 +396,8 @@ function App(): ReactNode {
   );
 
   const handleOpenOrderbook = useCallback(
-    (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string) => {
-      setOrderbookOverlay({ marketId, platform, marketQuestion });
+    (marketId: string, platform: 'polymarket' | 'kalshi', marketQuestion?: string, tokenIds?: string[]) => {
+      setOrderbookOverlay({ marketId, platform, marketQuestion, tokenIds });
     },
     [],
   );
@@ -655,6 +658,7 @@ function App(): ReactNode {
           marketId={orderbookOverlay.marketId}
           platform={orderbookOverlay.platform}
           marketQuestion={orderbookOverlay.marketQuestion}
+          tokenIds={orderbookOverlay.tokenIds}
           onClose={handleCloseOrderbook}
         />
       )}

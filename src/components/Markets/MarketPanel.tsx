@@ -428,6 +428,7 @@ export default function MarketPanel({
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [marketId, setMarketId] = useState('');
   const [selectedMarketTitle, setSelectedMarketTitle] = useState('');
+  const [marketTokenIds, setMarketTokenIds] = useState<string[]>([]);
   const [marketInputMode, setMarketInputMode] = useState<'search' | 'manual'>('search');
   const [environment, setEnvironment] = useState<'demo' | 'production'>('demo');
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
@@ -457,6 +458,7 @@ export default function MarketPanel({
     setCredentials({});
     setMarketId('');
     setSelectedMarketTitle('');
+    setMarketTokenIds([]);
     setMarketInputMode('search');
     setLocalError(null);
     setSelectedPlatform(null);
@@ -600,7 +602,11 @@ export default function MarketPanel({
       const result = await addMarket({
         marketType: selectedPlatform,
         apiCredentials: credPayload,
-        marketConfig: { market_id: marketId.trim() }
+        marketConfig: { 
+          market_id: marketId.trim(),
+          question: selectedMarketTitle || undefined,
+          token_ids: marketTokenIds.length > 0 ? marketTokenIds : undefined,
+        }
       });
 
       if (result) {
@@ -876,9 +882,10 @@ export default function MarketPanel({
                       <div className="space-y-2">
                         <MarketBrowser
                           platform={selectedPlatform}
-                          onSelectMarket={(id, title) => {
+                          onSelectMarket={(id, title, tokenIds) => {
                             setMarketId(id);
                             setSelectedMarketTitle(title);
+                            setMarketTokenIds(tokenIds || []);
                             setLocalError(null);
                           }}
                         />

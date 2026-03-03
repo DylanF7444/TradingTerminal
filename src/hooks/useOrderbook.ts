@@ -180,6 +180,17 @@ export function useOrderbook(
         if (!mounted) return;
         
         const update = event.payload;
+        
+        // Filter updates by current market - ignore updates from other markets
+        // For Polymarket subscribePolymarketMarket, currentMarketRef is comma-joined asset IDs
+        const currentMarket = currentMarketRef.current;
+        if (currentMarket) {
+          const isMatch = update.market_id === currentMarket || 
+            currentMarket.includes(update.market_id) ||
+            update.market_id.includes(currentMarket);
+          if (!isMatch) return;
+        }
+        
         lastUpdateRef.current = Date.now();
         
         // Update status

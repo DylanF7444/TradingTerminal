@@ -341,7 +341,7 @@ async fn run_polymarket_consolidated(
                                      platform: "polymarket".to_string(),
                                      raw_message: text.clone(),
                                      timestamp: Utc::now().timestamp_millis(),
-                                     msg_type: value.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+msg_type: value.get("event_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                  };
                                  let _ = app_handle.emit("orderbook:raw", &raw_msg);
                                  

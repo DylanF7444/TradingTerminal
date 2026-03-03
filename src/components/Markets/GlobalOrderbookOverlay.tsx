@@ -36,6 +36,8 @@ interface GlobalOrderbookOverlayProps {
   platform: 'polymarket' | 'kalshi';
   /** Market question/description */
   marketQuestion?: string;
+  /** CLOB token IDs for Polymarket (asset IDs for WebSocket subscription) */
+  tokenIds?: string[];
   /** Callback when overlay is closed */
   onClose: () => void;
   /** Additional CSS classes */
@@ -86,21 +88,22 @@ export const GlobalOrderbookOverlay: React.FC<GlobalOrderbookOverlayProps> = ({
   marketId,
   platform,
   marketQuestion,
+  tokenIds,
   onClose,
   className = '',
 }) => {
-  const { orderbook, status, error, recentTrades, subscribe, subscribeKalshiWithAuth } = useOrderbook();
+  const { orderbook, status, error, recentTrades, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth } = useOrderbook();
   const { rawMessages, clearMessages } = useRawOrderbookMessages(100, marketId);
   const { getKey } = useApiKeys();
   const [subscribed, setSubscribed] = useState(false);
   const [activeTab, setActiveTab] = useState<ViewTab>('orderbook');
 
-  // Subscribe with credentials for Kalshi, or regular subscribe for Polymarket
+  // Subscribe with credentials for Kalshi, or Polymarket market subscription
   useEffect(() => {
     if (subscribed) return;
     
     const doSubscribe = async () => {
-      console.log('GlobalOrderbookOverlay: doSubscribe called for', platform, marketId);
+      console.log('GlobalOrderbookOverlay: doSubscribe called for', platform, marketId, tokenIds);
       
       if (platform === 'kalshi') {
         const creds = await getKey('Kalshi');
@@ -116,14 +119,17 @@ export const GlobalOrderbookOverlay: React.FC<GlobalOrderbookOverlayProps> = ({
           await subscribe(platform, marketId);
         }
       } else {
-        console.log('GlobalOrderbookOverlay: Subscribing to Polymarket');
-        await subscribe(platform, marketId);
+        // Polymarket: use subscribePolymarketMarket with CLOB token IDs (asset IDs)
+        // Prefer tokenIds from metadata, fall back to marketId
+        const assetId = tokenIds && tokenIds.length > 0 ? tokenIds[0] : marketId;
+        console.log('GlobalOrderbookOverlay: Subscribing to Polymarket market with asset ID:', assetId);
+        await subscribePolymarketMarket([assetId]);
       }
       setSubscribed(true);
     };
     
     doSubscribe();
-  }, [platform, marketId, subscribe, subscribeKalshiWithAuth, getKey, subscribed]);
+  }, [platform, marketId, tokenIds, subscribe, subscribePolymarketMarket, subscribeKalshiWithAuth, getKey, subscribed]);
 
   // Handle escape key to close
   useEffect(() => {

@@ -60,11 +60,15 @@ export interface MarketSearchResult {
   end_date: string | null;
   platform: string;
   slug: string;
+  /** CLOB token IDs for Polymarket (needed for WebSocket orderbook subscription) */
+  token_ids?: string[];
+  /** Condition ID for Polymarket REST API queries */
+  condition_id?: string | null;
 }
 
 interface MarketBrowserProps {
   platform: MarketType;
-  onSelectMarket: (id: string, title: string) => void;
+  onSelectMarket: (id: string, title: string, tokenIds?: string[]) => void;
   className?: string;
 }
 
@@ -145,9 +149,10 @@ export default function MarketBrowser({
   // Handle market selection
   const handleSelect = (result: MarketSearchResult) => {
     setSelectedId(result.id);
-    // Use slug for Polymarket, ticker for Kalshi
-    const marketIdentifier = platform === MarketType.Polymarket ? result.slug : result.id;
-    onSelectMarket(marketIdentifier, result.title);
+    // Use result.id for both platforms:
+    // - Polymarket: id is now the first CLOB token ID (needed for orderbook WS)
+    // - Kalshi: id is the ticker
+    onSelectMarket(result.id, result.title, result.token_ids);
   };
 
   // Format price as percentage

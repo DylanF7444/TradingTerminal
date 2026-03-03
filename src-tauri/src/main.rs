@@ -984,6 +984,18 @@ async fn add_market_cmd(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     
+    // Extract market question/title for display
+    let question = market_config.get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    
+    // Extract token_ids for Polymarket CLOB orderbook subscription
+    let token_ids: Vec<String> = market_config.get("token_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    
     // Create node in database
     let node = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
@@ -997,6 +1009,8 @@ async fn add_market_cmd(
                 "api_credentials": api_credentials,
                 "market_config": market_config,
                 "market_id": market_id,
+                "question": question,
+                "token_ids": token_ids,
                 "status": "connected",
                 "connected_at": chrono::Utc::now().to_rfc3339(),
             }),
