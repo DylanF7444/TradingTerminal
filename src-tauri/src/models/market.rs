@@ -401,6 +401,163 @@ pub struct TimeseriesPoint {
 /// Convenience alias for batch operations
 pub type DataPoint = TimeseriesPoint;
 
+// ============================================================================
+// MULTI-LEG / MULTI-OUTCOME ORDER TYPES
+// ============================================================================
+//
+// These types support multi-outcome (categorical) markets and multi-leg
+// order structures. Multi-outcome markets (e.g., "Who will be the Republican
+// nominee?") require selecting from multiple outcomes, not just YES/NO.
+//
+// Multi-leg orders coordinate execution across multiple markets or outcomes:
+//   - Single: backwards-compatible single-market order
+//   - OCO: One-Cancels-Other (first fill cancels remaining legs)
+//   - Bracket: entry + stop-loss + take-profit as atomic unit
+//   - Spread: simultaneous buy/sell across related outcomes
+//
+// ============================================================================
+
+/// Multi-leg order execution strategy
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MultiLegOrderType {
+    /// Standard single-market order (backwards compatible)
+    #[serde(rename = "single")]
+    Single,
+
+    /// One-Cancels-Other: first leg fill cancels remaining legs
+    #[serde(rename = "oco")]
+    OCO,
+
+    /// Bracket: entry + stop-loss + take-profit as atomic unit
+    #[serde(rename = "bracket")]
+    Bracket,
+
+    /// Spread: simultaneous buy/sell across related outcomes
+    #[serde(rename = "spread")]
+    Spread,
+}
+
+/// Single leg within a multi-leg order
+///
+/// Each leg targets a specific market and outcome with its own
+/// side, size, and optional price. The ratio field supports
+/// proportional sizing (e.g., 2:1 leg ratios for hedged positions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderLeg {
+    /// Target market ID for this leg
+    pub market_id: String,
+
+    /// Outcome ID for categorical markets (None for binary)
+    pub outcome_id: Option<String>,
+
+    /// Buy or sell direction for this leg
+    pub side: OrderSide,
+
+    /// Relative sizing ratio (e.g., 2 in a 2:1 spread)
+    pub ratio: f64,
+
+    /// Absolute contract size for this leg
+    pub size: f64,
+
+    /// Limit price for this leg (None for market orders)
+    pub price: Option<f64>,
+
+    /// Reference to node graph node for this leg's market
+    pub market_node_id: Option<String>,
+}
+
+/// Multi-leg order for coordinated execution across markets/outcomes
+///
+/// Wraps multiple OrderLeg entries with shared execution parameters.
+/// The executor processes legs according to the order_type strategy
+/// (parallel for spreads, sequential with cancellation for OCO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiLegOrder {
+    /// Unique order ID
+    pub id: String,
+
+    /// Array of order legs to execute
+    pub legs: Vec<OrderLeg>,
+
+    /// Execution strategy for the legs
+    pub order_type: MultiLegOrderType,
+
+    /// Time in force applies to all legs
+    pub time_in_force: TimeInForce,
+
+    /// Current status: "pending", "partial", "filled", "cancelled", "failed"
+    pub status: String,
+
+    /// Creation timestamp
+    pub created_at: i64,
+
+    /// Last update timestamp
+    pub updated_at: i64,
+
+    /// User-defined strategy label
+    pub strategy_label: Option<String>,
+
+    /// Total fees paid across all legs
+    pub total_fees: f64,
+
+    /// Associated strategy/position group ID
+    pub strategy_id: Option<String>,
+}
+
+/// Result of a multi-leg trade execution
+///
+/// Contains per-leg fill results and aggregate status. Partial fills
+/// are tracked per-leg so risk management can handle incomplete
+/// multi-leg positions appropriately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiLegTradeResult {
+    /// Overall multi-leg order ID
+    pub order_id: String,
+
+    /// Per-leg execution results
+    pub leg_results: Vec<LegTradeResult>,
+
+    /// Aggregate status: "filled", "partial", "failed"
+    pub status: String,
+
+    /// Total fees across all legs
+    pub total_fees: f64,
+
+    /// Total execution time in milliseconds
+    pub execution_time_ms: u64,
+
+    /// Strategy ID for position grouping
+    pub strategy_id: String,
+}
+
+/// Execution result for a single leg within a multi-leg order
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegTradeResult {
+    /// Market ID for this leg
+    pub market_id: String,
+
+    /// Outcome ID (for categorical markets)
+    pub outcome_id: Option<String>,
+
+    /// Trade direction
+    pub side: OrderSide,
+
+    /// Contracts requested
+    pub requested_size: f64,
+
+    /// Contracts actually filled
+    pub filled_size: f64,
+
+    /// Average execution price
+    pub avg_price: f64,
+
+    /// Fees paid for this leg
+    pub fees_paid: f64,
+
+    /// Leg status: "filled", "partial", "failed", "cancelled"
+    pub status: String,
+}
+
 impl Orderbook {
     /// Calculate best bid price
     pub fn best_bid(&self) -> Option<f64> {

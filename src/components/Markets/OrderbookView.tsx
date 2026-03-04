@@ -110,8 +110,11 @@ import { placeOrder } from '../../utils/api';
 
 // Types
 import type { Orderbook, Level, Market } from '../../types/markets';
-import { OrderSide, OrderType, TimeInForce } from '../../types/markets';
+import { OrderSide, OrderType, TimeInForce, OutcomeType } from '../../types/markets';
 import { MarketType } from '../../types/nodes';
+
+// Multi-leg order entry component (for categorical/multi-outcome markets)
+import MultiLegOrderEntry from './MultiLegOrderEntry';
 
 // =============================================================================
 // COMPONENT PROPS
@@ -423,6 +426,13 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
   
   /** Selected price level (for highlighting) */
   const [selectedLevel, setSelectedLevel] = useState<{ side: 'bid' | 'ask'; price: number } | null>(null);
+
+  /** Whether the multi-leg order entry is shown */
+  const [showMultiLeg, setShowMultiLeg] = useState(false);
+
+  /** Whether the current market supports multi-outcome trading */
+  const isCategorical = market.outcomeType === OutcomeType.Categorical
+    || (market.outcomes && market.outcomes.length > 0);
   
   // -------------------------------------------------------------------------
   // Real-time Orderbook from Central Store
@@ -636,14 +646,42 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
       {/* Quick Trading */}
       {enableTrading && !compact && (
         <div className="px-4 py-3 border-t border-gray-800 bg-gray-900/30">
-          <QuickOrderButtons
-            bestBid={bestBid}
-            bestAsk={bestAsk}
-            marketId={market.nodeId}
-            maxSize={1000} // TODO: calculate from balance
-            onOrderSubmitted={() => {}}
-            disabled={connectionStatus !== 'connected'}
-          />
+          {/* Multi-leg toggle for categorical markets */}
+          {isCategorical && (
+            <button
+              onClick={() => setShowMultiLeg(!showMultiLeg)}
+              className={`w-full mb-3 py-2 rounded text-xs font-medium transition-colors ${
+                showMultiLeg
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+              }`}
+            >
+              {showMultiLeg ? 'Hide Multi-Leg Order' : 'Multi-Leg Order (Categorical)'}
+            </button>
+          )}
+
+          {/* Multi-leg order entry panel */}
+          {showMultiLeg && (
+            <div className="mb-3">
+              <MultiLegOrderEntry
+                market={market}
+                onOrderPlaced={() => setShowMultiLeg(false)}
+                onClose={() => setShowMultiLeg(false)}
+              />
+            </div>
+          )}
+
+          {/* Standard quick order buttons (always available) */}
+          {!showMultiLeg && (
+            <QuickOrderButtons
+              bestBid={bestBid}
+              bestAsk={bestAsk}
+              marketId={market.nodeId}
+              maxSize={1000} // TODO: calculate from balance
+              onOrderSubmitted={() => {}}
+              disabled={connectionStatus !== 'connected'}
+            />
+          )}
           
           {existingPosition && (
             <div className="mt-3 p-2 bg-blue-900/30 rounded text-xs">

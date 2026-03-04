@@ -342,6 +342,13 @@ fn main() {
             get_positions_cmd,
             close_position_cmd,
             get_trade_history_cmd,
+
+            // Multi-leg trading commands (multi-outcome/categorical markets)
+            place_multi_leg_order_cmd,
+            get_multi_leg_positions_cmd,
+            close_multi_leg_position_cmd,
+            close_position_leg_cmd,
+            get_multi_leg_position_cmd,
             
             // Storage commands
             store_timeseries_cmd,
@@ -495,7 +502,12 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     
     // 5. Manage state (accessible to all commands via State<'_, AppState>)
     app.manage(state);
-    
+
+    // 5a. Initialize and manage trading state (multi-leg support)
+    let market_state_for_trading = markets::MarketState::new();
+    let trading_state = trading::TradingState::new(market_state_for_trading);
+    app.manage(trading_state);
+
     // 5b. Initialize and manage orderbook state
     let orderbook_state = orderbook::init_state(app.handle().clone(), ws_manager.clone());
     app.manage(orderbook_state);
@@ -1291,6 +1303,92 @@ async fn get_trade_history_cmd(
 ) -> Result<Vec<serde_json::Value>, String> {
     // TODO: Query trade history
     Ok(vec![])
+}
+
+// -------------------------------------------------------------------------
+// Multi-Leg Trading Commands
+// -------------------------------------------------------------------------
+//
+// These commands support multi-outcome (categorical) markets and coordinated
+// multi-leg order execution (OCO, bracket, spread). See the architecture
+// documentation in src-tauri/src/commands/trading.rs for details.
+// -------------------------------------------------------------------------
+
+/// Place a multi-leg order (OCO, bracket, spread, or single)
+///
+/// Frontend: await invoke('place_multi_leg_order_cmd', {
+///   legs: [{ market_id, side, size, ... }],
+///   orderType: 'spread',
+///   timeInForce: 'GTC',
+///   strategyLabel: 'My spread'
+/// })
+#[tauri::command]
+async fn place_multi_leg_order_cmd(
+    legs: Vec<trading::OrderLegInput>,
+    order_type: String,
+    time_in_force: Option<String>,
+    strategy_label: Option<String>,
+    state: State<'_, trading::TradingState>,
+) -> Result<crate::models::market::MultiLegTradeResult, String> {
+    trading::place_multi_leg_order(legs, order_type, time_in_force, strategy_label, state).await
+}
+
+/// Get multi-leg positions with optional filtering
+///
+/// Frontend: await invoke('get_multi_leg_positions_cmd', {
+///   statusFilter: 'open',
+///   strategyFilter: 'arbitrage'
+/// })
+#[tauri::command]
+async fn get_multi_leg_positions_cmd(
+    status_filter: Option<String>,
+    strategy_filter: Option<String>,
+    state: State<'_, trading::TradingState>,
+) -> Result<Vec<crate::models::position::MultiLegPosition>, String> {
+    trading::get_multi_leg_positions(status_filter, strategy_filter, state).await
+}
+
+/// Close all legs of a multi-leg position
+///
+/// Frontend: await invoke('close_multi_leg_position_cmd', {
+///   positionId: 'uuid',
+///   exitPrices: { 'leg-id': 0.55 }
+/// })
+#[tauri::command]
+async fn close_multi_leg_position_cmd(
+    position_id: String,
+    exit_prices: Option<std::collections::HashMap<String, f64>>,
+    state: State<'_, trading::TradingState>,
+) -> Result<crate::models::position::MultiLegPosition, String> {
+    trading::close_multi_leg_position(position_id, exit_prices, state).await
+}
+
+/// Close a single leg within a multi-leg position
+///
+/// Frontend: await invoke('close_position_leg_cmd', {
+///   positionId: 'uuid',
+///   legId: 'leg-uuid',
+///   exitPrice: 0.55
+/// })
+#[tauri::command]
+async fn close_position_leg_cmd(
+    position_id: String,
+    leg_id: String,
+    exit_price: Option<f64>,
+    state: State<'_, trading::TradingState>,
+) -> Result<crate::models::position::MultiLegPosition, String> {
+    trading::close_position_leg(position_id, leg_id, exit_price, state).await
+}
+
+/// Get a specific multi-leg position by ID
+///
+/// Frontend: await invoke('get_multi_leg_position_cmd', { positionId: 'uuid' })
+#[tauri::command]
+async fn get_multi_leg_position_cmd(
+    position_id: String,
+    state: State<'_, trading::TradingState>,
+) -> Result<crate::models::position::MultiLegPosition, String> {
+    trading::get_multi_leg_position(position_id, state).await
 }
 
 // -------------------------------------------------------------------------

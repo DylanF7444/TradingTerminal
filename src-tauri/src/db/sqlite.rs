@@ -468,6 +468,63 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         [],
     )?;
 
+    // =========================================================================
+    // MULTI-LEG POSITION TABLES
+    // =========================================================================
+    //
+    // These tables support multi-outcome (categorical) markets and multi-leg
+    // order structures. A multi-leg position groups related position legs
+    // under a shared strategy for combined P&L tracking.
+    //
+    // Schema:
+    //   multi_leg_positions: Parent position with strategy metadata
+    //   position_legs: Individual legs linked to parent position
+    //
+    // Relationships:
+    //   position_legs.position_id -> multi_leg_positions.id (1:N)
+    //   position_legs.market_id -> nodes.id (market node reference)
+    //
+    // =========================================================================
+
+    // Multi-leg positions table - groups related position legs under a strategy
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS multi_leg_positions (
+            id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL,
+            strategy_label TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            opened_at INTEGER NOT NULL,
+            closed_at INTEGER,
+            metadata JSON,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Position legs table - individual legs within a multi-leg position
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS position_legs (
+            leg_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            market_id TEXT NOT NULL,
+            outcome_id TEXT,
+            side TEXT NOT NULL,
+            size REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL,
+            current_price REAL NOT NULL,
+            fees REAL NOT NULL DEFAULT 0.0,
+            status TEXT NOT NULL DEFAULT 'open',
+            market_node_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (position_id) REFERENCES multi_leg_positions(id)
+        )",
+        [],
+    )?;
+
     // Create indexes for performance
     create_indexes(conn)?;
 
@@ -551,6 +608,38 @@ fn create_indexes(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_analyzer_chains_source
          ON analyzer_chains(source_analyzer_id)",
+        [],
+    )?;
+
+    // =========================================================================
+    // Multi-leg position indexes
+    // =========================================================================
+
+    // Index for open multi-leg positions
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_multi_leg_positions_status
+         ON multi_leg_positions(status) WHERE status = 'open'",
+        [],
+    )?;
+
+    // Index for multi-leg positions by strategy
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_multi_leg_positions_strategy
+         ON multi_leg_positions(strategy_id)",
+        [],
+    )?;
+
+    // Index for position legs by parent position
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_legs_position
+         ON position_legs(position_id)",
+        [],
+    )?;
+
+    // Index for position legs by market
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_legs_market
+         ON position_legs(market_id)",
         [],
     )?;
 

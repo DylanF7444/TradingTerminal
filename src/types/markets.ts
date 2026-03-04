@@ -1008,6 +1008,258 @@ export function isActiveMarket(market: Market): boolean {
 }
 
 // =============================================================================
+// MULTI-LEG / MULTI-OUTCOME MARKET TYPES
+// =============================================================================
+//
+// These types support multi-outcome (categorical) markets and multi-leg
+// order structures. Multi-outcome markets allow betting on specific
+// individuals or outcomes (e.g., "Who will be the Republican nominee?")
+// rather than binary YES/NO. Multi-leg orders allow executing coordinated
+// trades across multiple outcomes or markets simultaneously.
+//
+// Order Types:
+//   - single: Standard single-market order (backwards compatible)
+//   - oco: One-Cancels-Other (first fill cancels remaining legs)
+//   - bracket: Entry + stop-loss + take-profit as atomic unit
+//   - spread: Simultaneous buy/sell across related outcomes
+//
+// Position Tracking:
+//   - MultiLegPosition groups individual PositionLegs under a strategy
+//   - Combined P&L calculated as sum of all leg P&Ls minus total fees
+//   - Hedge ratio tracks net directional exposure across legs
+//
+// =============================================================================
+
+/**
+ * Multi-leg order type determines execution behavior across legs.
+ */
+export enum MultiLegOrderType {
+  /** Standard single-market order (backwards compatible) */
+  Single = 'single',
+
+  /** One-Cancels-Other: first leg fill cancels remaining legs */
+  OCO = 'oco',
+
+  /** Bracket: entry + stop-loss + take-profit as atomic unit */
+  Bracket = 'bracket',
+
+  /** Spread: simultaneous buy/sell across related outcomes */
+  Spread = 'spread',
+}
+
+/**
+ * Single leg within a multi-leg order.
+ *
+ * Each leg targets a specific market and outcome, with its own
+ * side, size, and optional price. The ratio field supports
+ * proportional sizing (e.g., 2:1 leg ratios for hedged positions).
+ */
+export interface OrderLeg {
+  /** Target market ID for this leg */
+  marketId: string;
+
+  /** Outcome ID for categorical markets (omit for binary) */
+  outcomeId?: string;
+
+  /** Buy or sell direction for this leg */
+  side: OrderSide;
+
+  /** Relative sizing ratio (e.g., 2 in a 2:1 spread) */
+  ratio: number;
+
+  /** Absolute contract size for this leg */
+  size: number;
+
+  /** Limit price for this leg (omit for market orders) */
+  price?: number;
+
+  /** Reference to node graph node for this leg's market */
+  marketNodeId?: string;
+}
+
+/**
+ * Multi-leg order structure for coordinated execution.
+ *
+ * Wraps multiple OrderLeg entries with shared execution parameters.
+ * The executor processes legs according to the orderType strategy
+ * (parallel for spreads, sequential with cancellation for OCO).
+ */
+export interface MultiLegOrder {
+  /** Unique order ID */
+  id: string;
+
+  /** Array of order legs to execute */
+  legs: OrderLeg[];
+
+  /** Execution strategy for the legs */
+  orderType: MultiLegOrderType;
+
+  /** Time in force applies to all legs */
+  timeInForce: TimeInForce;
+
+  /** Current status of the multi-leg order */
+  status: OrderStatus;
+
+  /** Creation timestamp */
+  createdAt: number;
+
+  /** Last update timestamp */
+  updatedAt: number;
+
+  /** Strategy label for grouping (user-defined) */
+  strategyLabel?: string;
+
+  /** Total fees paid across all legs */
+  totalFees: number;
+
+  /** Associated strategy/position group ID */
+  strategyId?: string;
+}
+
+/**
+ * Individual leg within a multi-leg position.
+ *
+ * Tracks the realized position state for one leg of a multi-leg
+ * strategy including its own P&L, fill price, and current value.
+ */
+export interface PositionLeg {
+  /** Leg identifier (unique within position) */
+  legId: string;
+
+  /** Market ID this leg is positioned in */
+  marketId: string;
+
+  /** Outcome ID for categorical markets */
+  outcomeId?: string;
+
+  /** Position direction */
+  side: 'buy' | 'sell';
+
+  /** Number of contracts held on this leg */
+  size: number;
+
+  /** Average entry price for this leg */
+  entryPrice: number;
+
+  /** Current market price for this leg */
+  currentPrice: number;
+
+  /** Unrealized P&L for this leg */
+  unrealizedPnl: number;
+
+  /** Realized P&L for this leg (if partially/fully closed) */
+  realizedPnl: number;
+
+  /** Fees paid for this specific leg */
+  fees: number;
+
+  /** Leg status */
+  status: PositionStatus;
+
+  /** Reference to node graph node */
+  marketNodeId?: string;
+}
+
+/**
+ * Multi-leg position groups individual legs under a strategy.
+ *
+ * Provides aggregate P&L, hedge ratio, and combined value metrics
+ * across all legs. Used for portfolio-level risk tracking and
+ * combined position views in the UI.
+ */
+export interface MultiLegPosition {
+  /** Unique position group ID */
+  id: string;
+
+  /** Strategy identifier for grouping related positions */
+  strategyId: string;
+
+  /** Individual position legs */
+  legs: PositionLeg[];
+
+  /** Strategy type classification */
+  strategyType: 'single' | 'multi-leg' | 'arbitrage';
+
+  /** User-defined strategy label */
+  strategyLabel?: string;
+
+  /** Combined entry value across all legs */
+  combinedEntryValue: number;
+
+  /** Combined current value across all legs */
+  combinedCurrentValue: number;
+
+  /** Aggregate unrealized P&L: sum(leg.unrealizedPnl) */
+  unrealizedPnl: number;
+
+  /** Aggregate realized P&L: sum(leg.realizedPnl) */
+  realizedPnl: number;
+
+  /** Total fees across all legs */
+  totalFees: number;
+
+  /**
+   * Hedge ratio: net directional exposure.
+   * 0.0 = fully hedged (delta-neutral)
+   * 1.0 = fully directional (single leg)
+   * Between 0-1 = partially hedged
+   */
+  hedgeRatio: number;
+
+  /** Position status (derived from leg statuses) */
+  status: PositionStatus;
+
+  /** Position creation timestamp */
+  openedAt: number;
+
+  /** Position close timestamp (if fully closed) */
+  closedAt?: number;
+}
+
+/**
+ * Parameters for placing a multi-leg order.
+ */
+export interface PlaceMultiLegOrderParams {
+  /** Array of legs defining the multi-leg order */
+  legs: OrderLeg[];
+
+  /** Multi-leg execution strategy */
+  orderType: MultiLegOrderType;
+
+  /** Time in force for all legs */
+  timeInForce: TimeInForce;
+
+  /** User-defined strategy label */
+  strategyLabel?: string;
+
+  /** Maximum total position size across all legs */
+  maxTotalSize?: number;
+}
+
+/**
+ * Outcome selector for categorical market order entry.
+ *
+ * Used by the UI to present available outcomes and let users
+ * build multi-leg orders by selecting individual outcomes.
+ */
+export interface OutcomeSelection {
+  /** Outcome definition from the market */
+  outcome: Outcome;
+
+  /** Whether this outcome is selected for ordering */
+  selected: boolean;
+
+  /** Order side for this outcome (if selected) */
+  side?: OrderSide;
+
+  /** Number of contracts for this outcome (if selected) */
+  size?: number;
+
+  /** Limit price for this outcome (if selected) */
+  price?: number;
+}
+
+// =============================================================================
 // CONSTANTS & ENUMERATIONS
 // =============================================================================
 

@@ -391,6 +391,9 @@ import {
   HistoryQueryOptions,
   PositionStatus,
   OrderStatus,
+  MultiLegPosition,
+  MultiLegOrderType,
+  PlaceMultiLegOrderParams,
 } from '../types/markets';
 
 // =============================================================================
@@ -546,6 +549,85 @@ export interface PositionsSlice {
   
   /** Check if daily loss limit reached */
   isDailyLimitReached: () => boolean;
+
+  // =========================================================================
+  // MULTI-LEG POSITION STATE & ACTIONS
+  // =========================================================================
+  //
+  // These fields support multi-outcome (categorical) markets and multi-leg
+  // order structures. Multi-leg positions group related position legs under
+  // a shared strategy for combined P&L tracking and coordinated management.
+  //
+  // State:
+  //   multiLegPositions - Active multi-leg positions
+  //   multiLegHistory - Closed multi-leg positions
+  //
+  // Actions:
+  //   placeMultiLegOrder - Place OCO, bracket, or spread orders
+  //   closeMultiLegPosition - Close all legs of a position
+  //   closePositionLeg - Close a single leg
+  //   syncMultiLegPositions - Reconcile with backend
+  //   updateMultiLegPrice - Update leg prices for P&L
+  //
+  // Selectors:
+  //   getMultiLegPositions - Get open multi-leg positions
+  //   getMultiLegPositionById - Get specific position
+  //   getTotalMultiLegPnl - Aggregate P&L across multi-leg
+  //   getMultiLegExposure - Exposure by strategy type
+  //
+  // =========================================================================
+
+  /** Open multi-leg positions grouped by strategy */
+  multiLegPositions: MultiLegPosition[];
+
+  /** Closed multi-leg positions (last 500 in memory) */
+  multiLegHistory: MultiLegPosition[];
+
+  // -------------------------------------------------------------------------
+  // Multi-Leg Actions
+  // -------------------------------------------------------------------------
+
+  /** Place a multi-leg order (OCO, bracket, spread) */
+  placeMultiLegOrder: (params: PlaceMultiLegOrderParams) => Promise<MultiLegPosition>;
+
+  /** Close all legs of a multi-leg position */
+  closeMultiLegPosition: (
+    positionId: string,
+    exitPrices?: Record<string, number>
+  ) => Promise<void>;
+
+  /** Close a single leg within a multi-leg position */
+  closePositionLeg: (
+    positionId: string,
+    legId: string,
+    exitPrice?: number
+  ) => Promise<void>;
+
+  /** Synchronize multi-leg positions with backend */
+  syncMultiLegPositions: () => Promise<void>;
+
+  /** Update price for a specific leg (from WebSocket feed) */
+  updateMultiLegPrice: (
+    positionId: string,
+    legId: string,
+    currentPrice: number
+  ) => void;
+
+  // -------------------------------------------------------------------------
+  // Multi-Leg Selectors
+  // -------------------------------------------------------------------------
+
+  /** Get all open multi-leg positions */
+  getMultiLegPositions: (strategyFilter?: string) => MultiLegPosition[];
+
+  /** Get a specific multi-leg position by ID */
+  getMultiLegPositionById: (id: string) => MultiLegPosition | undefined;
+
+  /** Calculate total unrealized P&L across all multi-leg positions */
+  getTotalMultiLegPnl: () => number;
+
+  /** Get exposure grouped by strategy type */
+  getMultiLegExposure: () => Record<string, number>;
 }
 
 // =============================================================================
@@ -575,6 +657,10 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
   },
   lastUpdate: Date.now(),
   metrics: null,
+
+  // Multi-leg initial state
+  multiLegPositions: [],
+  multiLegHistory: [],
 
   // -------------------------------------------------------------------------
   // Position Lifecycle Implementation
@@ -1111,6 +1197,9 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
       },
       lastUpdate: Date.now(),
       metrics: null,
+      // Reset multi-leg state
+      multiLegPositions: [],
+      multiLegHistory: [],
     });
   },
 
@@ -1188,5 +1277,346 @@ export const createPositionsSlice: StateCreator<PositionsSlice> = (set, get) => 
     const state = get();
     const dailyLossLimit = -1000; // Configurable: $1000 daily loss limit
     return state.dailyStats.realizedPnl <= dailyLossLimit;
+  },
+
+  // =========================================================================
+  // MULTI-LEG POSITION IMPLEMENTATION
+  // =========================================================================
+  //
+  // These actions and selectors support multi-outcome (categorical) markets
+  // and coordinated multi-leg trading strategies. They interact with the
+  // backend via Tauri commands:
+  //   - place_multi_leg_order_cmd
+  //   - close_multi_leg_position_cmd
+  //   - close_position_leg_cmd
+  //   - get_multi_leg_positions_cmd
+  //   - get_multi_leg_position_cmd
+  //
+  // =========================================================================
+
+  placeMultiLegOrder: async (params: PlaceMultiLegOrderParams) => {
+    const state = get();
+
+    // Validate sufficient balance for total order value
+    const totalValue = params.legs.reduce((sum, leg) => {
+      return sum + leg.size * (leg.price || 0);
+    }, 0);
+
+    // Check daily loss limit before placing
+    if (state.isDailyLimitReached()) {
+      throw new Error('Daily loss limit reached. Trading halted.');
+    }
+
+    try {
+      // Invoke backend multi-leg order command
+      const result = await invoke<any>('place_multi_leg_order_cmd', {
+        legs: params.legs.map((leg) => ({
+          market_id: leg.marketId,
+          outcome_id: leg.outcomeId,
+          side: leg.side === 'buy' ? 'buy' : 'sell',
+          ratio: leg.ratio,
+          size: leg.size,
+          price: leg.price,
+          market_node_id: leg.marketNodeId,
+        })),
+        orderType: params.orderType,
+        timeInForce: params.timeInForce,
+        strategyLabel: params.strategyLabel,
+      });
+
+      // Construct multi-leg position from result
+      const mlPosition: MultiLegPosition = {
+        id: result.order_id || `mlp-${Date.now()}`,
+        strategyId: result.strategy_id || `strategy-${Date.now()}`,
+        legs: (result.leg_results || [])
+          .filter((r: any) => r.status === 'filled' || r.status === 'partial')
+          .map((r: any, i: number) => ({
+            legId: `leg-${Date.now()}-${i}`,
+            marketId: r.market_id,
+            outcomeId: r.outcome_id,
+            side: r.side === 'Buy' ? 'buy' : 'sell',
+            size: r.filled_size,
+            entryPrice: r.avg_price,
+            currentPrice: r.avg_price,
+            unrealizedPnl: -r.fees_paid,
+            realizedPnl: 0,
+            fees: r.fees_paid,
+            status: 'open' as PositionStatus,
+            marketNodeId: params.legs[i]?.marketNodeId,
+          })),
+        strategyType: params.orderType === MultiLegOrderType.Single
+          ? 'single'
+          : params.orderType === MultiLegOrderType.Spread
+            ? 'arbitrage'
+            : 'multi-leg',
+        strategyLabel: params.strategyLabel,
+        combinedEntryValue: 0,
+        combinedCurrentValue: 0,
+        unrealizedPnl: 0,
+        realizedPnl: 0,
+        totalFees: result.total_fees || 0,
+        hedgeRatio: 1.0,
+        status: 'open' as PositionStatus,
+        openedAt: Date.now(),
+      };
+
+      // Calculate initial combined values
+      mlPosition.combinedEntryValue = mlPosition.legs.reduce(
+        (sum, leg) => sum + leg.entryPrice * leg.size, 0
+      );
+      mlPosition.combinedCurrentValue = mlPosition.combinedEntryValue;
+      mlPosition.unrealizedPnl = -mlPosition.totalFees;
+
+      // Calculate initial hedge ratio
+      let netExposure = 0;
+      let grossExposure = 0;
+      mlPosition.legs.forEach((leg) => {
+        const value = leg.currentPrice * leg.size;
+        netExposure += leg.side === 'buy' ? value : -value;
+        grossExposure += value;
+      });
+      mlPosition.hedgeRatio = grossExposure > 0
+        ? Math.abs(netExposure) / grossExposure
+        : 1.0;
+
+      // Add to state
+      set((state) => ({
+        multiLegPositions: [...state.multiLegPositions, mlPosition],
+        dailyStats: {
+          ...state.dailyStats,
+          trades: state.dailyStats.trades + 1,
+          volume: state.dailyStats.volume + totalValue,
+          fees: state.dailyStats.fees + mlPosition.totalFees,
+        },
+        lastUpdate: Date.now(),
+      }));
+
+      return mlPosition;
+    } catch (error) {
+      console.error('Failed to place multi-leg order:', error);
+      throw error;
+    }
+  },
+
+  closeMultiLegPosition: async (
+    positionId: string,
+    exitPrices?: Record<string, number>
+  ) => {
+    const state = get();
+    const position = state.multiLegPositions.find((p) => p.id === positionId);
+
+    if (!position) {
+      throw new Error(`Multi-leg position ${positionId} not found`);
+    }
+
+    if (position.status !== 'open') {
+      throw new Error(`Cannot close position with status ${position.status}`);
+    }
+
+    try {
+      // Invoke backend close command
+      await invoke<MultiLegPosition>(
+        'close_multi_leg_position_cmd',
+        { positionId, exitPrices }
+      );
+
+      // Move to history and update state
+      set((state) => {
+        const closedPosition = {
+          ...position,
+          status: 'closed' as PositionStatus,
+          closedAt: Date.now(),
+          legs: position.legs.map((leg) => ({
+            ...leg,
+            status: 'closed' as PositionStatus,
+            currentPrice: exitPrices?.[leg.legId] || leg.currentPrice,
+          })),
+        };
+
+        // Recalculate realized P&L
+        closedPosition.realizedPnl = closedPosition.legs.reduce((sum, leg) => {
+          const priceDiff = (exitPrices?.[leg.legId] || leg.currentPrice) - leg.entryPrice;
+          const direction = leg.side === 'buy' ? 1 : -1;
+          return sum + (priceDiff * leg.size * direction) - leg.fees;
+        }, 0);
+
+        return {
+          multiLegPositions: state.multiLegPositions.filter(
+            (p) => p.id !== positionId
+          ),
+          multiLegHistory: [closedPosition, ...state.multiLegHistory].slice(0, 500),
+          dailyStats: {
+            ...state.dailyStats,
+            realizedPnl: state.dailyStats.realizedPnl + closedPosition.realizedPnl,
+          },
+          lastUpdate: Date.now(),
+        };
+      });
+    } catch (error) {
+      console.error('Failed to close multi-leg position:', error);
+      throw error;
+    }
+  },
+
+  closePositionLeg: async (
+    positionId: string,
+    legId: string,
+    exitPrice?: number
+  ) => {
+    try {
+      // Invoke backend to close individual leg
+      await invoke<MultiLegPosition>(
+        'close_position_leg_cmd',
+        { positionId, legId, exitPrice }
+      );
+
+      set((state) => ({
+        multiLegPositions: state.multiLegPositions.map((p) => {
+          if (p.id !== positionId) return p;
+
+          const updatedLegs = p.legs.map((leg) => {
+            if (leg.legId !== legId) return leg;
+            const finalPrice = exitPrice || leg.currentPrice;
+            const priceDiff = finalPrice - leg.entryPrice;
+            const direction = leg.side === 'buy' ? 1 : -1;
+            return {
+              ...leg,
+              currentPrice: finalPrice,
+              realizedPnl: (priceDiff * leg.size * direction) - leg.fees,
+              unrealizedPnl: 0,
+              status: 'closed' as PositionStatus,
+            };
+          });
+
+          // Check if all legs are now closed
+          const allClosed = updatedLegs.every(
+            (leg) => leg.status === 'closed'
+          );
+
+          // Recalculate combined metrics
+          const unrealizedPnl = updatedLegs
+            .filter((l) => l.status === 'open')
+            .reduce((sum, l) => sum + l.unrealizedPnl, 0);
+          const realizedPnl = updatedLegs
+            .filter((l) => l.status === 'closed')
+            .reduce((sum, l) => sum + l.realizedPnl, 0);
+
+          return {
+            ...p,
+            legs: updatedLegs,
+            status: allClosed ? ('closed' as PositionStatus) : p.status,
+            closedAt: allClosed ? Date.now() : undefined,
+            unrealizedPnl,
+            realizedPnl,
+          };
+        }),
+        lastUpdate: Date.now(),
+      }));
+    } catch (error) {
+      console.error('Failed to close position leg:', error);
+      throw error;
+    }
+  },
+
+  syncMultiLegPositions: async () => {
+    try {
+      const positions = await invoke<MultiLegPosition[]>(
+        'get_multi_leg_positions_cmd',
+        { statusFilter: 'open' }
+      );
+
+      set({
+        multiLegPositions: positions,
+        lastUpdate: Date.now(),
+      });
+    } catch (error) {
+      console.error('Failed to sync multi-leg positions:', error);
+    }
+  },
+
+  updateMultiLegPrice: (
+    positionId: string,
+    legId: string,
+    currentPrice: number
+  ) => {
+    set((state) => ({
+      multiLegPositions: state.multiLegPositions.map((p) => {
+        if (p.id !== positionId) return p;
+
+        const updatedLegs = p.legs.map((leg) => {
+          if (leg.legId !== legId || leg.status !== 'open') return leg;
+          const priceDiff = currentPrice - leg.entryPrice;
+          const direction = leg.side === 'buy' ? 1 : -1;
+          return {
+            ...leg,
+            currentPrice,
+            unrealizedPnl: (priceDiff * leg.size * direction) - leg.fees,
+          };
+        });
+
+        // Recalculate aggregate metrics
+        const combinedCurrentValue = updatedLegs.reduce(
+          (sum, l) => sum + l.currentPrice * l.size, 0
+        );
+        const unrealizedPnl = updatedLegs
+          .filter((l) => l.status === 'open')
+          .reduce((sum, l) => sum + l.unrealizedPnl, 0);
+
+        // Recalculate hedge ratio
+        let netExposure = 0;
+        let grossExposure = 0;
+        updatedLegs.forEach((leg) => {
+          if (leg.status !== 'open') return;
+          const value = leg.currentPrice * leg.size;
+          netExposure += leg.side === 'buy' ? value : -value;
+          grossExposure += value;
+        });
+        const hedgeRatio = grossExposure > 0
+          ? Math.abs(netExposure) / grossExposure
+          : 1.0;
+
+        return {
+          ...p,
+          legs: updatedLegs,
+          combinedCurrentValue,
+          unrealizedPnl,
+          hedgeRatio,
+        };
+      }),
+      lastUpdate: Date.now(),
+    }));
+  },
+
+  // -------------------------------------------------------------------------
+  // Multi-Leg Selectors
+  // -------------------------------------------------------------------------
+
+  getMultiLegPositions: (strategyFilter?: string) => {
+    const positions = get().multiLegPositions;
+    if (!strategyFilter) return positions;
+    return positions.filter(
+      (p) => p.strategyType === strategyFilter
+    );
+  },
+
+  getMultiLegPositionById: (id: string) => {
+    return get().multiLegPositions.find((p) => p.id === id);
+  },
+
+  getTotalMultiLegPnl: () => {
+    return get().multiLegPositions.reduce(
+      (sum, p) => sum + p.unrealizedPnl, 0
+    );
+  },
+
+  getMultiLegExposure: () => {
+    const exposure: Record<string, number> = {};
+    get().multiLegPositions.forEach((p) => {
+      const value = p.legs.reduce(
+        (sum, leg) => sum + leg.currentPrice * leg.size, 0
+      );
+      exposure[p.strategyType] = (exposure[p.strategyType] || 0) + value;
+    });
+    return exposure;
   },
 });

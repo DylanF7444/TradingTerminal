@@ -11,8 +11,13 @@ use crate::commands::markets::MarketState;
 use crate::models::market::{OrderType, OrderSide};
 use crate::models::node::MarketType;
 use crate::models::position::Position;
+use crate::models::position::MultiLegPosition;
+use crate::models::market::{
+    MultiLegOrder, MultiLegOrderType, MultiLegTradeResult,
+    OrderLeg as MarketOrderLeg,
+};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
@@ -135,11 +140,13 @@ type TradeCommand = (
 /// Trading state
 pub struct TradingState {
     pub positions: Arc<RwLock<HashMap<String, Position>>>,
+    /// Multi-leg positions grouped by strategy
+    pub multi_leg_positions: Arc<RwLock<HashMap<String, MultiLegPosition>>>,
     pub balance_cache: Arc<Mutex<HashMap<String, CachedBalance>>>,
     pub risk_config: Arc<RwLock<RiskConfig>>,
     pub order_tx: mpsc::Sender<TradeCommand>,
     pub daily_pnl: Arc<Mutex<f64>>,
-    _order_processor: Arc<tokio::task::JoinHandle<()>>,
+    _order_processor: Arc<tauri::async_runtime::JoinHandle<()>>,
 }
 
 impl TradingState {
@@ -147,9 +154,9 @@ impl TradingState {
         let (tx, mut rx) = mpsc::channel::<TradeCommand>(100);
         let positions = Arc::new(RwLock::new(HashMap::new()));
         let positions_clone = positions.clone();
-        
+
         // Spawn order processing task (sequential execution guarantee)
-        let processor = tokio::spawn(async move {
+        let processor = tauri::async_runtime::spawn(async move {
             while let Some((market_id, platform, side, size, order_type, idempotency_key, response_tx)) = rx.recv().await {
                 process_trade_command(
                     (market_id, platform, side, size, order_type, idempotency_key, response_tx),
@@ -158,9 +165,10 @@ impl TradingState {
                 // response_tx is moved into process_trade_command and sent from there
             }
         });
-        
+
         Self {
             positions,
+            multi_leg_positions: Arc::new(RwLock::new(HashMap::new())),
             balance_cache: Arc::new(Mutex::new(HashMap::new())),
             risk_config: Arc::new(RwLock::new(RiskConfig::default())),
             order_tx: tx,
@@ -555,18 +563,300 @@ async fn update_error_counter(state: State<'_, TradingState>, is_error: bool) {
 }
 
 // ============================================================================
+// MULTI-LEG TRADING COMMANDS
+// ============================================================================
+//
+// These commands support multi-outcome (categorical) markets and multi-leg
+// order structures. They extend the single-leg trading commands above to
+// handle coordinated execution across multiple markets/outcomes.
+//
+// Command Summary:
+//   - place_multi_leg_order: Submit multi-leg order (OCO, bracket, spread)
+//   - get_multi_leg_positions: Query multi-leg positions with filtering
+//   - close_multi_leg_position: Close all legs of a multi-leg position
+//   - close_position_leg: Close a single leg within a multi-leg position
+//   - get_multi_leg_position: Get a specific multi-leg position by ID
+//
+// ============================================================================
+
+/// Input leg for the place_multi_leg_order command
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderLegInput {
+    pub market_id: String,
+    pub outcome_id: Option<String>,
+    pub side: String,       // "buy" or "sell"
+    pub ratio: f64,
+    pub size: f64,
+    pub price: Option<f64>,
+    pub market_node_id: Option<String>,
+}
+
+/// Place a multi-leg order (OCO, bracket, spread, or single)
+///
+/// Coordinates execution across multiple markets/outcomes according
+/// to the specified order type strategy. Returns per-leg results
+/// and creates a grouped multi-leg position for filled legs.
+///
+/// Frontend: await invoke('place_multi_leg_order', {
+///   legs: [{ market_id, side, size, ... }, ...],
+///   orderType: 'spread',
+///   timeInForce: 'GTC',
+///   strategyLabel: 'BTC hedged position'
+/// })
+#[tauri::command]
+pub async fn place_multi_leg_order(
+    legs: Vec<OrderLegInput>,
+    order_type: String,
+    time_in_force: Option<String>,
+    strategy_label: Option<String>,
+    state: State<'_, TradingState>,
+) -> Result<MultiLegTradeResult, String> {
+    // Check circuit breaker
+    {
+        let risk = state.risk_config.read().await;
+        if !risk.trading_enabled {
+            return Err(format!(
+                "Trading disabled: Circuit breaker tripped at {:?}",
+                risk.circuit_breaker_tripped_at
+            ));
+        }
+    }
+
+    // Validate at least one leg
+    if legs.is_empty() {
+        return Err("Multi-leg order must have at least one leg".to_string());
+    }
+
+    // Parse order type
+    let ml_order_type = match order_type.as_str() {
+        "single" => MultiLegOrderType::Single,
+        "oco" => MultiLegOrderType::OCO,
+        "bracket" => MultiLegOrderType::Bracket,
+        "spread" => MultiLegOrderType::Spread,
+        _ => return Err(format!("Unknown multi-leg order type: {}", order_type)),
+    };
+
+    // Parse time in force
+    let tif = match time_in_force.as_deref().unwrap_or("GTC") {
+        "GTC" => crate::models::market::TimeInForce::GTC,
+        "GTT" => crate::models::market::TimeInForce::GTT,
+        "IOC" => crate::models::market::TimeInForce::IOC,
+        "FOK" => crate::models::market::TimeInForce::FOK,
+        _ => crate::models::market::TimeInForce::GTC,
+    };
+
+    // Convert input legs to model legs
+    let order_legs: Vec<MarketOrderLeg> = legs.iter().map(|l| {
+        let side = match l.side.as_str() {
+            "sell" => OrderSide::Sell,
+            _ => OrderSide::Buy,
+        };
+        MarketOrderLeg {
+            market_id: l.market_id.clone(),
+            outcome_id: l.outcome_id.clone(),
+            side,
+            ratio: l.ratio,
+            size: l.size,
+            price: l.price,
+            market_node_id: l.market_node_id.clone(),
+        }
+    }).collect();
+
+    // Check total size across all legs
+    let total_size: f64 = order_legs.iter().map(|l| l.size).sum();
+    if total_size > MAX_ORDER_SIZE as f64 {
+        return Err(format!(
+            "Total size across legs ({}) exceeds max ({})",
+            total_size, MAX_ORDER_SIZE
+        ));
+    }
+
+    // Construct the multi-leg order
+    let strategy_id = Uuid::new_v4().to_string();
+    let now = Utc::now().timestamp();
+    let ml_order = MultiLegOrder {
+        id: Uuid::new_v4().to_string(),
+        legs: order_legs,
+        order_type: ml_order_type,
+        time_in_force: tif,
+        status: "pending".to_string(),
+        created_at: now,
+        updated_at: now,
+        strategy_label,
+        total_fees: 0.0,
+        strategy_id: Some(strategy_id),
+    };
+
+    // Execute via the multi-leg executor
+    let result = crate::services::executor::execute_multi_leg_order(
+        &ml_order,
+        state.positions.clone(),
+        state.multi_leg_positions.clone(),
+    ).await?;
+
+    Ok(result)
+}
+
+/// Get multi-leg positions with optional filtering
+///
+/// Returns all multi-leg positions, optionally filtered by status
+/// and/or strategy type. Each position includes all its constituent
+/// legs with individual and aggregate P&L metrics.
+///
+/// Frontend: await invoke('get_multi_leg_positions', {
+///   statusFilter: 'open',
+///   strategyFilter: 'arbitrage'
+/// })
+#[tauri::command]
+pub async fn get_multi_leg_positions(
+    status_filter: Option<String>,
+    strategy_filter: Option<String>,
+    state: State<'_, TradingState>,
+) -> Result<Vec<MultiLegPosition>, String> {
+    let positions = state.multi_leg_positions.read().await;
+    let result: Vec<MultiLegPosition> = positions
+        .values()
+        .filter(|p| {
+            let status_match = match &status_filter {
+                Some(s) => p.status.to_lowercase() == s.to_lowercase(),
+                None => p.status == "open",
+            };
+            let strategy_match = match &strategy_filter {
+                Some(s) => p.strategy_type.to_lowercase() == s.to_lowercase(),
+                None => true,
+            };
+            status_match && strategy_match
+        })
+        .cloned()
+        .collect();
+
+    Ok(result)
+}
+
+/// Close all legs of a multi-leg position
+///
+/// Iterates through all open legs and closes them at their current
+/// market price (or specified exit price). Updates the multi-leg
+/// position status to "closed" when all legs are closed.
+///
+/// Frontend: await invoke('close_multi_leg_position', {
+///   positionId: 'uuid',
+///   exitPrices: { 'leg-uuid-1': 0.55, 'leg-uuid-2': 0.45 }
+/// })
+#[tauri::command]
+pub async fn close_multi_leg_position(
+    position_id: String,
+    exit_prices: Option<HashMap<String, f64>>,
+    state: State<'_, TradingState>,
+) -> Result<MultiLegPosition, String> {
+    let mut positions = state.multi_leg_positions.write().await;
+    let position = positions.get_mut(&position_id)
+        .ok_or_else(|| format!("Multi-leg position not found: {}", position_id))?;
+
+    if position.status != "open" && position.status != "partial" {
+        return Err("Position already closed".to_string());
+    }
+
+    // Close each open leg
+    let exit_prices = exit_prices.unwrap_or_default();
+    for leg in &mut position.legs {
+        if leg.status == "open" {
+            // Use specified exit price or current price
+            let exit_price = exit_prices.get(&leg.leg_id)
+                .copied()
+                .unwrap_or(leg.current_price);
+            let exit_fee = exit_price * leg.size * 0.02; // 2% exit fee estimate
+            leg.exit_price = Some(exit_price);
+            leg.fees += exit_fee;
+            leg.status = "closed".to_string();
+        }
+    }
+
+    // Update position status
+    position.status = "closed".to_string();
+    position.closed_at = Some(Utc::now().timestamp());
+
+    Ok(position.clone())
+}
+
+/// Close a single leg within a multi-leg position
+///
+/// Closes only the specified leg, leaving other legs open. Used for
+/// partial position management (e.g., closing losing leg of a spread
+/// while keeping the winning leg).
+///
+/// Frontend: await invoke('close_position_leg', {
+///   positionId: 'uuid',
+///   legId: 'leg-uuid',
+///   exitPrice: 0.55
+/// })
+#[tauri::command]
+pub async fn close_position_leg(
+    position_id: String,
+    leg_id: String,
+    exit_price: Option<f64>,
+    state: State<'_, TradingState>,
+) -> Result<MultiLegPosition, String> {
+    let mut positions = state.multi_leg_positions.write().await;
+    let position = positions.get_mut(&position_id)
+        .ok_or_else(|| format!("Multi-leg position not found: {}", position_id))?;
+
+    // Find the leg
+    let leg = position.legs.iter().find(|l| l.leg_id == leg_id)
+        .ok_or_else(|| format!("Leg not found: {}", leg_id))?;
+
+    if leg.status != "open" {
+        return Err(format!("Leg {} is already {}", leg_id, leg.status));
+    }
+
+    let final_exit_price = exit_price.unwrap_or(leg.current_price);
+    let exit_fee = final_exit_price * leg.size * 0.02;
+
+    // Close the specific leg (use the position-level method)
+    position.close_leg(&leg_id, final_exit_price, exit_fee);
+
+    Ok(position.clone())
+}
+
+/// Get a specific multi-leg position by ID
+///
+/// Returns the full multi-leg position with all legs and computed
+/// aggregate metrics (combined P&L, hedge ratio, etc.).
+///
+/// Frontend: await invoke('get_multi_leg_position', { positionId: 'uuid' })
+#[tauri::command]
+pub async fn get_multi_leg_position(
+    position_id: String,
+    state: State<'_, TradingState>,
+) -> Result<MultiLegPosition, String> {
+    let positions = state.multi_leg_positions.read().await;
+    positions.get(&position_id)
+        .cloned()
+        .ok_or_else(|| format!("Multi-leg position not found: {}", position_id))
+}
+
+// ============================================================================
 // SHUTDOWN HANDLER
 // ============================================================================
 
 pub async fn shutdown_trading(state: &TradingState) -> Result<(), String> {
     println!("Shutting down trading module...");
-    
+
+    // Persist open single-leg positions
     let positions = state.positions.read().await;
     for (id, pos) in positions.iter() {
         if pos.status == PositionStatus::OPEN {
             println!("Persisting open position {}", id);
         }
     }
-    
+
+    // Persist open multi-leg positions
+    let ml_positions = state.multi_leg_positions.read().await;
+    for (id, pos) in ml_positions.iter() {
+        if pos.status == "open" || pos.status == "partial" {
+            println!("Persisting open multi-leg position {} ({} legs)", id, pos.legs.len());
+        }
+    }
+
     Ok(())
 }
