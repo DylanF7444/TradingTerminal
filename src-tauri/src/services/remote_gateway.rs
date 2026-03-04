@@ -74,6 +74,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use tauri::{AppHandle, Emitter};
+use tauri::async_runtime::JoinHandle as TauriJoinHandle;
 
 use crate::models::remote::{
     RemoteSession, DeviceCredentials, RemoteStatus, RemoteCommand,
@@ -138,21 +139,13 @@ pub enum GatewayCommand {
 /// Holds the gateway task handle and command channel. Created once during
 /// app initialization and stored in Tauri managed state.
 pub struct RemoteConnectionManager {
-    /// Channel to send commands to the gateway task
     command_tx: mpsc::Sender<GatewayCommand>,
-    /// Whether the gateway is currently enabled
     enabled: Arc<AtomicBool>,
-    /// This device's unique identifier
     device_id: String,
-    /// Gateway task handle (for cleanup)
-    task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task_handle: Mutex<Option<TauriJoinHandle<()>>>,
 }
 
 impl RemoteConnectionManager {
-    /// Create a new RemoteConnectionManager and spawn the gateway task.
-    ///
-    /// The gateway task starts in disabled mode and waits for an Enable command.
-    /// It runs for the lifetime of the application.
     pub fn new(app_handle: AppHandle) -> Self {
         let device_id = generate_device_id();
         let enabled = Arc::new(AtomicBool::new(false));
@@ -173,7 +166,7 @@ impl RemoteConnectionManager {
             ws_write_tx: None,
         };
 
-        let task_handle = tokio::spawn(gateway_task(gateway_state, command_rx));
+        let task_handle = tauri::async_runtime::spawn(gateway_task(gateway_state, command_rx));
 
         Self {
             command_tx,
