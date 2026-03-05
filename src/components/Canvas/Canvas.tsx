@@ -795,8 +795,6 @@ export default function Canvas({
       
       // Delete or Backspace key
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNodeId) {
-        // Prevent default browser behavior (like going back in history)
-        e.preventDefault();
         // Only delete if we're not editing an input field
         const activeElement = document.activeElement;
         const isEditing = activeElement && (
@@ -805,6 +803,8 @@ export default function Canvas({
           (activeElement as HTMLElement).isContentEditable
         );
         if (!isEditing) {
+          // Prevent default browser behavior (like going back in history)
+          e.preventDefault();
           onNodeDelete(selectedNodeId);
         }
       }

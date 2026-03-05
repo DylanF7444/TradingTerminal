@@ -932,11 +932,13 @@ async fn search_polymarket(
     query: &str,
     limit: u32,
 ) -> Result<Vec<MarketSearchResult>, String> {
-    // Gamma API: GET /markets?closed=false&limit=N&_q=<query>
+    // Polymarket Gamma API doesn't support server-side text search via _q parameter.
+    // We need to fetch markets and filter client-side.
+    // Fetch more markets to ensure we have enough after filtering.
+    let fetch_limit = 200;
     let url = format!(
-        "https://gamma-api.polymarket.com/markets?closed=false&limit={}&_q={}",
-        limit,
-        urlencoding::encode(query)
+        "https://gamma-api.polymarket.com/markets?closed=false&limit={}",
+        fetch_limit
     );
 
     let resp = client
@@ -956,7 +958,24 @@ async fn search_polymarket(
         .await
         .map_err(|e| format!("Failed to parse Polymarket response: {}", e))?;
 
-    let results: Vec<MarketSearchResult> = data
+    // Filter markets by query (client-side filtering since API doesn't support it)
+    let query_lower = query.to_lowercase();
+    let filtered_data: Vec<JsonValue> = if query.is_empty() {
+        data
+    } else {
+        data.into_iter().filter(|item| {
+            let question = item["question"].as_str().unwrap_or("").to_lowercase();
+            let description = item["description"].as_str().unwrap_or("").to_lowercase();
+            let slug = item["slug"].as_str().unwrap_or("").to_lowercase();
+            let category = item["category"].as_str().unwrap_or("").to_lowercase();
+            question.contains(&query_lower) 
+                || description.contains(&query_lower) 
+                || slug.contains(&query_lower)
+                || category.contains(&query_lower)
+        }).collect()
+    };
+
+    let results: Vec<MarketSearchResult> = filtered_data
         .into_iter()
         .filter_map(|item| {
             let id = item["id"].as_str()?.to_string();
@@ -1042,6 +1061,7 @@ async fn search_polymarket(
                 condition_id: condition_id_val,
             })
         })
+        .take(limit as usize)
         .collect();
 
     Ok(results)
@@ -1053,11 +1073,14 @@ async fn search_kalshi(
     query: &str,
     limit: u32,
 ) -> Result<Vec<MarketSearchResult>, String> {
-    // Kalshi public API: GET /trade-api/v2/events with search
-    // If direct market search: GET /trade-api/v2/markets?status=open&limit=N
+    // Kalshi API: limit applies to events, not individual markets.
+    // Each event typically contains 1-3 markets, so we need many more events
+    // to get a decent number of markets. Fetch 100 events to ensure we
+    // have enough markets after filtering.
+    let fetch_events = 100;
     let events_url = format!(
         "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true&limit={}",
-        limit
+        fetch_events
     );
 
     let resp = client
