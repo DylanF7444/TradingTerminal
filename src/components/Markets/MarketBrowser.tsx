@@ -37,7 +37,7 @@
 // ============================================================================
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Search, Loader2, TrendingUp, BarChart3, Clock, Tag, AlertCircle, X } from 'lucide-react';
+import { Search, Loader2, TrendingUp, BarChart3, Clock, Tag, AlertCircle, X, ChevronDown } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType } from '../../types/nodes';
 
@@ -84,24 +84,35 @@ export default function MarketBrowser({
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<MarketSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [offset, setOffset] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
+  const PAGE_SIZE = 20;
   const platformName = platform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
 
-  // Debounced search
-  const performSearch = useCallback(
-    async (searchQuery: string) => {
+  // Core search function that handles both initial and paginated requests
+  const fetchResults = useCallback(
+    async (searchQuery: string, searchOffset: number, append: boolean) => {
       if (!searchQuery.trim()) {
         setResults([]);
         setHasSearched(false);
+        setHasMore(false);
+        setOffset(0);
         setError(null);
         return;
       }
 
-      setIsSearching(true);
+      if (append) {
+        setIsLoadingMore(true);
+      } else {
+        setIsSearching(true);
+      }
       setError(null);
       setHasSearched(true);
 
@@ -109,19 +120,48 @@ export default function MarketBrowser({
         const searchResults = await invoke<MarketSearchResult[]>('search_markets_cmd', {
           platform: platformName,
           query: searchQuery.trim(),
-          limit: 20,
+          limit: PAGE_SIZE,
+          offset: searchOffset,
         });
-        setResults(searchResults);
+
+        if (append) {
+          setResults((prev) => [...prev, ...searchResults]);
+        } else {
+          setResults(searchResults);
+        }
+
+        // If we got a full page, there are likely more results
+        setHasMore(searchResults.length >= PAGE_SIZE);
+        setOffset(searchOffset + searchResults.length);
       } catch (err) {
         console.error('Market search failed:', err);
         setError(typeof err === 'string' ? err : 'Search failed. Please try again.');
-        setResults([]);
+        if (!append) {
+          setResults([]);
+        }
       } finally {
         setIsSearching(false);
+        setIsLoadingMore(false);
       }
     },
     [platformName]
   );
+
+  // Initial search (reset pagination)
+  const performSearch = useCallback(
+    (searchQuery: string) => {
+      setOffset(0);
+      setHasMore(false);
+      fetchResults(searchQuery, 0, false);
+    },
+    [fetchResults]
+  );
+
+  // Load more results (append to existing)
+  const loadMore = useCallback(() => {
+    if (isLoadingMore || !hasMore) return;
+    fetchResults(query, offset, true);
+  }, [query, offset, isLoadingMore, hasMore, fetchResults]);
 
   // Handle input change with debounce
   const handleQueryChange = useCallback(
@@ -207,6 +247,8 @@ export default function MarketBrowser({
               setQuery('');
               setResults([]);
               setHasSearched(false);
+              setHasMore(false);
+              setOffset(0);
               setError(null);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
@@ -220,7 +262,7 @@ export default function MarketBrowser({
       </div>
 
       {/* Results */}
-      <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
+      <div ref={scrollRef} className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
         {error ? (
           <div className="px-4 py-6 text-center">
             <AlertCircle className="w-6 h-6 text-red-400 mx-auto mb-2" />
@@ -321,6 +363,27 @@ export default function MarketBrowser({
                 </div>
               </button>
             ))}
+
+            {/* Load More button */}
+            {hasMore && (
+              <button
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="w-full px-4 py-3 text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800/50 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isLoadingMore ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="w-4 h-4" />
+                    Load more markets
+                  </>
+                )}
+              </button>
+            )}
           </div>
         ) : hasSearched && !isSearching ? (
           <div className="px-4 py-8 text-center text-gray-500 text-sm">
@@ -338,7 +401,7 @@ export default function MarketBrowser({
       {/* Result count */}
       {results.length > 0 && (
         <p className="text-xs text-gray-600 text-right">
-          {results.length} market{results.length !== 1 ? 's' : ''} found
+          {results.length} market{results.length !== 1 ? 's' : ''} shown{hasMore ? ' — scroll for more' : ''}
         </p>
       )}
     </div>

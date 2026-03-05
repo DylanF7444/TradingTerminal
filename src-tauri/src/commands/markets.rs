@@ -906,10 +906,13 @@ pub struct MarketSearchResult {
 ///
 /// Polymarket: Uses the Gamma API (https://gamma-api.polymarket.com)
 /// Kalshi: Uses the public markets API (https://api.elections.kalshi.com/trade-api/v2)
+///
+/// Supports pagination via `limit` and `offset` parameters.
 pub async fn search_markets(
     platform: String,
     query: String,
     limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<Vec<MarketSearchResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -917,11 +920,12 @@ pub async fn search_markets(
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    let max_results = limit.unwrap_or(20).min(50);
+    let max_results = limit.unwrap_or(20).min(500);
+    let skip = offset.unwrap_or(0);
 
     match platform.as_str() {
-        "Polymarket" => search_polymarket(&client, &query, max_results).await,
-        "Kalshi" => search_kalshi(&client, &query, max_results).await,
+        "Polymarket" => search_polymarket(&client, &query, max_results, skip).await,
+        "Kalshi" => search_kalshi(&client, &query, max_results, skip).await,
         _ => Err(format!("Unknown platform: {}", platform)),
     }
 }
@@ -931,14 +935,15 @@ async fn search_polymarket(
     client: &reqwest::Client,
     query: &str,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<MarketSearchResult>, String> {
-    // Polymarket Gamma API doesn't support server-side text search via _q parameter.
-    // We need to fetch markets and filter client-side.
-    // Fetch more markets to ensure we have enough after filtering.
+    // Polymarket Gamma API supports sorting via 'order' and 'ascending' parameters.
+    // Sort by createdAt descending to get the newest markets first.
+    // Use offset for native API-level pagination.
     let fetch_limit = 200;
     let url = format!(
-        "https://gamma-api.polymarket.com/markets?closed=false&limit={}",
-        fetch_limit
+        "https://gamma-api.polymarket.com/markets?closed=false&limit={}&offset={}&order=createdAt&ascending=false",
+        fetch_limit, offset
     );
 
     let resp = client
@@ -1072,12 +1077,13 @@ async fn search_kalshi(
     client: &reqwest::Client,
     query: &str,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<MarketSearchResult>, String> {
     // Kalshi API: limit applies to events, not individual markets.
     // Each event typically contains 1-3 markets, so we need many more events
-    // to get a decent number of markets. Fetch 100 events to ensure we
-    // have enough markets after filtering.
-    let fetch_events = 100;
+    // to get a decent number of markets. Fetch enough events to cover offset + limit.
+    // Since Kalshi doesn't support market-level offset, we fetch more events and skip client-side.
+    let fetch_events = 200; // Fetch more to handle offset
     let events_url = format!(
         "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true&limit={}",
         fetch_events
@@ -1101,7 +1107,7 @@ async fn search_kalshi(
         .map_err(|e| format!("Failed to parse Kalshi response: {}", e))?;
 
     let query_lower = query.to_lowercase();
-    let mut results: Vec<MarketSearchResult> = Vec::new();
+    let mut all_matching: Vec<MarketSearchResult> = Vec::new();
 
     // Parse events and their nested markets
     if let Some(events) = data["events"].as_array() {
@@ -1158,7 +1164,7 @@ async fn search_kalshi(
                         title.clone()
                     };
 
-                    results.push(MarketSearchResult {
+                    all_matching.push(MarketSearchResult {
                         id: ticker.clone(),
                         title: display_title,
                         description: subtitle,
@@ -1175,18 +1181,17 @@ async fn search_kalshi(
                         token_ids: vec![],
                         condition_id: None,
                     });
-
-                    if results.len() >= limit as usize {
-                        break;
-                    }
                 }
-            }
-
-            if results.len() >= limit as usize {
-                break;
             }
         }
     }
+
+    // Apply client-side offset and limit (Kalshi doesn't support market-level pagination)
+    let results: Vec<MarketSearchResult> = all_matching
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
 
     Ok(results)
 }

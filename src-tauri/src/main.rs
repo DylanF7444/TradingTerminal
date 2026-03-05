@@ -1224,9 +1224,10 @@ async fn search_markets_cmd(
     platform: String,
     query: String,
     limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<Vec<commands::MarketSearchResult>, String> {
-    info!("Searching {} markets for: {}", platform, query);
-    markets::search_markets(platform, query, limit).await
+    info!("Searching {} markets for: {} (limit={:?}, offset={:?})", platform, query, limit, offset);
+    markets::search_markets(platform, query, limit, offset).await
 }
 
 // -------------------------------------------------------------------------
