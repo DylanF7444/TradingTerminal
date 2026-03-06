@@ -882,39 +882,42 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
 /// Parse a Polymarket market WebSocket message
 /// Handles both single JSON objects and arrays of objects (multi-asset book snapshots)
 fn parse_polymarket_market_message(text: &str, asset_ids: &[String]) -> Result<Option<OrderbookUpdate>> {
+    let updates = parse_polymarket_market_all(text, asset_ids)?;
+    Ok(updates.into_iter().next())
+}
+
+/// Parse a Polymarket market WebSocket message and return ALL updates
+/// (one per asset_id in the message). This is needed for array messages
+/// where Polymarket sends book snapshots for multiple outcomes (Yes/No).
+pub fn parse_polymarket_market_all(text: &str, asset_ids: &[String]) -> Result<Vec<OrderbookUpdate>> {
     // Try to parse as JSON
     let value: JsonValue = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => {
             // Not JSON, could be a control message
             println!("Non-JSON message from Polymarket market: {}", text);
-            return Ok(None);
+            return Ok(vec![]);
         }
     };
 
     // Handle JSON arrays: Polymarket sends book snapshots as an array of objects,
     // one per asset_id in the market (e.g., Yes/No outcomes).
-    // We find the first asset that matches our subscription and return its orderbook.
+    // Return ALL valid updates so both sides of a market get populated.
     if let Some(arr) = value.as_array() {
-        // Parse each element and find one matching our subscribed asset_ids
-        let mut best_update: Option<OrderbookUpdate> = None;
+        let mut updates = Vec::new();
         for item in arr {
             if let Ok(Some(update)) = parse_polymarket_market_single(item, asset_ids) {
-                // Prefer the update whose market_id matches one of our subscribed asset_ids
-                if asset_ids.iter().any(|id| id == &update.market_id) {
-                    return Ok(Some(update));
-                }
-                // Keep the first valid update as fallback
-                if best_update.is_none() {
-                    best_update = Some(update);
-                }
+                updates.push(update);
             }
         }
-        return Ok(best_update);
+        return Ok(updates);
     }
 
     // Single JSON object
-    parse_polymarket_market_single(&value, asset_ids)
+    match parse_polymarket_market_single(&value, asset_ids)? {
+        Some(update) => Ok(vec![update]),
+        None => Ok(vec![]),
+    }
 }
 
 /// Parse a single Polymarket market message object (not an array)

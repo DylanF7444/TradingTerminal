@@ -61,7 +61,7 @@ use chrono::Utc;
 use super::orderbook::{
     OrderbookUpdate, OrderbookLevel, RawWebSocketMessage,
     Platform, KalshiCredentials,
-    parse_polymarket_message, parse_kalshi_message,
+    parse_polymarket_market_all, parse_kalshi_message,
     sign_pss_text, load_private_key, create_kalshi_auth_headers,
 };
 
@@ -327,46 +327,67 @@ async fn run_polymarket_consolidated(
                     Some(Ok(WsMessage::Text(text))) => {
                         // Record network bandwidth (received)
                         network_metrics.record_received(text.len() as u64);
-                        
+
                         // Parse and emit message
                         if text == "PONG" {
                             continue;
                         }
-                        
-                        // Try to determine which market this message is for
+
+                        // Get all subscribed asset IDs for the market endpoint parser
+                        let all_asset_ids: Vec<String> = {
+                            let subs = subscribed_markets.read().await;
+                            subs.iter().cloned().collect()
+                        };
+
+                        // Try to determine which market this message is for (for raw msg emission)
                         if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+                            // Emit raw message for single-object messages
                             let asset_id = value.get("asset_id")
                                 .and_then(|v| v.as_str())
                                 .or_else(|| value.get("market").and_then(|v| v.as_str()))
                                 .map(|s| s.to_string());
-                            
-                            // Emit raw message
-                             if let Some(ref aid) = asset_id {
+
+                            if let Some(ref aid) = asset_id {
                                  let raw_msg = RawWebSocketMessage {
                                      market_id: aid.clone(),
                                      platform: "polymarket".to_string(),
                                      raw_message: text.clone(),
                                      timestamp: Utc::now().timestamp_millis(),
-msg_type: value.get("event_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                     msg_type: value.get("event_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                  };
                                  let _ = app_handle.emit("orderbook:raw", &raw_msg);
-                                 
-                                 // Store in database (fire and forget)
-                                 // Note: In production, we'd pass db reference to the connection task
-                             }
-                            
-                            // Parse as orderbook update
-                            let market_id = asset_id.unwrap_or_default();
-                            match parse_polymarket_message(&text, &market_id) {
-                                Ok(Some(update)) => {
+                            }
+
+                            // For array messages (initial book snapshots), emit raw for each element
+                            if let Some(arr) = value.as_array() {
+                                for item in arr {
+                                    if let Some(aid) = item.get("asset_id").and_then(|v| v.as_str()) {
+                                        let raw_msg = RawWebSocketMessage {
+                                            market_id: aid.to_string(),
+                                            platform: "polymarket".to_string(),
+                                            raw_message: item.to_string(),
+                                            timestamp: Utc::now().timestamp_millis(),
+                                            msg_type: item.get("event_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        };
+                                        let _ = app_handle.emit("orderbook:raw", &raw_msg);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Parse as orderbook update using the market endpoint parser
+                        // This handles both arrays (initial snapshots for all tokens)
+                        // and single objects (incremental updates)
+                        match parse_polymarket_market_all(&text, &all_asset_ids) {
+                            Ok(updates) => {
+                                for update in updates {
                                     if let Err(e) = app_handle.emit("orderbook:update", &update) {
                                         eprintln!("[Polymarket Consolidated] Failed to emit update: {}", e);
                                     }
                                 }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    eprintln!("[Polymarket Consolidated] Parse error: {}", e);
-                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Polymarket Consolidated] Parse error: {}", e);
                             }
                         }
                     }

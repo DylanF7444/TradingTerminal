@@ -273,15 +273,34 @@ export function usePersistentOrderbooks(): void {
           meta?.slug ??
           '';
 
+        // Get all token_ids for Polymarket (YES and NO tokens)
+        const tokenIds: string[] = meta?.token_ids ?? [];
+
         if (marketId) {
+          // Subscribe to primary market ID
           subscribeMarket(market.id, String(marketId), platform);
+
+          // For Polymarket, also subscribe to additional token_ids (NO token)
+          // Each token gets its own orderbook data keyed by its token_id
+          if (platform === 'polymarket' && tokenIds.length > 0) {
+            for (let i = 0; i < tokenIds.length; i++) {
+              const tokenId = tokenIds[i];
+              // Skip if it's the same as the primary marketId (already subscribed)
+              if (tokenId === String(marketId)) continue;
+              // Use a synthetic node_id so persistent monitor tracks it separately
+              const syntheticNodeId = `${market.id}:token:${i}`;
+              subscribeMarket(syntheticNodeId, tokenId, platform);
+            }
+          }
         }
       }
     }
 
-    // Unsubscribe removed markets
+    // Unsubscribe removed markets (including synthetic token subscriptions)
     for (const nodeId of subscribedRef.current) {
-      if (!currentMarketNodeIds.has(nodeId)) {
+      // Extract the base node id (strip ":token:N" suffix if present)
+      const baseNodeId = nodeId.includes(':token:') ? nodeId.split(':token:')[0] : nodeId;
+      if (!currentMarketNodeIds.has(baseNodeId)) {
         unsubscribeMarket(nodeId);
       }
     }
