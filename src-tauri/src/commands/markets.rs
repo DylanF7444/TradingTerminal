@@ -992,12 +992,18 @@ async fn search_polymarket(
             let closed = item["closed"].as_bool().unwrap_or(true);
 
             // Extract ALL token IDs for CLOB - needed for orderbook subscription
-            // The clobTokenIds field contains the asset IDs for the WebSocket
+            // The Gamma API returns clobTokenIds as a JSON-encoded string (e.g. "[\"123...\", \"456...\"]"),
+            // not a native JSON array. Try parsing as string first, then fall back to native array.
             let clob_token_ids: Vec<String> = item["clobTokenIds"]
-                .as_array()
-                .map(|arr| arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect())
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .or_else(|| {
+                    item["clobTokenIds"]
+                        .as_array()
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect())
+                })
                 .unwrap_or_default();
 
             // Condition ID for REST API queries

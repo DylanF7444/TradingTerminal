@@ -1497,16 +1497,10 @@ async fn run_kalshi_connection(
     // Track orderbook state (Kalshi sends deltas)
     let mut current_bids: Vec<OrderbookLevel> = Vec::new();
     let mut current_asks: Vec<OrderbookLevel> = Vec::new();
-    let mut last_update = std::time::Instant::now();
-    let staleness_timeout = Duration::from_secs(30);
     let mut sequence: u64 = 0;
-    
-    // Receive messages
+
+    // Receive messages - persist subscription without staleness timeout
     while let Some(msg) = ws_receiver.next().await {
-        if last_update.elapsed() > staleness_timeout {
-            return Err(anyhow!("Connection stale - no updates for 30 seconds"));
-        }
-        
         match msg {
             Ok(WsMessage::Text(text)) => {
                 // Emit raw message for debugging/display
@@ -1522,11 +1516,9 @@ async fn run_kalshi_connection(
                 if let Err(e) = app_handle.emit("orderbook:raw", &raw_msg) {
                     eprintln!("Failed to emit raw Kalshi message: {}", e);
                 }
-                
+
                 match parse_kalshi_message(&text, market_ticker, &mut current_bids, &mut current_asks, &mut sequence) {
                     Ok(Some(update)) => {
-                        last_update = std::time::Instant::now();
-                        
                         if let Err(e) = app_handle.emit("orderbook:update", &update) {
                             eprintln!("Failed to emit Kalshi orderbook update: {}", e);
                         }
