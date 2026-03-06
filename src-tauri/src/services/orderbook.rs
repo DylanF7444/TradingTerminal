@@ -238,6 +238,8 @@ struct PolymarketMarketMsg {
     asset_id: Option<String>,
     /// Market ID
     market: Option<String>,
+    /// Event type from market channel (e.g., "book", "price_change", "last_trade_price")
+    event_type: Option<String>,
     /// Price as string (needs parsing to f64)
     price: Option<String>,
     /// Size/amount as string
@@ -249,11 +251,29 @@ struct PolymarketMarketMsg {
     /// Transaction hash
     #[serde(rename = "hash")]
     hash: Option<String>,
-    /// Event type (e.g., "trade")
+    /// Event type (e.g., "trade") - legacy field
     event: Option<String>,
+    /// Tick size for the market
+    tick_size: Option<String>,
+    /// Last trade price
+    last_trade_price: Option<String>,
     /// Book data (for orderbook snapshots)
     bids: Option<Vec<PolymarketLevel>>,
     asks: Option<Vec<PolymarketLevel>>,
+    /// Price changes array (for price_change event_type)
+    price_changes: Option<Vec<PolymarketPriceChange>>,
+}
+
+/// Polymarket price change entry (from price_change event)
+#[derive(Debug, Deserialize)]
+struct PolymarketPriceChange {
+    asset_id: Option<String>,
+    price: Option<String>,
+    size: Option<String>,
+    side: Option<String>,
+    hash: Option<String>,
+    best_bid: Option<String>,
+    best_ask: Option<String>,
 }
 
 /// Polymarket price level
@@ -802,7 +822,17 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
                     timestamp: Utc::now().timestamp_millis(),
                     msg_type: serde_json::from_str::<JsonValue>(&text)
                         .ok()
-                        .and_then(|v| v.get("event_type").or_else(|| v.get("type")).and_then(|t| t.as_str().map(|s| s.to_string()))),
+                        .and_then(|v| {
+                            // Handle arrays (book snapshots come as arrays)
+                            if let Some(arr) = v.as_array() {
+                                arr.first()
+                                    .and_then(|item| item.get("event_type").or_else(|| item.get("type")))
+                                    .and_then(|t| t.as_str().map(|s| s.to_string()))
+                            } else {
+                                v.get("event_type").or_else(|| v.get("type"))
+                                    .and_then(|t| t.as_str().map(|s| s.to_string()))
+                            }
+                        }),
                 };
                 if let Err(e) = app_handle.emit("orderbook:raw", &raw_msg) {
                     eprintln!("Failed to emit raw orderbook message: {}", e);
@@ -850,6 +880,7 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
 }
 
 /// Parse a Polymarket market WebSocket message
+/// Handles both single JSON objects and arrays of objects (multi-asset book snapshots)
 fn parse_polymarket_market_message(text: &str, asset_ids: &[String]) -> Result<Option<OrderbookUpdate>> {
     // Try to parse as JSON
     let value: JsonValue = match serde_json::from_str(text) {
@@ -860,141 +891,214 @@ fn parse_polymarket_market_message(text: &str, asset_ids: &[String]) -> Result<O
             return Ok(None);
         }
     };
-    
-    // Check for subscription confirmation
-    let msg_type = value.get("event_type").or_else(|| value.get("type")).and_then(|v| v.as_str());
-    if msg_type == Some("subscribed") {
-        println!("Polymarket market subscription confirmed: {}", text);
-        return Ok(None);
-    }
-    
-    // Parse as market message
-    let msg: PolymarketMarketMsg = match serde_json::from_value(value) {
-        Ok(m) => m,
-        Err(e) => {
-            // Try parsing as a generic object with asset_id
-            println!("Failed to parse as PolymarketMarketMsg: {}, trying generic parse", e);
-            return parse_polymarket_market_generic(text, asset_ids);
+
+    // Handle JSON arrays: Polymarket sends book snapshots as an array of objects,
+    // one per asset_id in the market (e.g., Yes/No outcomes).
+    // We find the first asset that matches our subscription and return its orderbook.
+    if let Some(arr) = value.as_array() {
+        // Parse each element and find one matching our subscribed asset_ids
+        let mut best_update: Option<OrderbookUpdate> = None;
+        for item in arr {
+            if let Ok(Some(update)) = parse_polymarket_market_single(item, asset_ids) {
+                // Prefer the update whose market_id matches one of our subscribed asset_ids
+                if asset_ids.iter().any(|id| id == &update.market_id) {
+                    return Ok(Some(update));
+                }
+                // Keep the first valid update as fallback
+                if best_update.is_none() {
+                    best_update = Some(update);
+                }
+            }
         }
-    };
-    
-    // Determine which asset_id this message is for
-    let asset_id = msg.asset_id.as_ref()
-        .or(msg.market.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    
-    // Check if this is a trade message
-    if msg.event.as_deref() == Some("trade") || msg.price.is_some() {
-        let price = msg.price
-            .and_then(|p| p.parse::<f64>().ok());
-        
-        let size = msg.size
-            .and_then(|s| s.parse::<f64>().ok());
-        
-        if let (Some(price), Some(size)) = (price, size) {
-            return Ok(Some(OrderbookUpdate {
-                market_id: asset_id.to_string(),
-                platform: "polymarket".to_string(),
-                bids: vec![],
-                asks: vec![],
-                timestamp: Utc::now().timestamp_millis(),
-                sequence: 0,
-                last_price: Some(price),
-                last_size: Some(size),
-            }));
-        }
+        return Ok(best_update);
     }
-    
-    // Check for orderbook data
-    if msg.bids.is_some() || msg.asks.is_some() {
-        let bids = msg.bids.map(|levels| {
-            levels.into_iter()
-                .filter_map(|l| {
-                    let price = l.price.parse::<f64>().ok()?;
-                    let size = l.size.parse::<f64>().ok()?;
-                    if price > 0.0 && size > 0.0 {
-                        Some(OrderbookLevel { price, size, order_count: None })
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        }).unwrap_or_default();
-        
-        let asks = msg.asks.map(|levels| {
-            levels.into_iter()
-                .filter_map(|l| {
-                    let price = l.price.parse::<f64>().ok()?;
-                    let size = l.size.parse::<f64>().ok()?;
-                    if price > 0.0 && size > 0.0 {
-                        Some(OrderbookLevel { price, size, order_count: None })
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        }).unwrap_or_default();
-        
-        return Ok(Some(OrderbookUpdate {
-            market_id: asset_id.to_string(),
-            platform: "polymarket".to_string(),
-            bids,
-            asks,
-            timestamp: Utc::now().timestamp_millis(),
-            sequence: 0,
-            last_price: None,
-            last_size: None,
-        }));
-    }
-    
-    Ok(None)
+
+    // Single JSON object
+    parse_polymarket_market_single(&value, asset_ids)
 }
 
-/// Parse a generic Polymarket market message (fallback parser)
-fn parse_polymarket_market_generic(text: &str, asset_ids: &[String]) -> Result<Option<OrderbookUpdate>> {
-    let value: JsonValue = serde_json::from_str(text)?;
-    
-    // Try to extract asset_id
-    let asset_id = value.get("asset_id")
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("market").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    
-    // If no asset_id, use the first one from our subscription
-    let market_id = if asset_id.is_empty() && !asset_ids.is_empty() {
-        &asset_ids[0]
-    } else {
-        asset_id
-    };
-    
-    // Check for price/trade data
-    let price = value.get("price")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| value.get("price").and_then(|v| v.as_f64()));
-    
-    let size = value.get("size")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| value.get("size").and_then(|v| v.as_f64()));
-    
-    if let (Some(price), Some(size)) = (price, size) {
-        return Ok(Some(OrderbookUpdate {
-            market_id: market_id.to_string(),
-            platform: "polymarket".to_string(),
-            bids: vec![],
-            asks: vec![],
-            timestamp: Utc::now().timestamp_millis(),
-            sequence: 0,
-            last_price: Some(price),
-            last_size: Some(size),
-        }));
+/// Parse a single Polymarket market message object (not an array)
+fn parse_polymarket_market_single(value: &JsonValue, asset_ids: &[String]) -> Result<Option<OrderbookUpdate>> {
+    // Check for subscription confirmation
+    let event_type = value.get("event_type").or_else(|| value.get("type")).and_then(|v| v.as_str());
+    if event_type == Some("subscribed") {
+        println!("Polymarket market subscription confirmed");
+        return Ok(None);
     }
-    
-    // Log unknown message structure for debugging
-    println!("Unknown Polymarket market message structure: {}", text);
-    Ok(None)
+
+    // Parse as market message struct
+    let msg: PolymarketMarketMsg = match serde_json::from_value(value.clone()) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("Failed to parse Polymarket market message: {}", e);
+            return Ok(None);
+        }
+    };
+
+    // Determine which asset_id this message is for
+    let asset_id = msg.asset_id.as_deref()
+        .or(msg.market.as_deref())
+        .unwrap_or("");
+
+    // Use the asset_id if available, otherwise fall back to first subscribed id
+    let market_id = if !asset_id.is_empty() {
+        asset_id.to_string()
+    } else if !asset_ids.is_empty() {
+        asset_ids[0].clone()
+    } else {
+        String::new()
+    };
+
+    // Parse timestamp from message (millisecond unix timestamp string)
+    let timestamp = msg.timestamp.as_deref()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or_else(|| Utc::now().timestamp_millis());
+
+    // Parse last_trade_price from book messages
+    let last_trade_price = msg.last_trade_price.as_deref()
+        .and_then(|s| if s.is_empty() { None } else { s.parse::<f64>().ok() });
+
+    // Route by event_type
+    match msg.event_type.as_deref().or(event_type) {
+        Some("book") | Some("book_update") => {
+            // Full orderbook snapshot
+            let bids = parse_market_levels(msg.bids);
+            let asks = parse_market_levels(msg.asks);
+
+            Ok(Some(OrderbookUpdate {
+                market_id,
+                platform: "polymarket".to_string(),
+                bids,
+                asks,
+                timestamp,
+                sequence: 0,
+                last_price: last_trade_price,
+                last_size: None,
+            }))
+        }
+        Some("price_change") => {
+            // Incremental price level update via price_changes array
+            if let Some(changes) = msg.price_changes {
+                // Find the change matching one of our subscribed asset_ids
+                for change in &changes {
+                    let change_asset = change.asset_id.as_deref().unwrap_or("");
+                    if asset_ids.iter().any(|id| id == change_asset) || asset_ids.is_empty() {
+                        let best_bid = change.best_bid.as_deref()
+                            .and_then(|s| s.parse::<f64>().ok());
+                        let best_ask = change.best_ask.as_deref()
+                            .and_then(|s| s.parse::<f64>().ok());
+
+                        let mut bids = Vec::new();
+                        let mut asks = Vec::new();
+
+                        // Add the best bid/ask as top-of-book levels
+                        if let Some(bid) = best_bid {
+                            bids.push(OrderbookLevel { price: bid, size: 0.0, order_count: None });
+                        }
+                        if let Some(ask) = best_ask {
+                            asks.push(OrderbookLevel { price: ask, size: 0.0, order_count: None });
+                        }
+
+                        return Ok(Some(OrderbookUpdate {
+                            market_id: change_asset.to_string(),
+                            platform: "polymarket".to_string(),
+                            bids,
+                            asks,
+                            timestamp,
+                            sequence: 0,
+                            last_price: best_bid, // best_bid is the "Yes" price
+                            last_size: None,
+                        }));
+                    }
+                }
+            }
+            Ok(None)
+        }
+        Some("last_trade_price") => {
+            // Trade event — extract price and size
+            let price = msg.price.as_deref()
+                .and_then(|s| s.parse::<f64>().ok());
+            let size = msg.size.as_deref()
+                .and_then(|s| s.parse::<f64>().ok());
+
+            if let Some(price) = price {
+                Ok(Some(OrderbookUpdate {
+                    market_id,
+                    platform: "polymarket".to_string(),
+                    bids: vec![],
+                    asks: vec![],
+                    timestamp,
+                    sequence: 0,
+                    last_price: Some(price),
+                    last_size: size,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        Some("tick_size_change") | Some("heartbeat") | Some("ping") => {
+            // Informational only, no orderbook update needed
+            Ok(None)
+        }
+        _ => {
+            // Legacy/unknown event_type — try to extract orderbook or trade data
+            if msg.event.as_deref() == Some("trade") || msg.price.is_some() {
+                let price = msg.price.as_deref().and_then(|p| p.parse::<f64>().ok());
+                let size = msg.size.as_deref().and_then(|s| s.parse::<f64>().ok());
+                if let (Some(price), Some(size)) = (price, size) {
+                    return Ok(Some(OrderbookUpdate {
+                        market_id,
+                        platform: "polymarket".to_string(),
+                        bids: vec![],
+                        asks: vec![],
+                        timestamp,
+                        sequence: 0,
+                        last_price: Some(price),
+                        last_size: Some(size),
+                    }));
+                }
+            }
+
+            if msg.bids.is_some() || msg.asks.is_some() {
+                let bids = parse_market_levels(msg.bids);
+                let asks = parse_market_levels(msg.asks);
+                return Ok(Some(OrderbookUpdate {
+                    market_id,
+                    platform: "polymarket".to_string(),
+                    bids,
+                    asks,
+                    timestamp,
+                    sequence: 0,
+                    last_price: last_trade_price,
+                    last_size: None,
+                }));
+            }
+
+            // Truly unknown
+            println!("Unknown Polymarket market event_type: {:?}, message keys: {:?}",
+                msg.event_type,
+                value.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Parse Polymarket levels from Option<Vec<PolymarketLevel>>
+fn parse_market_levels(levels: Option<Vec<PolymarketLevel>>) -> Vec<OrderbookLevel> {
+    levels.map(|lvls| {
+        lvls.into_iter()
+            .filter_map(|l| {
+                let price = l.price.parse::<f64>().ok()?;
+                let size = l.size.parse::<f64>().ok()?;
+                if price > 0.0 && size > 0.0 {
+                    Some(OrderbookLevel { price, size, order_count: None })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }).unwrap_or_default()
 }
 
 // ============================================================================

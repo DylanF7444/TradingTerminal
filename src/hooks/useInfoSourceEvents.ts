@@ -317,8 +317,12 @@ export function useMarketOrderbookEvents(): void {
 
           const currentMetadata = (marketNode.metadata as Record<string, any>) || {};
           
-          const bestBid = update.bids?.[0]?.price;
-          const bestAsk = update.asks?.[0]?.price;
+          const bestBid = update.bids?.length
+            ? Math.max(...update.bids.map((b: { price: number }) => b.price))
+            : undefined;
+          const bestAsk = update.asks?.length
+            ? Math.min(...update.asks.map((a: { price: number }) => a.price))
+            : undefined;
           const lastPrice = update.last_price || bestBid || bestAsk;
 
           updateNodeMetadata(marketNode.id, {
