@@ -380,6 +380,7 @@ async fn run_polymarket_consolidated(
                         // and single objects (incremental updates)
                         match parse_polymarket_market_all(&text, &all_asset_ids) {
                             Ok(updates) => {
+                                println!("[Polymarket Market] Received {} update(s): {:?}", updates.len(), updates);
                                 for update in updates {
                                     if let Err(e) = app_handle.emit("orderbook:update", &update) {
                                         eprintln!("[Polymarket Consolidated] Failed to emit update: {}", e);

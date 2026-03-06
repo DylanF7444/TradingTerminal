@@ -66,6 +66,14 @@ export interface MarketSearchResult {
   condition_id?: string | null;
 }
 
+/** Paginated response from the backend search_markets_cmd */
+interface MarketSearchResponse {
+  results: MarketSearchResult[];
+  has_more: boolean;
+  next_cursor: string | null;
+  page_size: number;
+}
+
 interface MarketBrowserProps {
   platform: MarketType;
   onSelectMarket: (id: string, title: string, tokenIds?: string[]) => void;
@@ -89,21 +97,20 @@ export default function MarketBrowser({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [offset, setOffset] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const PAGE_SIZE = 20;
   const platformName = platform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
 
   // Core search function that handles both initial and paginated requests
   const fetchResults = useCallback(
-    async (searchQuery: string, searchOffset: number, append: boolean) => {
+    async (searchQuery: string, cursor: string | null, append: boolean) => {
       if (!searchQuery.trim()) {
         setResults([]);
         setHasSearched(false);
         setHasMore(false);
-        setOffset(0);
+        setNextCursor(null);
         setError(null);
         return;
       }
@@ -117,22 +124,20 @@ export default function MarketBrowser({
       setHasSearched(true);
 
       try {
-        const searchResults = await invoke<MarketSearchResult[]>('search_markets_cmd', {
+        const response = await invoke<MarketSearchResponse>('search_markets_cmd', {
           platform: platformName,
           query: searchQuery.trim(),
-          limit: PAGE_SIZE,
-          offset: searchOffset,
+          cursor: cursor,
         });
 
         if (append) {
-          setResults((prev) => [...prev, ...searchResults]);
+          setResults((prev) => [...prev, ...response.results]);
         } else {
-          setResults(searchResults);
+          setResults(response.results);
         }
 
-        // If we got a full page, there are likely more results
-        setHasMore(searchResults.length >= PAGE_SIZE);
-        setOffset(searchOffset + searchResults.length);
+        setHasMore(response.has_more);
+        setNextCursor(response.next_cursor);
       } catch (err) {
         console.error('Market search failed:', err);
         setError(typeof err === 'string' ? err : 'Search failed. Please try again.');
@@ -150,9 +155,9 @@ export default function MarketBrowser({
   // Initial search (reset pagination)
   const performSearch = useCallback(
     (searchQuery: string) => {
-      setOffset(0);
+      setNextCursor(null);
       setHasMore(false);
-      fetchResults(searchQuery, 0, false);
+      fetchResults(searchQuery, null, false);
     },
     [fetchResults]
   );
@@ -160,8 +165,8 @@ export default function MarketBrowser({
   // Load more results (append to existing)
   const loadMore = useCallback(() => {
     if (isLoadingMore || !hasMore) return;
-    fetchResults(query, offset, true);
-  }, [query, offset, isLoadingMore, hasMore, fetchResults]);
+    fetchResults(query, nextCursor, true);
+  }, [query, nextCursor, isLoadingMore, hasMore, fetchResults]);
 
   // Handle input change with debounce
   const handleQueryChange = useCallback(
@@ -248,7 +253,7 @@ export default function MarketBrowser({
               setResults([]);
               setHasSearched(false);
               setHasMore(false);
-              setOffset(0);
+              setNextCursor(null);
               setError(null);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"

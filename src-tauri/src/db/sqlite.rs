@@ -729,7 +729,7 @@ pub fn update_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
         ],
     )?;
 
-    println!("Node updated: {}", node.id);
+    
     Ok(())
 }
 
