@@ -190,6 +190,38 @@ pub struct AddMarketRequest {
     pub api_credentials: JsonValue,
     pub market_id: String,
     pub metadata: Option<JsonValue>,
+    /// Extended market info from search results (static data that doesn't change)
+    #[serde(default)]
+    pub market_details: Option<MarketDetails>,
+}
+
+/// Extended market info from search results (static data that doesn't change)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDetails {
+    /// Human-readable market title/question
+    pub title: Option<String>,
+    /// Market description/rules
+    pub description: Option<String>,
+    /// Market image/icon URL
+    pub image_url: Option<String>,
+    /// Market category (e.g., "crypto", "politics")
+    pub category: Option<String>,
+    /// End date / close time (ISO 8601 string) - when market stops trading
+    pub end_date: Option<String>,
+    /// Resolution date (ISO 8601 string) - when market is resolved
+    pub resolution_date: Option<String>,
+    /// Market status ("open", "closed", "resolved")
+    pub status: Option<String>,
+    /// CLOB token IDs for Polymarket (needed for WebSocket orderbook subscription)
+    pub token_ids: Option<Vec<String>>,
+    /// Condition ID for Polymarket (used for REST API queries)
+    pub condition_id: Option<String>,
+    /// Market slug (URL-friendly identifier)
+    pub slug: Option<String>,
+    /// Tags for the market (additional categorization)
+    pub tags: Option<Vec<String>>,
+    /// Creation date (ISO 8601 string) - when market was created
+    pub created_at: Option<String>,
 }
 
 /// Status response for market health
@@ -232,7 +264,63 @@ pub async fn add_market<R: Runtime>(
     // Authenticate with platform to verify credentials work
     let auth_token = authenticate_platform(&market_type, &request.api_credentials).await
         .map_err(|e| format!("Authentication failed: {}", e))?;
+
+    // Extract market details for static metadata
+    let details = request.market_details.clone();
     
+    // Build metadata with static market info (no volatile data like volume/open interest)
+    let mut metadata = serde_json::json!({
+        "market_id": market_id,
+        "platform": format!("{:?}", market_type),
+        "status": "connecting",
+        "added_at": Utc::now().to_rfc3339(),
+    });
+
+    // Add static market details if provided
+    if let Some(d) = &details {
+        if let Some(title) = &d.title {
+            metadata["title"] = serde_json::json!(title);
+        }
+        if let Some(desc) = &d.description {
+            metadata["description"] = serde_json::json!(desc);
+        }
+        if let Some(img) = &d.image_url {
+            metadata["image_url"] = serde_json::json!(img);
+        }
+        if let Some(cat) = &d.category {
+            metadata["category"] = serde_json::json!(cat);
+        }
+        if let Some(end) = &d.end_date {
+            metadata["end_date"] = serde_json::json!(end);
+        }
+        if let Some(res) = &d.resolution_date {
+            metadata["resolution_date"] = serde_json::json!(res);
+        }
+        if let Some(stat) = &d.status {
+            metadata["market_status"] = serde_json::json!(stat);
+        }
+        if let Some(tokens) = &d.token_ids {
+            metadata["token_ids"] = serde_json::json!(tokens);
+        }
+        if let Some(cond) = &d.condition_id {
+            metadata["condition_id"] = serde_json::json!(cond);
+        }
+        if let Some(slug) = &d.slug {
+            metadata["slug"] = serde_json::json!(slug);
+        }
+        if let Some(tags) = &d.tags {
+            metadata["tags"] = serde_json::json!(tags);
+        }
+        if let Some(created) = &d.created_at {
+            metadata["created_at"] = serde_json::json!(created);
+        }
+    }
+
+    // Add any extra user-provided metadata
+    if let Some(extra) = request.metadata {
+        metadata["extra"] = extra;
+    }
+
     // Create the node
     let node = Node {
         id: node_id.clone(),
@@ -240,13 +328,7 @@ pub async fn add_market<R: Runtime>(
         position: (100.0 + rand::random::<f64>() * 200.0, 100.0 + rand::random::<f64>() * 200.0),
         size: None,
         connections: vec![],
-        metadata: serde_json::json!({
-            "market_id": market_id,
-            "platform": format!("{:?}", market_type),
-            "status": "connecting",
-            "added_at": Utc::now().to_rfc3339(),
-            "extra": request.metadata.unwrap_or(serde_json::json!({}))
-        }),
+        metadata,
     };
     
     // Store in database
@@ -411,6 +493,7 @@ pub async fn refresh_market_connection<R: Runtime>(
         api_credentials: creds,
         market_id,
         metadata: None,
+        market_details: None,
     };
     
     // Hack: reuse add logic but we need to preserve the same ID
@@ -891,15 +974,22 @@ pub struct MarketSearchResult {
     /// Current NO price
     pub no_price: Option<f64>,
     /// 24h trading volume
+    #[serde(default)]
     pub volume_24h: Option<f64>,
     /// Total liquidity available
+    #[serde(default)]
     pub liquidity: Option<f64>,
     /// Market category (e.g., "crypto", "politics")
+    #[serde(default)]
     pub category: Option<String>,
     /// Market status ("open", "closed", "resolved")
     pub status: String,
     /// End date / close time (ISO 8601 string)
+    #[serde(default)]
     pub end_date: Option<String>,
+    /// Creation date (ISO 8601 string) - when market was created
+    #[serde(default)]
+    pub created_at: Option<String>,
     /// Platform this result came from
     pub platform: String,
     /// The slug or ticker to use when adding this market
@@ -1009,6 +1099,7 @@ fn parse_polymarket_item(item: &JsonValue) -> Option<MarketSearchResult> {
         .and_then(|s| s.parse::<f64>().ok())
         .or_else(|| item["liquidity"].as_f64());
     let end_date = item["endDate"].as_str().map(|s| s.to_string());
+    let created_at = item["createdAt"].as_str().map(|s| s.to_string());
 
     let status = if closed {
         "closed".to_string()
@@ -1034,6 +1125,7 @@ fn parse_polymarket_item(item: &JsonValue) -> Option<MarketSearchResult> {
         category: item["category"].as_str().map(|s| s.to_string()),
         status,
         end_date,
+        created_at,
         platform: "Polymarket".to_string(),
         slug,
         token_ids: clob_token_ids,
@@ -1098,6 +1190,7 @@ fn parse_kalshi_market(
         category: event_category.clone(),
         status: market_status,
         end_date: close_time,
+        created_at: None,
         platform: "Kalshi".to_string(),
         slug: ticker,
         token_ids: vec![],

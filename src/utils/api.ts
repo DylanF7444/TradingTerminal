@@ -717,12 +717,27 @@ export async function calculateCorrelation(
  */
 export async function addMarket(
   type: import('../types/nodes').MarketType,
-  credentials: { apiKey: string; apiSecret?: string }
+  credentials: { apiKey: string; apiSecret?: string },
+  marketDetails?: {
+    title?: string;
+    description?: string;
+    image_url?: string;
+    category?: string;
+    end_date?: string;
+    resolution_date?: string;
+    status?: string;
+    token_ids?: string[];
+    condition_id?: string;
+    slug?: string;
+    tags?: string[];
+    created_at?: string;
+  }
 ): Promise<Result<Market, ApiError>> {
   return invokeCommand<Market>('add_market_cmd', { 
     marketType: type, 
     apiCredentials: credentials,
-    marketConfig: {}
+    marketConfig: {},
+    marketDetails: marketDetails || null
   });
 }
 

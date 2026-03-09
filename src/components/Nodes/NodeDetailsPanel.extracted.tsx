@@ -335,6 +335,94 @@ export function NodeDetailsPanelExtracted({
         )}
       </div>
 
+      {/* Market Node Details - Static Info */}
+      {isMarket(node) && (
+        <div className="bg-gray-800/50 rounded-lg p-3">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Market Details</h3>
+          <div className="space-y-1.5 text-xs">
+            {(metadata.title || metadata.question) && (
+              <div className="text-gray-300 font-medium">
+                {metadata.title || metadata.question}
+              </div>
+            )}
+            {metadata.description && (
+              <p className="text-gray-500 text-wrap">{metadata.description}</p>
+            )}
+            {metadata.category && (
+              <ConfigRow label="Category" value={metadata.category} />
+            )}
+            {(metadata.market_status || metadata.status) && (
+              <div className="flex justify-between">
+                <span className="text-gray-500">Status:</span>
+                <span className={`${
+                  (metadata.market_status || metadata.status) === 'open' ? 'text-green-400' : 
+                  (metadata.market_status || metadata.status) === 'closed' ? 'text-yellow-400' : 
+                  (metadata.market_status || metadata.status) === 'resolved' ? 'text-blue-400' : 'text-gray-400'
+                }`}>
+                  {(metadata.market_status || metadata.status).charAt(0).toUpperCase() + (metadata.market_status || metadata.status).slice(1)}
+                </span>
+              </div>
+            )}
+            {(metadata.created_at || metadata.createdAt) && (
+              <ConfigRow 
+                label="Created" 
+                value={new Date(metadata.created_at || metadata.createdAt).toLocaleDateString()} 
+              />
+            )}
+            {metadata.end_date && (
+              <ConfigRow 
+                label="Closes" 
+                value={new Date(metadata.end_date).toLocaleDateString()} 
+              />
+            )}
+            {metadata.resolution_date && (
+              <ConfigRow 
+                label="Resolves" 
+                value={new Date(metadata.resolution_date).toLocaleDateString()} 
+              />
+            )}
+            {metadata.slug && (
+              <ConfigRow label="Slug" value={metadata.slug} mono />
+            )}
+            {metadata.condition_id && (
+              <ConfigRow label="Condition ID" value={metadata.condition_id} mono />
+            )}
+            {metadata.market_id && (
+              <ConfigRow label="Market ID" value={metadata.market_id} mono />
+            )}
+            {metadata.tags && Array.isArray(metadata.tags) && metadata.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                {metadata.tags.map((tag: string, idx: number) => (
+                  <span 
+                    key={idx}
+                    className="px-2 py-0.5 bg-gray-700 text-gray-400 rounded text-xs"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+            {(metadata.image_url || metadata.imageUrl) && (
+              <div className="mt-2">
+                <img 
+                  src={metadata.image_url || metadata.imageUrl} 
+                  alt="Market" 
+                  className="w-full h-24 object-cover rounded"
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+              </div>
+            )}
+            
+            {/* Show placeholder if no details available */}
+            {!metadata.title && !metadata.question && !metadata.description && !metadata.category && 
+             !metadata.market_status && !metadata.status && !metadata.created_at && 
+             !metadata.end_date && !metadata.slug && !metadata.condition_id && (
+              <p className="text-gray-600 italic">No additional details available</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Technical Details (collapsible) */}
       <details className="bg-gray-800/30 rounded-lg">
         <summary className="p-3 cursor-pointer text-xs font-semibold text-gray-400 uppercase hover:bg-gray-800/50 rounded-lg">

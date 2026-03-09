@@ -433,6 +433,20 @@ export default function MarketPanel({
   const [environment, setEnvironment] = useState<'demo' | 'production'>('demo');
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
   
+  // Extended market details from search results (static info)
+  const [marketDetails, setMarketDetails] = useState<{
+    title?: string;
+    description?: string;
+    image_url?: string;
+    category?: string;
+    end_date?: string;
+    status?: string;
+    slug?: string;
+    token_ids?: string[];
+    condition_id?: string;
+    created_at?: string;
+  } | null>(null);
+  
   // Stored API key state
   const [hasStoredKey, setHasStoredKey] = useState(false);
   const [useStoredKey, setUseStoredKey] = useState(true);
@@ -451,6 +465,18 @@ export default function MarketPanel({
     marketType: MarketType;
     apiCredentials: Record<string, any>;
     marketConfig: Record<string, any>;
+    marketDetails?: {
+      title?: string;
+      description?: string;
+      image_url?: string;
+      category?: string;
+      end_date?: string;
+      status?: string;
+      slug?: string;
+      token_ids?: string[];
+      condition_id?: string;
+      created_at?: string;
+    } | null;
   }>('add_market_cmd');
 
   // Cleanup sensitive data on unmount or modal close
@@ -466,6 +492,7 @@ export default function MarketPanel({
     setShowPasswords({});
     setHasStoredKey(false);
     setUseStoredKey(true);
+    setMarketDetails(null);
   }, []);
 
   useEffect(() => {
@@ -606,7 +633,8 @@ export default function MarketPanel({
           market_id: marketId.trim(),
           question: selectedMarketTitle || undefined,
           token_ids: marketTokenIds.length > 0 ? marketTokenIds : undefined,
-        }
+        },
+        marketDetails: marketDetails || undefined
       });
 
       if (result) {
@@ -865,7 +893,10 @@ export default function MarketPanel({
                         </button>
                         <button
                           type="button"
-                          onClick={() => setMarketInputMode('manual')}
+                          onClick={() => {
+                            setMarketInputMode('manual');
+                            setMarketDetails(null);
+                          }}
                           className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
                             marketInputMode === 'manual'
                               ? 'bg-emerald-600 text-white'
@@ -882,10 +913,11 @@ export default function MarketPanel({
                       <div className="space-y-2">
                         <MarketBrowser
                           platform={selectedPlatform}
-                          onSelectMarket={(id, title, tokenIds) => {
+                          onSelectMarket={(id, title, tokenIds, details) => {
                             setMarketId(id);
                             setSelectedMarketTitle(title);
                             setMarketTokenIds(tokenIds || []);
+                            setMarketDetails(details || null);
                             setLocalError(null);
                           }}
                         />
@@ -900,6 +932,7 @@ export default function MarketPanel({
                               onClick={() => {
                                 setMarketId('');
                                 setSelectedMarketTitle('');
+                                setMarketDetails(null);
                               }}
                               className="text-gray-500 hover:text-gray-300 flex-shrink-0"
                             >
@@ -916,6 +949,7 @@ export default function MarketPanel({
                           onChange={(e) => {
                             setMarketId(e.target.value);
                             setSelectedMarketTitle('');
+                            setMarketDetails(null);
                           }}
                           placeholder={selectedPlatform === MarketType.Polymarket ? "0x123... or slug-name" : "Event-contract-ticker"}
                           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors"
