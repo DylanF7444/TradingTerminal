@@ -892,7 +892,99 @@ pub fn parse_polymarket_market_all(text: &str, asset_ids: &[String]) -> Result<V
         return Ok(updates);
     }
 
-    // Single JSON object
+    // Handle price_change events specially: they contain updates for multiple
+    // assets in one message, so we need to return an update per asset.
+    let event_type = value.get("event_type").or_else(|| value.get("type")).and_then(|v| v.as_str());
+    if event_type == Some("price_change") {
+        let mut updates = Vec::new();
+        if let Some(changes) = value.get("changes").or_else(|| value.get("price_changes")).and_then(|v| v.as_array()) {
+            // Parse timestamp from message
+            let timestamp = value.get("timestamp")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or_else(|| Utc::now().timestamp_millis());
+
+            for change in changes {
+                let change_asset = change.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
+                if change_asset.is_empty() {
+                    continue;
+                }
+                if !asset_ids.is_empty() && !asset_ids.iter().any(|id| id == change_asset) {
+                    continue;
+                }
+
+                // price_change events only carry best bid/ask -- emit as last_price
+                // update only, NOT as book replacement data (empty bids/asks).
+                // This prevents wiping out the full orderbook with zero-size levels.
+                let best_bid = change.get("price").or_else(|| change.get("best_bid"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok());
+                let best_ask = change.get("best_ask")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok());
+
+                // Use the mid price as last_price if both sides available,
+                // otherwise use whichever is available
+                let last_price = match (best_bid, best_ask) {
+                    (Some(bid), _) => Some(bid),
+                    (None, Some(ask)) => Some(ask),
+                    _ => None,
+                };
+
+                if last_price.is_some() {
+                    updates.push(OrderbookUpdate {
+                        market_id: change_asset.to_string(),
+                        platform: "polymarket".to_string(),
+                        bids: vec![],  // Empty: don't overwrite full book data
+                        asks: vec![],  // Empty: don't overwrite full book data
+                        timestamp,
+                        sequence: 0,
+                        last_price,
+                        last_size: None,
+                    });
+                }
+            }
+        }
+        // Also try parsing via the struct-based approach as fallback
+        if updates.is_empty() {
+            if let Ok(msg) = serde_json::from_value::<PolymarketMarketMsg>(value.clone()) {
+                if let Some(changes) = msg.price_changes {
+                    let timestamp = msg.timestamp.as_deref()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or_else(|| Utc::now().timestamp_millis());
+
+                    for change in &changes {
+                        let change_asset = change.asset_id.as_deref().unwrap_or("");
+                        if change_asset.is_empty() {
+                            continue;
+                        }
+                        if !asset_ids.is_empty() && !asset_ids.iter().any(|id| id == change_asset) {
+                            continue;
+                        }
+
+                        let best_bid = change.best_bid.as_deref()
+                            .and_then(|s| s.parse::<f64>().ok());
+
+                        if best_bid.is_some() {
+                            updates.push(OrderbookUpdate {
+                                market_id: change_asset.to_string(),
+                                platform: "polymarket".to_string(),
+                                bids: vec![],
+                                asks: vec![],
+                                timestamp,
+                                sequence: 0,
+                                last_price: best_bid,
+                                last_size: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(updates);
+    }
+
+    // Single JSON object (non-price_change)
     match parse_polymarket_market_single(&value, asset_ids)? {
         Some(update) => Ok(vec![update]),
         None => Ok(vec![]),
@@ -960,42 +1052,9 @@ fn parse_polymarket_market_single(value: &JsonValue, asset_ids: &[String]) -> Re
             }))
         }
         Some("price_change") => {
-            // Incremental price level update via price_changes array
-            println!("[DEBUG] Polymarket received PRICE_CHANGE for market_id: {}", market_id);
-            if let Some(changes) = msg.price_changes {
-                // Find the change matching one of our subscribed asset_ids
-                for change in &changes {
-                    let change_asset = change.asset_id.as_deref().unwrap_or("");
-                    if asset_ids.iter().any(|id| id == change_asset) || asset_ids.is_empty() {
-                        let best_bid = change.best_bid.as_deref()
-                            .and_then(|s| s.parse::<f64>().ok());
-                        let best_ask = change.best_ask.as_deref()
-                            .and_then(|s| s.parse::<f64>().ok());
-
-                        let mut bids = Vec::new();
-                        let mut asks = Vec::new();
-
-                        // Add the best bid/ask as top-of-book levels
-                        if let Some(bid) = best_bid {
-                            bids.push(OrderbookLevel { price: bid, size: 0.0, order_count: None });
-                        }
-                        if let Some(ask) = best_ask {
-                            asks.push(OrderbookLevel { price: ask, size: 0.0, order_count: None });
-                        }
-
-                        return Ok(Some(OrderbookUpdate {
-                            market_id: change_asset.to_string(),
-                            platform: "polymarket".to_string(),
-                            bids,
-                            asks,
-                            timestamp,
-                            sequence: 0,
-                            last_price: best_bid, // best_bid is the "Yes" price
-                            last_size: None,
-                        }));
-                    }
-                }
-            }
+            // price_change events contain updates for multiple assets (YES/NO).
+            // Handled by parse_polymarket_market_all to return all updates.
+            // Return None here so the caller can handle it.
             Ok(None)
         }
         Some("last_trade_price") => {

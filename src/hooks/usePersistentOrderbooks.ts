@@ -59,8 +59,12 @@ export interface MonitoredMarket {
 
 function toOrderbook(update: OrderbookUpdate, existing?: Orderbook): Orderbook {
   // Convert backend OrderbookLevel[] to frontend Level[]
-  const bidsRaw = update.bids.length > 0 ? update.bids : (existing?.bids ?? []);
-  const asksRaw = update.asks.length > 0 ? update.asks : (existing?.asks ?? []);
+  // Only replace existing book data if the update has meaningful levels
+  // (non-empty arrays with at least one level that has size > 0)
+  const hasNewBids = update.bids.length > 0 && update.bids.some((l: any) => (l.size ?? 0) > 0);
+  const hasNewAsks = update.asks.length > 0 && update.asks.some((l: any) => (l.size ?? 0) > 0);
+  const bidsRaw = hasNewBids ? update.bids : (existing?.bids ?? []);
+  const asksRaw = hasNewAsks ? update.asks : (existing?.asks ?? []);
 
   const bids: Level[] = bidsRaw.slice(0, MAX_LEVELS_PER_SIDE).map((l) => ({
     price: 'price' in l ? l.price : (l as Level).price,
@@ -94,8 +98,8 @@ function toOrderbook(update: OrderbookUpdate, existing?: Orderbook): Orderbook {
     asks,
     liquidity,
     spread,
-    lastPrice: update.last_price,
-    lastSize: update.last_size,
+    lastPrice: update.last_price ?? existing?.lastPrice,
+    lastSize: update.last_size ?? existing?.lastSize,
     lastTradeAt: update.last_price ? update.timestamp : existing?.lastTradeAt,
     sequence: update.sequence || (existing?.sequence ?? 0) + 1,
   };
