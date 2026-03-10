@@ -127,11 +127,14 @@ pub struct AppState {
     pub ws_manager: Arc<WebSocketManager>,
     
     /// Remote connection manager for remote desktop gateway
-    /// 
+    ///
     /// Manages WebSocket relay connections for remote device access.
     /// Enables the trading terminal to be accessed from remote devices
     /// through a relay server, proxying market data and commands.
     pub remote_manager: Arc<RemoteConnectionManager>,
+
+    /// Current session ID for uptime tracking
+    pub session_id: String,
 }
 
 /// Application configuration structure
@@ -331,6 +334,10 @@ fn main() {
             revoke_remote_device_cmd,
             get_paired_devices_cmd,
             update_relay_config_cmd,
+
+            // Session tracking commands
+            get_sessions_cmd,
+            get_current_session_cmd,
         ])
         
         // Run the application
@@ -378,6 +385,16 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
 
     let db = Arc::new(Mutex::new(conn));
 
+    // Record session start in database
+    let session_id = uuid::Uuid::new_v4().to_string();
+    {
+        let db_guard = db.blocking_lock();
+        let now = Utc::now().timestamp();
+        if let Err(e) = sqlite::insert_session(&db_guard, &session_id, now) {
+            eprintln!("Failed to record session start: {}", e);
+        }
+    }
+
     let state = AppState {
         db: db.clone(),
         http_client,
@@ -387,6 +404,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         config: Arc::new(Mutex::new(AppConfig::default())),
         ws_manager: ws_manager.clone(),
         remote_manager: create_remote_manager(app.handle().clone()),
+        session_id,
     };
     
     // 5. Manage state (accessible to all commands via State<'_, AppState>)
@@ -627,7 +645,12 @@ async fn graceful_shutdown(app_handle: tauri::AppHandle) {
     
     // 5. Database cleanup (VACUUM if needed, close connections)
     {
-        let _db = state.db.lock().await;
+        let db = state.db.lock().await;
+        // Record session end
+        let now = Utc::now().timestamp();
+        if let Err(e) = sqlite::end_session(&db, &state.session_id, now) {
+            eprintln!("Failed to record session end: {}", e);
+        }
         // sqlite::vacuum_database(&db).ok();
         info!("Database connections closed");
     }
@@ -2469,4 +2492,34 @@ async fn update_relay_config_cmd(
     state: State<'_, AppState>,
 ) -> Result<models::remote::RemoteStatus, String> {
     remote::update_relay_config(request, state.remote_manager.clone()).await
+}
+
+// -------------------------------------------------------------------------
+// Session Tracking Commands
+// -------------------------------------------------------------------------
+
+/// Get session history for the last N days (max 30)
+///
+/// Frontend: await invoke('get_sessions_cmd', { days: 30 })
+#[tauri::command]
+async fn get_sessions_cmd(
+    days: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<sqlite::Session>, String> {
+    let days = days.min(30);
+    let since = Utc::now().timestamp() - (days as i64 * 86400);
+    let db = state.db.lock().await;
+    sqlite::get_sessions_since(&db, since).map_err(|e| format!("Failed to get sessions: {}", e))
+}
+
+/// Get the current session info
+///
+/// Frontend: await invoke('get_current_session_cmd')
+#[tauri::command]
+async fn get_current_session_cmd(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "session_id": state.session_id,
+    }))
 }

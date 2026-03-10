@@ -294,6 +294,16 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         [],
     )?;
 
+    // Sessions table - tracks app session start/end times for uptime history
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER
+        )",
+        [],
+    )?;
+
     // Create indexes for performance
     create_indexes(conn)?;
 
@@ -1609,6 +1619,53 @@ pub fn delete_analyzer_chain(conn: &Connection, chain_id: &str) -> SqliteResult<
         params![chain_id],
     )?;
     Ok(())
+}
+
+// ============================================================================
+// SESSION TRACKING
+// ============================================================================
+
+/// Session record returned to the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}
+
+/// Insert a new session when the app starts
+pub fn insert_session(conn: &Connection, id: &str, started_at: i64) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO sessions (id, started_at) VALUES (?1, ?2)",
+        params![id, started_at],
+    )?;
+    Ok(())
+}
+
+/// Mark the current session as ended
+pub fn end_session(conn: &Connection, id: &str, ended_at: i64) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+        params![ended_at, id],
+    )?;
+    Ok(())
+}
+
+/// Get all sessions since a given timestamp, ordered by start time
+pub fn get_sessions_since(conn: &Connection, since: i64) -> SqliteResult<Vec<Session>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, ended_at FROM sessions WHERE started_at >= ?1 ORDER BY started_at ASC",
+    )?;
+    let sessions = stmt
+        .query_map(params![since], |row: &Row| {
+            Ok(Session {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                ended_at: row.get(2)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<Session>>>()?;
+    Ok(sessions)
 }
 
 #[cfg(test)]
