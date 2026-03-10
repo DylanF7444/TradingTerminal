@@ -719,24 +719,96 @@ async fn add_data_source_cmd(
 async fn remove_data_source_cmd(
     node_id: String,
     state: State<'_, AppState>,
+    monitor: State<'_, PersistentOrderbookState>,
+    orderbook_state: State<'_, OrderbookState>,
 ) -> Result<sqlite::DeleteNodeStats, String> {
     info!("Removing data source: {}", node_id);
-    
-    // Stop scraper
-    if let Some(handle) = state.active_scrapers.lock().await.remove(&node_id) {
-        scraper::stop_scraper(&handle).await.map_err(|e| e.to_string())?;
+
+    // Look up the node type before deletion so we can stop the right services
+    let node_info = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_node_by_id(&conn, &node_id).ok()
+    });
+
+    // Stop services based on node type
+    if let Some(ref node) = node_info {
+        match &node.node_type {
+            models::node::NodeType::InfoSource(_) => {
+                // Stop scraper
+                if let Some(handle) = state.active_scrapers.lock().await.remove(&node_id) {
+                    scraper::stop_scraper(&handle).await.map_err(|e| e.to_string())?;
+                }
+            }
+            models::node::NodeType::Market(market_type) => {
+                // Unsubscribe from persistent orderbook monitoring
+                if let Err(e) = monitor.unsubscribe_market(&node_id).await {
+                    eprintln!("Failed to unsubscribe orderbook monitor for {}: {}", node_id, e);
+                }
+
+                // Unsubscribe from WebSocket manager
+                let market_id = node.metadata.get("market_id")
+                    .or_else(|| node.metadata.get("condition_id"))
+                    .or_else(|| node.metadata.get("slug"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                if !market_id.is_empty() {
+                    let platform = match market_type {
+                        models::node::MarketType::Polymarket => {
+                            crate::services::websocket_manager::PlatformType::Polymarket
+                        }
+                        models::node::MarketType::Kalshi => {
+                            crate::services::websocket_manager::PlatformType::Kalshi
+                        }
+                    };
+                    if let Err(e) = state.ws_manager.unsubscribe(platform, market_id).await {
+                        eprintln!("Failed to unsubscribe WebSocket for {}: {}", node_id, e);
+                    }
+
+                    // Unsubscribe legacy orderbook subscription (market_id key)
+                    if let Err(e) = crate::services::orderbook::unsubscribe_orderbook(
+                        market_id, orderbook_state.subscriptions.clone()
+                    ).await {
+                        eprintln!("Failed to unsubscribe legacy orderbook for {}: {}", market_id, e);
+                    }
+                }
+
+                // Unsubscribe legacy orderbook subscription (token_ids composite key)
+                if let Some(token_ids) = node.metadata.get("token_ids").and_then(|v| v.as_array()) {
+                    let asset_ids: Vec<String> = token_ids.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if !asset_ids.is_empty() {
+                        let subscription_key = asset_ids.join(",");
+                        if let Err(e) = crate::services::orderbook::unsubscribe_orderbook(
+                            &subscription_key, orderbook_state.subscriptions.clone()
+                        ).await {
+                            eprintln!("Failed to unsubscribe legacy orderbook for token_ids {}: {}", subscription_key, e);
+                        }
+                    }
+                }
+            }
+            models::node::NodeType::Analyzer(_) => {
+                // Analyzer nodes don't have background services to stop
+            }
+        }
+    } else {
+        // Node not found in DB, but still try to stop any orphaned scraper
+        if let Some(handle) = state.active_scrapers.lock().await.remove(&node_id) {
+            scraper::stop_scraper(&handle).await.map_err(|e| e.to_string())?;
+        }
     }
-    
+
     // Delete node and all associated data (cascade delete)
     let stats = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
         sqlite::delete_node_cascade(&conn, &node_id)
             .map_err(|e| format!("Database error: {}", e))
     })?;
-    
-    info!("Data source removed: {} (deleted {} timeseries, {} websocket messages, {} connections)", 
+
+    info!("Data source removed: {} (deleted {} timeseries, {} websocket messages, {} connections)",
         node_id, stats.timeseries_deleted, stats.websocket_messages_deleted, stats.connections_deleted);
-    
+
     Ok(stats)
 }
 
@@ -1082,21 +1154,81 @@ async fn add_market_cmd(
 async fn remove_market_cmd(
     node_id: String,
     state: State<'_, AppState>,
+    monitor: State<'_, PersistentOrderbookState>,
+    orderbook_state: State<'_, OrderbookState>,
 ) -> Result<sqlite::DeleteNodeStats, String> {
     info!("Removing market connection: {}", node_id);
-    
+
+    // Look up the node before deletion so we can clean up services
+    let node_info = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_node_by_id(&conn, &node_id).ok()
+    });
+
+    // Stop market services
+    if let Some(ref node) = node_info {
+        // Unsubscribe from persistent orderbook monitoring
+        if let Err(e) = monitor.unsubscribe_market(&node_id).await {
+            eprintln!("Failed to unsubscribe orderbook monitor for {}: {}", node_id, e);
+        }
+
+        // Unsubscribe from WebSocket manager
+        if let models::node::NodeType::Market(market_type) = &node.node_type {
+            let market_id = node.metadata.get("market_id")
+                .or_else(|| node.metadata.get("condition_id"))
+                .or_else(|| node.metadata.get("slug"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            if !market_id.is_empty() {
+                let platform = match market_type {
+                    models::node::MarketType::Polymarket => {
+                        crate::services::websocket_manager::PlatformType::Polymarket
+                    }
+                    models::node::MarketType::Kalshi => {
+                        crate::services::websocket_manager::PlatformType::Kalshi
+                    }
+                };
+                if let Err(e) = state.ws_manager.unsubscribe(platform, market_id).await {
+                    eprintln!("Failed to unsubscribe WebSocket for {}: {}", node_id, e);
+                }
+
+                // Unsubscribe legacy orderbook subscription (market_id key)
+                if let Err(e) = crate::services::orderbook::unsubscribe_orderbook(
+                    market_id, orderbook_state.subscriptions.clone()
+                ).await {
+                    eprintln!("Failed to unsubscribe legacy orderbook for {}: {}", market_id, e);
+                }
+            }
+
+            // Unsubscribe legacy orderbook subscription (token_ids composite key)
+            // useAutoMarketSubscriptions subscribes with asset_ids.join(",") as the key
+            if let Some(token_ids) = node.metadata.get("token_ids").and_then(|v| v.as_array()) {
+                let asset_ids: Vec<String> = token_ids.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                if !asset_ids.is_empty() {
+                    let subscription_key = asset_ids.join(",");
+                    if let Err(e) = crate::services::orderbook::unsubscribe_orderbook(
+                        &subscription_key, orderbook_state.subscriptions.clone()
+                    ).await {
+                        eprintln!("Failed to unsubscribe legacy orderbook for token_ids {}: {}", subscription_key, e);
+                    }
+                }
+            }
+        }
+    }
+
     // Delete node and all associated data (cascade delete)
     let stats = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
         sqlite::delete_node_cascade(&conn, &node_id)
             .map_err(|e| format!("Database error: {}", e))
     })?;
-    
-    // TODO: Close WebSocket connection if active
-    
-    info!("Market node removed: {} (deleted {} timeseries, {} websocket messages, {} connections, {} positions)", 
+
+    info!("Market node removed: {} (deleted {} timeseries, {} websocket messages, {} connections, {} positions)",
         node_id, stats.timeseries_deleted, stats.websocket_messages_deleted, stats.connections_deleted, stats.positions_deleted);
-    
+
     Ok(stats)
 }
 

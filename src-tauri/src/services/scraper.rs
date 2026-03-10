@@ -225,8 +225,13 @@ pub async fn stop_scraper(handle: &ScraperHandle) -> Result<(), anyhow::Error> {
     handle.shutdown_tx.send(()).await.ok();
     
     // Try to wait for task to finish (with timeout)
-    match tokio::time::timeout(Duration::from_secs(5), async { 
-        let _ = &*handle.join_handle;
+    let join_handle = handle.join_handle.clone();
+    match tokio::time::timeout(Duration::from_secs(5), async move {
+        tokio::task::spawn_blocking(move || {
+            while !join_handle.is_finished() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }).await
     }).await {
         Ok(_) => println!("Scraper stopped gracefully"),
         Err(_) => {

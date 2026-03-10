@@ -380,12 +380,37 @@ export function useMarketOrderbookEvents(): void {
  */
 export function useAutoMarketSubscriptions(): void {
   const subscribedRef = useRef<Set<string>>(new Set());
+  // Track subscription keys per node so we can unsubscribe on removal
+  const subscriptionKeysRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
-    // Check for new market nodes every 2 seconds
+    // Check for new/removed market nodes every 2 seconds
     const interval = setInterval(() => {
       const { nodes } = useStore.getState();
 
+      // Detect removed nodes and unsubscribe their legacy WebSocket connections
+      const currentMarketNodeIds = new Set<string>();
+      Object.values(nodes).forEach((node) => {
+        if (node?.node_type && 'Market' in node.node_type) {
+          currentMarketNodeIds.add(node.id);
+        }
+      });
+
+      for (const nodeId of subscribedRef.current) {
+        if (!currentMarketNodeIds.has(nodeId)) {
+          const subscriptionKey = subscriptionKeysRef.current.get(nodeId);
+          if (subscriptionKey) {
+            console.log(`[AutoSub] Node ${nodeId} removed, unsubscribing legacy key: ${subscriptionKey}`);
+            invoke<string>('unsubscribe_orderbook_cmd', { marketId: subscriptionKey }).catch((e) => {
+              console.error(`[AutoSub] Failed to unsubscribe removed node ${nodeId}:`, e);
+            });
+            subscriptionKeysRef.current.delete(nodeId);
+          }
+          subscribedRef.current.delete(nodeId);
+        }
+      }
+
+      // Subscribe new market nodes
       Object.values(nodes).forEach(async (node) => {
         if (!node?.node_type || !('Market' in node.node_type)) return;
         if (subscribedRef.current.has(node.id)) return;
@@ -407,10 +432,14 @@ export function useAutoMarketSubscriptions(): void {
           if (marketType === 'Polymarket') {
             // For Polymarket, use the ws/market endpoint with CLOB token IDs
             const assetIds = tokenIds.length > 0 ? tokenIds : [marketId];
+            // Track the subscription key so we can unsubscribe later
+            subscriptionKeysRef.current.set(node.id, assetIds.join(','));
             console.log(`[AutoSub] Subscribing Polymarket node ${node.id} with asset IDs:`, assetIds);
             await invoke<string>('subscribe_polymarket_market_cmd', { assetIds });
             console.log(`[AutoSub] Polymarket subscription started for node ${node.id}`);
           } else if (marketType === 'Kalshi') {
+            // Track the subscription key
+            subscriptionKeysRef.current.set(node.id, marketId);
             // Try to get stored Kalshi credentials for authenticated subscription
             try {
               const creds = await invoke<{
@@ -444,6 +473,7 @@ export function useAutoMarketSubscriptions(): void {
           console.error(`[AutoSub] Failed to subscribe market node ${node.id}:`, e);
           // Remove from subscribed set so it can retry
           subscribedRef.current.delete(node.id);
+          subscriptionKeysRef.current.delete(node.id);
         }
       });
     }, 2000);
