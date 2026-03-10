@@ -1,43 +1,15 @@
 // ============================================================================
-// NODE ORDERBOOK POPUP COMPONENT
+// NodeOrderbookPopup.tsx - Compact orderbook popup for canvas market nodes
 // ============================================================================
 //
-// Module: components/Markets/NodeOrderbookPopup.tsx
-// Purpose: Compact orderbook popup for market nodes on the canvas
+// Renders a small overlay orderbook attached to a market node on the canvas.
+// Reads live data from the central Zustand store (populated by the persistent
+// orderbook monitor). Shows top bid/ask levels, spread, connection status,
+// and an optional raw WebSocket message stream view.
 //
-// OVERVIEW:
-// This component provides a compact, inline orderbook view that can be
-// displayed when clicking/selecting on a market node. It reads real-time
-// orderbook data from the central Zustand store (populated by the always-on
-// persistent orderbook monitor) in a condensed format suitable for overlay display.
+// For Polymarket, displays both YES and NO orderbooks side-by-side.
 //
-// DATA FLOW:
-// - Reads from store.orderbooks[marketId] (populated by usePersistentOrderbooks)
-// - No per-component WebSocket subscription needed
-// - Raw stream view still uses useRawOrderbookMessages listener
-//
-// INTEGRATION:
-// - Used by Node.tsx to display orderbook when market node is selected/hovered
-// - Reads from central Zustand store for live data
-// - For Kalshi, auth is handled by the persistent monitor
-//
-// FEATURES:
-// - Displays top 3-5 bid/ask levels (configurable via compact prop)
-// - Shows both YES and NO orderbooks for Polymarket markets
-// - Shows spread calculation (best ask - best bid)
-// - Connection status indicator (connecting/connected/error)
-// - Color-coded bid (green) and ask (red) levels
-// - Price formatting in cents (e.g., "45.5¢")
-// - Size formatting with K suffix for large sizes
-// - Automatic credential lookup for Kalshi authenticated subscriptions
-// - Toggle to view raw WebSocket message stream
-//
-// PROPS:
-// - marketId: Platform-specific market identifier (primary token)
-// - tokenIds: All token IDs for the market (YES and NO tokens)
-// - platform: 'polymarket' or 'kalshi'
-// - position: Optional offset for popup positioning
-// - compact: Show 3 levels (true) or 5 levels (false)
+// Key props: marketId, tokenIds, platform, position, compact, className.
 //
 // ============================================================================
 

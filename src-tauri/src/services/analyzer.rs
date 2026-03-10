@@ -5,223 +5,42 @@
 // Module: services/analyzer.rs
 // Purpose: Trading signal generation and market analysis
 //
-// OVERVIEW:
-// This module implements the "brain" of the trading terminal. It consumes
-// real-time data from scrapers, analyzes market conditions, detects arbitrage
-// opportunities, and generates trading signals for the executor service.
-//
 // ANALYSIS PIPELINE:
 //
-// Raw Data Input (from scrapers via channel)
-//   ↓
-// Data Normalization (parse, validate, convert to internal format)
-//   ↓
-// Feature Extraction (moving averages, volatility, correlation)
-//   ↓
-// Signal Generation (arbitrage detection, threshold breaches)
-//   ↓
-// Risk Filtering (position limits, correlation checks)
-//   ↓
-// Trading Signal Output (to executor via channel)
+//   Raw Data Input (from scrapers via channel)
+//     |
+//   Data Normalization (parse, validate, convert to internal format)
+//     |
+//   Feature Extraction (moving averages, volatility, correlation)
+//     |
+//   Signal Generation (arbitrage detection, momentum)
+//     |
+//   Risk Filtering (exposure limits, cooldown)
+//     |
+//   Trading Signal Output (to executor via channel)
+//
+// ARBITRAGE DETECTION:
+// Compares prices between prediction markets (e.g., Polymarket vs Kalshi)
+// for the same event. If YES + NO < 1.0 after fees, arbitrage exists.
+//
+//   Formula:
+//   profit = (1.0 - buy_yes_price - buy_no_price) - fees
+//
+//   Example:
+//   Polymarket YES: 0.52, NO: 0.49
+//   Kalshi     YES: 0.48, NO: 0.53
+//   Buy YES on Kalshi (0.48) + Buy NO on Polymarket (0.49) = 0.97
+//   Guaranteed payout: 1.00 -> Gross profit: 3%, Net after 2% fees: 1%
 //
 // ANALYSIS TYPES:
+// - Arbitrage: Cross-market price discrepancy detection
+// - Momentum: EMA-based trend signals with configurable thresholds
+// - Correlation: Welford's online algorithm for streaming correlation
+//   between external data sources and market prices
+// - Technical: SMA, EMA, RSI, volatility calculations
 //
-// 1. Arbitrage Detection (Cross-Market):
-//    Compares prices between Polymarket and Kalshi for the same event.
-//    If YES_price + NO_price != 1.0 (accounting for fees), arbitrage exists.
-//    
-//    Formula:
-//    buy_on = market with lower YES price
-//    sell_on = market with lower NO price (equivalent to higher YES)
-//    profit = (1.0 - buy_yes_price - buy_no_price) - fees
-//    
-//    Example:
-//    Polymarket YES: 0.52, NO: 0.49
-//    Kalshi YES: 0.48, NO: 0.53
-//    
-//    Arbitrage: Buy YES on Kalshi (0.48), Buy NO on Polymarket (0.49)
-//    Cost: 0.48 + 0.49 = 0.97
-//    Payout: 1.00 (guaranteed, one side wins)
-//    Gross Profit: 0.03 (3%)
-//    Net Profit: 0.03 - 0.02 (fees) = 0.01 (1%)
-//
-// 2. Correlation Analysis:
-//    Measures relationship between external data sources and market prices.
-//    Used for predictive modeling (e.g., BTC price vs BTC prediction market).
-//    
-//    Pearson Correlation: r = Σ((x - x̄)(y - ȳ)) / √(Σ(x-x̄)² Σ(y-ȳ)²)
-//    
-//    Interpretation:
-//    r = 1.0: Perfect positive correlation (move together)
-//    r = -1.0: Perfect negative correlation (move opposite)
-//    r = 0.0: No correlation
-//    
-//    Trading Application:
-//    If BTC spot price (source) correlates 0.85 with BTC prediction market,
-//    and spot jumps 5%, predict market will follow → Buy YES before market adjusts.
-//
-// 3. Technical Analysis:
-//    - Moving Averages: SMA, EMA for trend detection
-//    - RSI: Overbought/oversold detection (0-100 scale)
-//    - Bollinger Bands: Volatility-based entry/exit
-//    - Support/Resistance: Historical price levels
-//
-// 4. Sentiment Analysis:
-//    Analyzes news/social media for event impact.
-//    - Keyword extraction (NLP)
-//    - Sentiment scoring (-1.0 to +1.0)
-//    - Volume weighting (viral content vs niche)
-//    
-//    Signal: sentiment_score > 0.7 and volume > threshold → Buy YES
-//
-// SIGNAL STRUCTURE:
-//
-// TradingSignal:
-// - signal_id: UUID                    // Unique identifier
-// - strategy: String                   // "arbitrage", "momentum", "sentiment"
-// - confidence: f64 (0.0-1.0)          // Strength of signal (Kelly criterion input)
-// - market_id: String                  // Target market
-// - side: TradeSide                    // Buy YES or Buy NO
-// - suggested_size: f64                // Contracts recommended (optional, executor may override)
-// - max_slippage: f64                  // Acceptable price deviation (e.g., 0.01 = 1%)
-// - timestamp: i64                     // When signal generated
-// - metadata: JsonValue                // Arbitrage details, correlation data, etc.
-// - ttl_ms: u64                        // Time-to-live (signal expires if not executed)
-//
-// THRESHOLD CONFIGURATION:
-//
-// Minimum Edge (profit margin):
-// - Arbitrage: 0.5% (accounting for fees)
-// - Momentum: 2.0% (expected price move)
-// - Sentiment: 0.7 correlation with price
-//
-// These prevent trading on noise (transaction costs eat profits).
-//
-// CORRELATION TRACKING:
-//
-// Analyzer maintains rolling correlation windows:
-// - Short term: 1 hour (recent dynamics)
-// - Medium term: 24 hours (daily patterns)
-// - Long term: 7 days (structural relationships)
-//
-// Stored in memory (HashMap) and persisted to SQLite for persistence across restarts.
-//
-// RISK FILTERS:
-//
-// Before emitting signal, analyzer checks:
-// 1. Current exposure (don't double down on correlated bets)
-// 2. Recent trade frequency (cooldown periods)
-// 3. Market liquidity (can we actually fill the order?)
-// 4. News blackouts (avoid trading on stale data during API outages)
-//
-// STATE MANAGEMENT:
-//
-// - CORRELATION_CACHE: Arc<RwLock<HashMap<(String, String), CorrelationData>>>
-//   - Maps (source_id, market_id) → correlation statistics
-//   - Updated incrementally as new data arrives (online algorithm)
-//
-// - LAST_PRICES: Arc<RwLock<HashMap<String, f64>>>
-//   - Most recent price for each source/market
-//   - Used for change detection and momentum calculation
-//
-// - SIGNAL_HISTORY: Arc<RwLock<Vec<TradingSignal>>>
-//   - Recent signals for performance tracking
-//   - Used to avoid duplicate signals (same opportunity)
-//
-// - CONFIG: Arc<RwLock<AnalyzerConfig>>
-//   - Thresholds, window sizes, strategy weights
-//   - Hot-reloadable without restart
-//
-// ALGORITHMS:
-//
-// Online Correlation (Welford's algorithm for streaming data):
-// - Updates mean and covariance without storing all historical points
-// - Memory efficient for high-frequency data
-// - Numerically stable
-//
-// Arbitrage Detection:
-// - Periodically scans all market pairs (Polymarket vs Kalshi)
-// - For each shared event: calculate buy_yes + buy_no + fees
-// - If total < 1.0: arbitrage opportunity exists
-// - Ranks by profit margin (execute best first)
-//
-// Momentum Calculation:
-// - price_change = (current - previous) / previous
-// - Exponential moving average of price_change (smoothing)
-// - Generate signal when EMA crosses threshold
-//
-// EXTERNAL DEPENDENCIES:
-//
-// - statrs: Statistical computations (correlation, regression)
-// - rand: Monte Carlo simulations for probability estimation
-// - serde_json: Configuration and metadata handling
-// - tokio::time: Interval-based analysis triggers
-//
-// PERFORMANCE TARGETS:
-//
-// - Signal latency: <100ms from data arrival to signal emission
-// - Throughput: 1000 data points/second analyzed
-// - Memory: <100MB for correlation cache (10k pairs)
-// - CPU: <5% single core for continuous analysis
-//
-// ERROR HANDLING:
-//
-// - Invalid data (NaN, negative prices): Log and skip
-// - Insufficient data (new market): Wait for N samples before analysis
-// - Calculation overflow: Use f64 checked operations, fall back to 0.0
-// - Strategy panic: Catch with std::panic::catch_unwind, disable strategy
-//
-// TESTING:
-//
-// Unit tests:
-// - Correlation calculation accuracy (known datasets)
-// - Arbitrage math (verify profit calculations)
-// - Threshold logic (edge cases)
-//
-// Backtesting:
-// - Run analyzer on historical data (stored timeseries)
-// - Verify signals would have been profitable
-// - Optimize thresholds via grid search
-//
-// Paper Trading:
-// - Generate signals but don't execute (dry run)
-// - Track hypothetical P&L vs actual market movement
-// - Validate signal accuracy before going live
-//
-// USAGE EXAMPLE:
-//
-// ```rust
-// // In service initialization
-// let analyzer = Analyzer::new(config, scraper_rx, executor_tx);
-// tokio::spawn(analyzer.run());
-//
-// // Trading signal emitted automatically when conditions met
-// // Executor receives: TradingSignal { strategy: "arbitrage", confidence: 0.95, ... }
-// ```
-//
-// CONFIGURATION EXAMPLE:
-//
-// ```toml
-// [arbitrage]
-// min_profit_margin = 0.005  # 0.5%
-// max_execution_time_ms = 5000
-//
-// [correlation]
-// window_short_hours = 1
-// window_long_hours = 24
-// min_correlation_threshold = 0.7
-//
-// [momentum]
-// ema_period = 12  # 12-period EMA
-// threshold = 0.02  # 2% move
-// ```
-//
-// FUTURE ENHANCEMENTS:
-// - Machine learning models (LSTM for price prediction)
-// - Bayesian updating (revise probabilities as new data arrives)
-// - Cross-asset analysis (BTC price → crypto market sentiment)
-// - Order flow analysis (imbalance in orderbook as signal)
-// - Options-style pricing models for event probabilities
+// Minimum edge thresholds prevent trading on noise:
+//   Arbitrage: 0.5%, Momentum: 2.0%, Correlation: r > 0.7
 // ============================================================================
 
 use crate::models::market::TradeSide;

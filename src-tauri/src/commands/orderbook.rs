@@ -2,48 +2,20 @@
 // ORDERBOOK COMMANDS
 // ============================================================================
 //
-// Module: commands/orderbook.rs
-// Purpose: Tauri IPC commands for orderbook subscription management
+// Purpose: Tauri IPC commands for orderbook WebSocket subscription management.
 //
-// OVERVIEW:
-// This module provides the command interface between the frontend and the
-// orderbook WebSocket service. It exposes functions that can be invoked
-// from the TypeScript frontend via Tauri's IPC mechanism.
+// COMMANDS:
+//   subscribe_orderbook        - Start WebSocket subscription for a market
+//   unsubscribe_orderbook      - Stop specific subscription
+//   get_orderbook_subscriptions - List active subscriptions
+//   unsubscribe_all_orderbooks - Stop all subscriptions
+//   reconnect_orderbook        - Force reconnection
 //
-// AVAILABLE COMMANDS:
-// - subscribe_orderbook(platform, market_id) - Start WebSocket subscription
-// - unsubscribe_orderbook(platform, market_id) - Stop specific subscription
-// - get_orderbook_subscriptions() - List all active subscriptions
-// - unsubscribe_all_orderbooks() - Stop all subscriptions
-// - reconnect_orderbook(platform, market_id) - Force reconnection
+// Uses a consolidated stream manager that pools WebSocket connections by
+// platform (one connection per platform, multiplexed subscriptions).
 //
-// CONSOLIDATED STREAM MANAGER:
-// The new consolidated stream manager pools WebSocket connections by platform.
-// Instead of one connection per market, it maintains one connection per platform
-// and multiplexes subscriptions. This reduces connection overhead and allows
-// adding/removing channels without reconnecting.
-//
-// USAGE FROM FRONTEND:
-// ```typescript
-// import { invoke } from '@tauri-apps/api/core';
-// 
-// // Subscribe to Polymarket orderbook (uses consolidated manager)
-// await invoke('subscribe_orderbook_cmd', { 
-//   platform: 'polymarket', 
-//   marketId: '0x123...' 
-// });
-//
-// // Listen for updates
-// import { listen } from '@tauri-apps/api/event';
-// const unlisten = await listen('orderbook:update', (event) => {
-//   console.log('Orderbook update:', event.payload);
-// });
-// ```
-//
-// STATE MANAGEMENT:
-// OrderbookState holds the WebSocketManager which tracks all running
-// WebSocket connections. State is managed by Tauri and injected into commands.
-//
+// OrderbookState holds the WebSocketManager, injected into commands via
+// Tauri managed state.
 // ============================================================================
 
 use std::sync::Arc;

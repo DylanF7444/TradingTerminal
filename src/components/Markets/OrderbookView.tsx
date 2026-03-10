@@ -1,102 +1,22 @@
 // ============================================================================
-// ORDERBOOK VISUALIZATION COMPONENT
+// OrderbookView.tsx - Real-time orderbook display with trading controls
 // ============================================================================
 //
-// Module: components/Markets/OrderbookView.tsx
-// Purpose: Real-time orderbook display with depth visualization and trading controls
+// Renders a professional orderbook interface for prediction markets with
+// bid/ask depth visualization, spread indicator, bid/ask imbalance bar,
+// recent trades tape, and integrated quick-order buttons. Supports both
+// Polymarket and Kalshi markets with normalized price display (cents).
 //
-// OVERVIEW:
-// This component renders a professional-grade orderbook interface for prediction
-// markets, displaying bid/ask levels with depth visualization, recent trades,
-// and integrated order entry controls. It supports both Polymarket and Kalshi
-// market formats with normalized display.
+// Reads live orderbook data from the central Zustand store (populated by
+// the persistent orderbook monitor via usePersistentOrderbooks in App.tsx).
+// No per-component WebSocket subscription is needed.
 //
-// LIVE DATA INTEGRATION:
-// The component reads orderbook data from the central Zustand store, which is
-// populated by the always-on persistent orderbook monitor. Data flows as follows:
-//   1. usePersistentOrderbooks hook (mounted in App.tsx) subscribes all markets
-//   2. Backend PersistentOrderbookMonitor subscribes via WebSocket manager
-//   3. Backend emits 'orderbook:update' events
-//   4. usePersistentOrderbooks converts updates to Orderbook type in store
-//   5. Component reads from store.orderbooks[market.id] via selector
-//   6. Component re-renders with live data (no per-component subscription)
+// Includes a MultiLegOrderEntry toggle for categorical/multi-outcome markets.
 //
-// The component implements several visualization modes:
-//   - Standard: Traditional bid/ask columns
-//   - Depth: Cumulative volume histogram
-//   - Ladder: Price-centric vertical layout
-//   - Compact: Minimal view for small spaces
+// Key props: market, compact, depth, enableTrading, onLevelClick, className.
 //
-// Architecture Pattern:
-// Store-Driven Presenter with Real-time Data Stream
-//   Store: Central orderbooks cache populated by usePersistentOrderbooks
-//   Presenter: Pure rendering of orderbook state from Zustand store
-//   Integration: Direct order placement via trading API
-//
-// ORDERBOOK STRUCTURE:
-//
-// Prediction markets use CLOB (Central Limit Order Book) or AMM models:
-//   - CLOB: Discrete price levels with aggregated orders
-//   - AMM: Continuous pricing with liquidity curves
-//
-// This component primarily supports CLOB visualization with AMM adaptation.
-//
-// Price Representation:
-//   - Binary markets: 0.00 - 1.00 (represents 0-100% probability)
-//   - Scalar markets: Min - Max (contract-defined range)
-//   - Currency: Displayed as cents or basis points for precision
-//
-// Data Normalization:
-//   - All prices converted to 0-1 range internally
-//   - Display formatting based on market type
-//   - Size in number of contracts (notional = size * price)
-//
-// REAL-TIME UPDATES:
-//
-// WebSocket Event Handling:
-//   - L2 updates: Individual level changes (price, size)
-//   - L3 updates: Individual order changes (advanced)
-//   - Trade events: Last price, volume updates
-//   - Snapshot: Full book refresh on reconnect
-//
-// Update Throttling:
-//   - UI updates throttled to 60fps (16ms) maximum
-//   - Batched updates prevent render thrashing
-//   - RAF scheduling for smooth animations
-//
-// PERFORMANCE OPTIMIZATIONS:
-//
-// - Virtual scrolling for deep books (100+ levels)
-// - Memoized level components prevent unnecessary re-renders
-// - Canvas-based depth chart for large datasets
-// - Incremental updates (patch changes, don't rebuild)
-//
-// TRADING INTEGRATION:
-//
-// Click-to-Trade:
-//   - Click bid/ask level to auto-fill order form
-//   - Shift+click for market order at that level
-//   - Right-click for context menu (copy price, chart)
-//
-// Order Entry:
-//   - Inline quick order buttons
-//   - Full order modal for complex strategies
-//   - Position awareness (max size based on buying power)
-//
-// RISK DISPLAY:
-//
-// Visual indicators for:
-//   - Large orders (whale detection)
-//   - Spread width (tight/wide market)
-//   - Imbalance ratio (buy/sell pressure)
-//   - Recent trade direction (buyer/seller aggression)
-//
-// ACCESSIBILITY:
-//
-// - ARIA labels for price levels
-// - Keyboard navigation (arrow keys between levels)
-// - Screen reader announcements for updates
-// - High contrast mode support
+// Sub-components: OrderbookLevel (memoized row), SpreadIndicator,
+// RecentTrades, QuickOrderButtons.
 //
 // ============================================================================
 

@@ -5,220 +5,42 @@
 // Module: services/scraper.rs
 // Purpose: Background data collection from external APIs and feeds
 //
-// OVERVIEW:
-// This module implements the data ingestion layer of the prediction market terminal.
-// It manages concurrent, asynchronous scraping tasks that poll external data sources
-// and emit events to the frontend via Tauri's event system.
-//
 // ARCHITECTURE:
-// Each data source (crypto prices, news, weather, etc.) runs as an independent
-// Tokio task. Tasks are supervised and can be gracefully shut down. Data flows:
+// Each data source runs as an independent Tokio task. Tasks are supervised
+// and can be gracefully shut down via mpsc channels. Data flows:
 //
-// External API (CoinGecko, RSS, etc.)
-//   → Scraper Task (this module)
-//   → Parse/Validate
-//   → Store in SQLite (timeseries table)
-//   → Emit Tauri Event (WebSocket to frontend)
-//   → Update scraper_status (health monitoring)
+//   External API (CoinGecko, RSS, etc.)
+//     -> Scraper Task (this module)
+//     -> Parse/Validate
+//     -> Store in SQLite (timeseries table)
+//     -> Emit Tauri Event (to frontend)
+//     -> Update scraper_status (health monitoring)
 //
 // CONCURRENCY MODEL:
 // - One task per data source node (isolated failure domains)
 // - Shared HTTP client for connection pooling (reqwest::Client)
-// - Bounded channels for backpressure (prevent memory exhaustion)
-// - Cooperative cancellation (tokio::select! with shutdown signal)
-//
-// SCRAPER LIFECYCLE:
-//
-// 1. Initialization (spawn_scraper)
-//    - Parse configuration from node metadata
-//    - Create source-specific scraper instance
-//    - Spawn Tokio task with shutdown channel
-//    - Return JoinHandle and abort handle
-//
-// 2. Operation (run loop)
-//    - Fetch data from external API
-//    - Parse response (JSON/XML/HTML)
-//    - Validate data (range checks, schema validation)
-//    - Store in database (batch_insert_timeseries)
-//    - Emit event to frontend (Window::emit)
-//    - Update health status (last_update, data_points_collected)
-//    - Sleep until next interval
-//
-// 3. Shutdown (graceful stop)
-//    - Receive shutdown signal on mpsc channel
-//    - Finish current iteration (don't interrupt mid-write)
-//    - Close HTTP connections
-//    - Return final status
+// - Cooperative cancellation via tokio::select! with shutdown signal
+// - WebSocket-capable sources (e.g., Coinbase) use a dedicated WS scraper
 //
 // SUPPORTED SOURCES:
+// - CryptoPrices      (CoinGecko polling, Coinbase WebSocket)
+// - NewsSource        (RSS feeds, NewsAPI)
+// - SocialMedia       (Twitter/X, Reddit)
+// - Weather           (OpenWeatherMap)
+// - FinancialPrices   (Yahoo Finance, Alpha Vantage)
+// - CommodityPrices   (gold, oil, agricultural)
+// - Livestream        (YouTube, Twitch)
+// - EconomicIndicators (FRED API)
+// - OnChainData       (blockchain RPC)
 //
-// CryptoPrices:
-// - APIs: CoinGecko (free tier), Binance, CoinMarketCap
-// - Rate limits: 10-50 calls/minute typical
-// - Data: Price, volume, market cap, 24h change
-// - Interval: 5-60 seconds typical
+// SCRAPER LIFECYCLE:
+// 1. spawn_scraper() parses config, creates HTTP client or WS connection,
+//    spawns Tokio task with shutdown channel
+// 2. run_scraper() polls on interval, stores data, emits events
+// 3. Shutdown signal -> finish current iteration -> exit cleanly
 //
-// NewsSource:
-// - APIs: RSS feeds, NewsAPI, GDELT
-// - Rate limits: Varies by source
-// - Data: Headlines, content, sentiment scores, publish time
-// - Interval: 1-5 minutes (news doesn't change second-by-second)
-//
-// SocialMedia:
-// - APIs: Twitter/X API v2, Reddit API, StockTwits
-// - Rate limits: Very restrictive (expensive tiers)
-// - Data: Post text, engagement metrics, sentiment
-// - Interval: 30 seconds - 5 minutes
-//
-// Weather:
-// - APIs: OpenWeatherMap, NOAA, WeatherAPI
-// - Rate limits: 1000/day typical (free tier)
-// - Data: Temperature, precipitation, wind, alerts
-// - Interval: 10-30 minutes (weather changes slowly)
-//
-// FinancialPrices:
-// - APIs: Yahoo Finance, Alpha Vantage, IEX Cloud
-// - Rate limits: 5-100 calls/minute
-// - Data: Stock prices, forex rates, indices
-// - Interval: 5-60 seconds
-//
-// CommodityPrices:
-// - APIs: Commodities-API, Trading Economics
-// - Rate limits: 100-1000/month
-// - Data: Gold, oil, agricultural prices
-// - Interval: 1-60 minutes
-//
-// Livestream:
-// - APIs: YouTube Live API, Twitch API, custom streams
-// - Rate limits: 100-10000 units/day
-// - Data: Stream status, viewer count, chat messages
-// - Interval: 10-30 seconds
-//
-// ERROR HANDLING STRATEGY:
-//
-// Transient Errors (retry with backoff):
-// - Network timeout
-// - HTTP 429 (rate limit)
-// - HTTP 503 (service unavailable)
-// - Connection reset
-//
-// Permanent Errors (stop scraper, alert user):
-// - HTTP 401/403 (authentication failed)
-// - HTTP 404 (endpoint removed)
-// - Invalid API key (consistent auth failure)
-// - Schema change (parsing fails consistently)
-//
-// Retry Policy:
-// - Max 3 retries for transient errors
-// - Exponential backoff: 1s, 2s, 4s
-// - After max retries: mark scraper unhealthy, alert frontend
-//
-// STATE MANAGEMENT:
-//
-// Per-Scraper State (passed to task):
-// - node_id: String                    // For database writes and events
-// - config: ScraperConfig              // Parsed from node metadata
-// - db: Arc<Mutex<Connection>>         // SQLite connection (or pool reference)
-// - window: Window                     // Tauri window for event emission
-// - shutdown_rx: mpsc::Receiver<()>    // Cancellation signal
-// - client: reqwest::Client            // Shared HTTP client
-//
-// Global State (managed by commands layer):
-// - ACTIVE_SCRAPERS: HashMap<String, ScraperHandle>
-//   - Maps node_id → (JoinHandle, abort_handle, shutdown_tx)
-//   - Used for graceful shutdown and health checks
-//
-// HTTP CLIENT CONFIGURATION:
-//
-// Shared reqwest::Client with:
-// - Timeout: 30 seconds
-// - Connection pooling: reuse connections to same host
-// - User-Agent: "PredictionMarketTerminal/1.0"
-// - Compression: gzip, deflate
-// - Redirect policy: follow up to 10 redirects
-//
-// DATABASE INTEGRATION:
-//
-// Each data point becomes a TimeseriesPoint:
-// {
-//   timestamp: Unix epoch seconds,
-//   source_id: node_id,
-//   metric_type: "price" | "sentiment" | "temperature" | etc,
-//   value: f64,
-//   metadata: { exchange: "binance", symbol: "BTC" }
-// }
-//
-// Batching: Accumulate 10-100 points before INSERT for performance
-// (configurable per source type)
-//
-// EVENT EMISSION:
-//
-// Frontend receives Tauri events:
-// Event: "data-source:update"
-// Payload: {
-//   nodeId: "550e8400...",
-//   sourceType: "CryptoPrices",
-//   data: { price: 50000, symbol: "BTC", change_24h: 0.05 },
-//   timestamp: 1706200000
-// }
-//
-// Used by Canvas to flash node border (new data indicator)
-// and by charts to append data points.
-//
-// TESTING:
-//
-// Unit Tests (cargo test):
-// - Mock HTTP server (wiremock) returns sample API responses
-// - Verify parsing logic for each source type
-// - Test retry logic with simulated failures
-// - Validate database writes (in-memory SQLite)
-//
-// Integration Tests:
-// - Test against real APIs (rate-limited, use sparingly)
-// - Verify graceful shutdown behavior
-// - Load test: 50 concurrent scrapers
-//
-// Manual Testing:
-// - Start scraper, verify data appears in UI
-// - Disconnect network, verify retry behavior
-// - Reconnect network, verify recovery
-// - Stop scraper, verify clean shutdown
-//
-// PERFORMANCE TARGETS:
-//
-// - Startup time: <100ms per scraper
-// - Memory per scraper: <10MB (including HTTP buffers)
-// - CPU: <1% per scraper at 5-second intervals
-// - Database writes: <5ms per batch (SQLite with WAL)
-// - End-to-end latency: <500ms (API response → UI update)
-//
-// SECURITY CONSIDERATIONS:
-//
-// - API keys stored in Tauri secure storage, never in logs
-// - HTTPS only (certificate validation enabled)
-// - Request timeouts prevent hanging connections
-// - Rate limiting enforced to prevent IP bans
-// - No SSRF: URLs validated against allowlist
-//
-// MONITORING:
-//
-// Each scraper reports metrics:
-// - last_successful_scrape: timestamp
-// - total_requests: u64
-// - failed_requests: u64
-// - average_response_time_ms: f64
-// - current_error: Option<String>
-//
-// Visible in UI via get_data_source_status() command.
-//
-// FUTURE ENHANCEMENTS:
-//
-// - Adaptive rate limiting (slow down if errors increase)
-// - Circuit breaker pattern (stop after N consecutive failures)
-// - Data validation pipelines (schema enforcement)
-// - Proxy support for geo-restricted APIs
-// - Webhook receivers (push instead of poll)
-// - Distributed scraping (multiple IPs for rate limit evasion)
+// Error handling uses exponential backoff (max 3 retries) with a circuit
+// breaker that stops after 5 consecutive failures.
 // ============================================================================
 
 use crate::models::node::InfoSourceType;

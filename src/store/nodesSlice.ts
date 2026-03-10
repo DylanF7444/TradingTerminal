@@ -2,283 +2,31 @@
 // NODE GRAPH STATE MANAGEMENT SLICE
 // ============================================================================
 //
-// Module: store/nodesSlice.ts
-// Purpose: Zustand state slice managing the prediction market node graph
+// Zustand slice managing the interactive node graph for prediction markets.
+// Handles InfoSource nodes (crypto, news, weather) and Market nodes
+// (Polymarket, Kalshi), their spatial positions, and connection topology.
 //
-// OVERVIEW:
-// This slice manages the complete state of the interactive node graph, including
-// all information sources (crypto prices, news, weather) and prediction market
-// nodes (Polymarket, Kalshi). It handles node lifecycle, spatial positioning,
-// and connection topology between data sources and trading markets.
+// State Shape (normalized for O(1) lookups):
+//   nodes: Record<string, Node>          - All graph nodes keyed by ID
+//   connections: Connection[]             - Edges with source/target IDs and strength
+//   selectedIds: Set<string>              - Multi-selection support
+//   viewport: { x, y, zoom }             - Canvas pan/zoom transform
+//   lastInteraction: number               - Timestamp for auto-save debouncing
+//   rawDataStreams: Record<string, RawStreamEntry[]> - Debug data per node
 //
-// The slice implements a normalized state structure optimized for O(1) lookups
-// and efficient updates when nodes move or connections change. It supports
-// complex graph operations like multi-selection, auto-layout algorithms, and
-// correlation-based connection strength calculation.
+// Actions: addNode, removeNode, updateNodePosition, updateNodeSize,
+//   updateNodeMetadata, updateNodes, addConnection, removeConnection,
+//   updateConnectionStrength, clearNodeConnections, selectNode, clearSelection,
+//   selectNodes, setViewport, centerOnNode, fitToView, autoLayout,
+//   importGraph, exportGraph, resetGraph, appendRawDataEntry,
+//   clearRawDataStream, clearAllRawDataStreams
 //
-// Architecture Pattern:
-// Normalized State Shape (Redux best practice adapted for Zustand)
-//   nodes: { [id: string]: Node }     // Fast lookup by ID
-//   connections: Connection[]         // Array of edges (source → target)
-//   selectedIds: Set<string>          // Multi-selection support
-//   viewport: { x, y, zoom }          // Canvas transform state
-//   rawDataStreams: { [id: string]: RawStreamEntry[] } // Debug data streams
-//
-// STATE NORMALIZATION:
-// Instead of storing nodes as an array (Node[]), we use a dictionary object
-// keyed by node ID. This enables:
-//   - O(1) node lookup vs O(n) array find()
-//   - O(1) updates (no array immutability overhead)
-//   - Stable references (same object reference if data unchanged)
-//   - Easy serialization for persistence
-//
-// CONNECTION TOPOLOGY:
-// Connections are stored as lightweight objects with source/target IDs.
-// The actual line rendering calculates coordinates by looking up node positions
-// in the normalized nodes dictionary. This prevents data duplication and
-// ensures connections always reflect current node positions.
-//
-// RAW DATA STREAMS:
-// Each node can have an associated raw input stream that stores recent data
-// entries for debugging and connectivity verification. This allows users to:
-//   - Verify that nodes are receiving data from connected sources
-//   - Inspect the raw JSON payloads being processed
-//   - Debug connection issues by viewing the data flow history
-// The stream is capped at MAX_STREAM_ENTRIES_PER_NODE (50) to prevent memory
-// exhaustion from high-frequency data sources.
-//
-// INTER-SLICE COMMUNICATION:
-// This slice exposes actions that other slices (marketsSlice, positionsSlice)
-// can subscribe to. When a market node is added, marketsSlice can react to
-// initialize market data fetching.
-//
-// SLICE INTERFACE:
-//
-// State:
-//   nodes: Record<string, Node>
-//     - Dictionary of all graph nodes by ID
-//     - Includes both InfoSource and Market node types
-//     - Positions stored in world coordinates (not screen pixels)
-//
-//   connections: Connection[]
-//     - Array of edges linking sources to markets
-//     - Strength property (0.0-1.0) represents correlation/confidence
-//     - Used by Canvas.tsx for bezier curve rendering
-//
-//   selectedIds: Set<string>
-//     - Currently selected node IDs (supports multi-select with Ctrl/Cmd)
-//     - Drives right sidebar content (NodeDetailsPanel.extracted.tsx)
-//     - Visual highlighting via selectedNodeId prop to Canvas
-//
-//   viewport: { x: number, y: number, zoom: number }
-//     - Canvas pan offset in pixels
-//     - Zoom scale factor (0.1 = 10%, 3.0 = 300%)
-//     - Persisted to maintain view between sessions
-//
-//   lastInteraction: number
-//     - Timestamp of last user interaction
-//     - Used for auto-save debouncing and activity detection
-//
-//   rawDataStreams: Record<string, RawStreamEntry[]>
-//     - Raw input stream data per node for debugging
-//     - Key: node ID, Value: array of recent raw data entries
-//     - Used by RawStreamTab component (components/Nodes/RawStreamTab.tsx)
-//
-// Actions:
-//
-// 1. addNode(node: Node): void
-//    - Adds new node to the graph (from SourcePanel or MarketPanel)
-//    - Auto-generates unique ID if not provided
-//    - Initializes position near center if not specified
-//    - Triggers layout recalculation if autoLayout enabled
-//
-// 2. removeNode(id: string): void
-//    - Removes node and all associated connections
-//    - Cascading cleanup: removes connections where node is source or target
-//    - Archives node data to history (for undo functionality)
-//    - Deselects if currently selected
-//
-// 3. updateNodePosition(id: string, position: [number, number]): void
-//    - Updates node coordinates during drag operations
-//    - Called continuously during mouse move (throttled in Canvas.tsx)
-//    - Triggers connection redraw via React state update
-//    - Updates lastInteraction timestamp
-//
-// 4. updateNodeMetadata(id: string, metadata: Record<string, any>): void
-//    - Updates node configuration (API keys, symbols, intervals)
-//    - Merges partial metadata (shallow merge) with existing
-//    - Used when editing node settings in right sidebar
-//
-// 5. addConnection(connection: Connection): void
-//    - Creates edge between source and target nodes
-//    - Validates both nodes exist before adding
-//    - Prevents duplicate connections (same source/target pair)
-//    - Recalculates initial strength based on correlation
-//
-// 6. removeConnection(source: string, target: string): void
-//    - Removes specific edge from graph
-//    - Used when user clicks connection and deletes
-//    - Updates connection strength visualization
-//
-// 7. updateConnectionStrength(source: string, target: string, strength: number): void
-//    - Updates correlation strength (0.0-1.0) for visualization
-//    - Called periodically by analyzer service when correlation changes
-//    - Affects line thickness and opacity in Canvas rendering
-//
-// 8. selectNode(id: string, multi?: boolean): void
-//    - Sets selected node (or adds to selection if multi=true)
-//    - Drives right sidebar detail view (NodeDetailsPanel.extracted.tsx)
-//    - Clears selection if id is null
-//
-// 9. clearSelection(): void
-//    - Deselects all nodes
-//    - Called when clicking empty canvas area
-//
-// 10. setViewport(viewport: { x, y, zoom }): void
-//     - Updates canvas pan/zoom state
-//     - Called by Canvas.tsx wheel and pan handlers
-//     - Persisted to localStorage for session restoration
-//
-// 11. autoLayout(): void
-//     - Runs force-directed graph algorithm on all nodes
-//     - Uses graphLayout.ts utility (d3-force or custom implementation)
-//     - Animates nodes to new positions over 500ms
-//     - Useful for organizing messy manual layouts
-//
-// 12. importGraph(graph: { nodes: Node[], connections: Connection[] }): void
-//     - Bulk import for loading saved strategies
-//     - Replaces entire current graph state
-//     - Validates node types and connection integrity
-//
-// 13. exportGraph(): { nodes: Node[], connections: Connection[] }
-//     - Serializes current graph for saving to file
-//     - Used by storage commands to persist strategies
-//
-// 14. resetGraph(): void
-//     - Clears all nodes and connections (factory reset)
-//     - Confirmation required in UI (destructive action)
-//
-// DERIVED STATE (Selectors):
-//
-// getNodeById(id: string): Node | undefined
-//   - O(1) lookup in normalized state
-//   - Used by Canvas/Node.tsx for rendering individual nodes
-//
-// getNodesByType(type: NodeType): Node[]
-//   - Filters nodes by InfoSource or Market category
-//   - Used by SourcePanel and MarketPanel for lists
-//
-// getConnectedNodes(nodeId: string): Node[]
-//   - Returns all nodes connected to given node
-//   - Used for highlighting related nodes on hover
-//
-// getIncomingConnections(nodeId: string): Connection[]
-//   - Returns connections where node is the target
-//   - Used by Market nodes to know which sources feed them
-//
-// getOutgoingConnections(nodeId: string): Connection[]
-//   - Returns connections where node is the source
-//   - Used by InfoSource nodes to know which markets they influence
-//
-// getSelectedNodes(): Node[]
-//   - Returns full node objects for selected IDs
-//   - Used by right sidebar to render detail panels
-//
-// getGraphBounds(): { minX, minY, maxX, maxY }
-//   - Calculates bounding box of all node positions
-//   - Used for auto-fit zoom and mini-map rendering
-//
-// PERSISTENCE STRATEGY:
-//
-// Auto-Save:
-//   - Debounced save (2 second delay after last interaction)
-//   - Stores to Tauri backend via storage::store_timeseries
-//   - Includes full graph state (nodes, connections, viewport)
-//
-// Manual Save:
-//   - Explicit exportGraph() action for strategy files
-//   - JSON format with schema version for migration
-//
-// Session Restore:
-//   - Loads last graph on app startup
-//   - Falls back to empty graph if corrupted
-//
-// PERFORMANCE OPTIMIZATIONS:
-//
-// - Normalized state prevents unnecessary re-renders
-// - Selector functions memoized via Zustand's built-in optimization
-// - Batch updates for multi-node operations (layout, import)
-// - Connection strength updates throttled to 100ms
-// - Viewport changes debounced for persistence
-//
-// MEMORY MANAGEMENT:
-//
-// - Removed nodes archived to history (max 50 entries)
-// - Connection objects lightweight (no duplicate position data)
-// - Node metadata limited to serializable JSON
-//
-// TYPE SAFETY:
-//
-// All actions fully typed via TypeScript:
-//   - Node IDs are branded types (string & { __brand: 'NodeId' })
-//   - Position tuples enforce [x, y] structure
-//   - Metadata validated against node type schemas
-//
-// INTEGRATION POINTS:
-//
-// Backend (Tauri):
-//   - addNode triggers commands::data_sources::add_data_source
-//   - removeNode triggers commands::data_sources::remove_data_source
-//   - updateNodePosition triggers commands::data_sources::update_node_position_cmd
-//   - Connection changes notify analyzer to recalculate correlations
-//
-// Other Slices:
-//   - marketsSlice reacts to market node additions
-//   - positionsSlice links positions to market node IDs
-//
-// Components:
-//   - Canvas.tsx subscribes to nodes, connections, viewport
-//   - SourcePanel.tsx uses getNodesByType for source list
-//   - Node.tsx receives individual node via getNodeById
-//
-// USAGE EXAMPLE:
-// ```tsx
-// // In component
-// const { nodes, addNode, updateNodePosition } = useNodeStore();
-// 
-// // Add crypto source
-// const handleAddCrypto = () => {
-//   addNode({
-//     id: crypto.randomUUID(),
-//     node_type: { InfoSource: InfoSourceType.CryptoPrices },
-//     position: [100, 100],
-//     connections: [],
-//     metadata: { symbols: ['BTC', 'ETH'] }
-//   });
-// };
-// 
-// // Subscribe to specific node (optimized re-render)
-// const node = useNodeStore(state => state.nodes[nodeId]);
-// ```
-//
-// DEPENDENCIES:
-// - zustand (state management)
-// - immer (via zustand/middleware for immutable updates)
-// - ../types/nodes (Node, Connection, NodeType types)
-// - ../utils/graphLayout (force-directed layout algorithm)
-//
-// MIDDLEWARE:
-// - persist: Saves to localStorage (viewport only, not full graph)
-// - devtools: Redux DevTools integration for debugging
-// - immer: Enables mutable syntax for immutable updates
-//
-// FUTURE ENHANCEMENTS:
-// - Undo/redo stack (command pattern)
-// - Node grouping/folders for organization
-// - Graph versioning for strategy iterations
-// - Collaborative editing (WebRTC sync)
-// - Node templates for common configurations
-//
+// Key Design Decisions:
+//   - Normalized dict (not array) for nodes enables O(1) lookup/update
+//   - Connections store only IDs; coordinates resolved at render time
+//   - Raw data streams capped at 50 entries per node to bound memory
+//   - Inter-slice: marketsSlice reacts to market node adds,
+//     positionsSlice links positions to market node IDs
 // ============================================================================
 
 import { StateCreator } from 'zustand';

@@ -1,239 +1,28 @@
-
 // ============================================================================
 // POSITION MODEL
 // ============================================================================
 //
-// Module: models/position.rs
-// Purpose: Data model and business logic for trading positions
-//
-// OVERVIEW:
-// This module defines the Position struct and associated methods for tracking
-// trading positions in prediction markets. A position represents a bet on a
-// binary outcome (YES/NO) with complete lifecycle management from entry to exit.
+// Purpose: Data model and business logic for trading positions in prediction markets.
 //
 // POSITION LIFECYCLE:
-// 1. Position created (new())
-//    - Status: "open"
-//    - Entry price and time recorded
-//    - Fees calculated (entry fees)
-// 
-// 2. Position monitored
-//    - Unrealized P&L calculated continuously (calculate_unrealized_pnl())
-//    - Based on current market price
-//    - UI shows live updates
-//
-// 3. Position closed (close())
-//    - Status: "open" → "closed"
-//    - Exit price and time recorded
-//    - Exit fees added
-//    - Realized P&L calculated (final profit/loss)
-//
-// 4. OR Position fails (mark_failed())
-//    - Status: "open" → "failed"
-//    - Reason stored in metadata
-//    - No P&L calculation
-//
-// PREDICTION MARKET MECHANICS:
-// Prediction markets use probability-based pricing:
-// - Prices range from 0.0 to 1.0 (0% to 100% probability)
-// - Buy "YES" at 0.60 = betting outcome will happen (60% implied probability)
-// - Buy "NO" at 0.40 = betting outcome won't happen (same as selling YES)
-// - YES price + NO price ≈ 1.0 (market equilibrium)
+//   1. Created via new() -> status "open", entry price/time recorded
+//   2. Monitored via calculate_unrealized_pnl(current_price)
+//   3. Closed via close(exit_price, time, fees) -> status "closed", realized P&L computed
+//   4. Or failed via mark_failed(reason) -> status "failed"
 //
 // POSITION TYPES:
-// 
-// Long Position (position_type = "long"):
-// - Buying YES contracts
-// - Profit when price increases
-// - Example: Buy YES at 0.50, sell at 0.60 → profit 0.10 per contract
+//   Long  - Buying YES contracts, profit when price increases
+//   Short - Buying NO contracts, profit when price decreases
 //
-// Short Position (position_type = "short"):
-// - Buying NO contracts (or selling YES)
-// - Profit when price decreases
-// - Example: Buy NO at 0.50 (YES is 0.50), YES drops to 0.40 → profit 0.10
+// P&L CALCULATION:
+//   Unrealized: (current_price - entry_price) * quantity - fees (long)
+//   Short positions invert the price direction.
+//   Realized P&L includes both entry and exit fees.
 //
-// STRUCT FIELDS:
-//
-// id: String
-// - Unique identifier (UUID v4)
-// - Used to reference position in database
-//
-// market_id: String
-// - Foreign key to nodes table (market node)
-// - Example: "polymarket:election-2026"
-//
-// market_type: String
-// - "Polymarket", "Kalshi", etc.
-// - Determines fee structure and API calls
-//
-// position_type: String
-// - "long" or "short"
-// - Affects P&L calculation direction
-//
-// quantity: f64
-// - Number of contracts
-// - Example: 100.0 contracts at $0.50 = $50 position
-//
-// entry_price: f64
-// - Price per contract when position opened (0.0 to 1.0)
-// - Example: 0.52 (52% probability)
-//
-// exit_price: Option<f64>
-// - Price when position closed
-// - None if still open
-//
-// entry_time: i64
-// - Unix timestamp when position opened
-// - Example: 1704067200 (Jan 1, 2024 00:00:00 UTC)
-//
-// exit_time: Option<i64>
-// - Unix timestamp when position closed
-// - None if still open
-//
-// realized_pnl: Option<f64>
-// - Final profit/loss after closing
-// - None if still open
-// - Negative = loss, Positive = profit
-//
-// fees: f64
-// - Total fees paid (entry + exit)
-// - Polymarket: ~2% per trade
-// - Kalshi: ~1% per trade
-// - Accumulated as position progresses
-//
-// status: String
-// - "open" - Position is active
-// - "closed" - Position was exited normally
-// - "failed" - Order was rejected or error occurred
-//
-// metadata: JsonValue
-// - Additional data (order IDs, notes, tags)
-// - Flexible JSON object for extensibility
-// - Example: {"order_id": "abc123", "strategy": "arbitrage"}
-//
-// PUBLIC METHODS:
-//
-// new(market_id, market_type, position_type, quantity, entry_price, entry_time, fees) -> Position
-// - Constructor for new open position
-// - Generates UUID for id
-// - Sets status to "open"
-// - Initializes empty metadata
-// - Example:
-//   Position::new(
-//       "market-123".to_string(),
-//       "Polymarket".to_string(),
-//       "long".to_string(),
-//       100.0,    // 100 contracts
-//       0.52,     // entry at 52 cents
-//       1704067200,
-//       1.04      // 2% fee on $52 position
-//   )
-//
-// calculate_unrealized_pnl(&self, current_price: f64) -> f64
-// - Calculates profit/loss if position were closed now
-// - For open positions: (current_price - entry_price) * quantity - fees
-// - For closed positions: Returns realized_pnl
-// - For long: profit when price increases
-// - For short: profit when price decreases
-// - Returns: f64 (can be negative for losses)
-// - Example:
-//   Long position: bought 100 @ 0.50, current 0.60
-//   P&L = (0.60 - 0.50) * 100 - 2.0 = 10.0 - 2.0 = $8.00 profit
-//
-// close(&mut self, exit_price: f64, exit_time: i64, exit_fees: f64)
-// - Closes an open position
-// - Sets exit_price and exit_time
-// - Adds exit_fees to total fees
-// - Calculates final realized_pnl
-// - Changes status to "closed"
-// - Example:
-//   position.close(0.65, 1704153600, 1.30); // Close at 65 cents with $1.30 exit fee
-//
-// mark_failed(&mut self, reason: String)
-// - Marks position as failed
-// - Sets status to "failed"
-// - Stores failure reason in metadata["failure_reason"]
-// - Used for: insufficient liquidity, API errors, risk limit violations
-// - Example:
-//   position.mark_failed("Insufficient liquidity in orderbook".to_string());
-//
-// P&L CALCULATION EXAMPLES:
-//
-// Example 1: Profitable Long Position
-// - Buy 100 YES contracts at 0.50 (cost: $50)
-// - Entry fee: 2% = $1.00
-// - Price rises to 0.60
-// - Unrealized P&L: (0.60 - 0.50) * 100 - 1.00 = $9.00
-// - Sell at 0.60 (receive: $60)
-// - Exit fee: 2% = $1.20
-// - Realized P&L: (0.60 - 0.50) * 100 - 1.00 - 1.20 = $7.80 profit
-//
-// Example 2: Losing Short Position
-// - Buy 100 NO contracts at 0.40 (YES is 0.60, cost: $40)
-// - Entry fee: 2% = $0.80
-// - YES price falls to 0.50 (NO price rises to 0.50)
-// - Short profits when YES falls, so this is GOOD
-// - Unrealized P&L: (0.60 - 0.50) * 100 - 0.80 = $9.20 profit
-// - Close at NO 0.50 (receive: $50)
-// - Exit fee: 2% = $1.00
-// - Realized P&L: (0.60 - 0.50) * 100 - 0.80 - 1.00 = $8.20 profit
-//
-// Example 3: Failed Position
-// - Attempt to buy 10000 YES at 0.52
-// - Orderbook only has 500 contracts available
-// - Order rejected by exchange
-// - mark_failed("Insufficient liquidity")
-// - No P&L, just loss of time
-//
-// FEE STRUCTURES BY MARKET:
-//
-// Polymarket:
-// - Trading fee: ~2% per side (entry + exit = 4% total)
-// - Example: $100 position → $2 entry fee, $2 exit fee = $4 total
-//
-// Kalshi:
-// - Trading fee: ~1% per side (entry + exit = 2% total)
-// - Lower fees but sometimes lower liquidity
-//
-// Custom markets:
-// - Fees passed in as parameters
-// - Flexible for future market integrations
-//
-// USAGE IN TRADING FLOW:
-//
-// 1. Analyzer detects arbitrage opportunity
-// 2. Executor creates Position:
-//    let mut position = Position::new(...);
-// 3. Executor places order via market API
-// 4. If successful: insert_position(&conn, &position)?;
-// 5. If failed: position.mark_failed(reason);
-// 6. UI monitors with calculate_unrealized_pnl(current_price)
-// 7. When exit condition met:
-//    position.close(exit_price, exit_time, exit_fees);
-//    update_position_in_db(&position)?;
-//
-// EXTERNAL DEPENDENCIES:
-// - serde: Serialization for database storage
-// - serde_json: JSON metadata handling
-// - uuid: Unique ID generation (if used)
-//
-// TESTING:
-// Comprehensive test suite covering:
-// - Position creation
-// - Unrealized P&L calculation (long/short)
-// - Position closing with fee accumulation
-// - Failed position marking
-// - Edge cases (zero quantity, 100% price moves)
-//
-// FUTURE ENHANCEMENTS:
-// - Add position.partial_close() for scaling out
-// - Implement stop-loss/take-profit triggers
-// - Add average_down() / average_up() for adding to positions
-// - Track individual fills (for partial execution)
-// - Add position.duration() helper method
-// - Implement position.roi() (return on investment %)
+// FEE STRUCTURES:
+//   Polymarket ~2% per side, Kalshi ~1% per side.
+//   Fees are accumulated on the Position struct across entry and exit.
 // ============================================================================
-
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;

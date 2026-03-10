@@ -2,47 +2,21 @@
 // CONSOLIDATED WEBSOCKET STREAM MANAGER
 // ============================================================================
 //
-// Module: services/websocket_manager.rs
-// Purpose: Manage consolidated WebSocket connections per platform
+// Purpose: Connection pooling for WebSocket streams -- one connection per
+// platform instead of one per market, with multiplexed subscriptions.
 //
-// OVERVIEW:
-// This module implements a connection pooling system for WebSocket streams.
-// Instead of creating a new WebSocket connection for each market/channel,
-// it maintains a single connection per platform and multiplexes subscriptions.
-//
-// BENEFITS:
-// - Reduced connection overhead (1 connection per platform vs 1 per market)
-// - Efficient subscription management (add/remove channels without reconnecting)
-// - Better resource utilization (shared event loop, single heartbeat)
-// - Simplified error handling and reconnection logic
+// Benefits: reduced connection overhead, add/remove channels without
+// reconnecting, shared heartbeat, simplified reconnection logic.
 //
 // ARCHITECTURE:
-// ┌─────────────────────────────────────────────────────────────────┐
-// │                    WebSocketManager                              │
-// ├─────────────────────────────────────────────────────────────────┤
-// │  polymarket_connection: Option<PlatformConnection>              │
-// │  kalshi_connection: Option<PlatformConnection>                  │
-// │  binance_connection: Option<PlatformConnection>                 │
-// └─────────────────────────────────────────────────────────────────┘
-//                           │
-//                           ▼
-// ┌─────────────────────────────────────────────────────────────────┐
-// │                    PlatformConnection                            │
-// ├─────────────────────────────────────────────────────────────────┤
-// │  task_handle: JoinHandle                                        │
-// │  command_tx: mpsc::Sender<ConnectionCommand>                    │
-// │  subscribed_channels: HashSet<String>                           │
-// │  platform: Platform                                             │
-// └─────────────────────────────────────────────────────────────────┘
+//   WebSocketManager holds one PlatformConnection per platform
+//   (polymarket, kalshi, binance). Each PlatformConnection has a Tokio
+//   task handle, mpsc command channel, and subscribed channel set.
 //
 // FLOW:
-// 1. subscribe_market(platform, market_id) called
-// 2. Check if platform connection exists
-//    - If not, create new connection with initial subscription
-//    - If yes, send AddSubscription command to update subscriptions
-// 3. Connection task receives command, sends subscribe message to WebSocket
-// 4. Messages received are parsed and emitted to frontend with market_id
-//
+//   subscribe_market(platform, id) -> create or reuse connection
+//   -> send AddSubscription command -> WebSocket subscribe message
+//   -> messages parsed and emitted to frontend with market_id
 // ============================================================================
 
 use anyhow::{Result, anyhow};
@@ -360,6 +334,7 @@ async fn run_polymarket_consolidated(
 
                             // For array messages (initial book snapshots), emit raw for each element
                             if let Some(arr) = value.as_array() {
+                                println!("[DEBUG] Polymarket consolidated received ARRAY snapshot with {} items", arr.len());
                                 for item in arr {
                                     if let Some(aid) = item.get("asset_id").and_then(|v| v.as_str()) {
                                         let raw_msg = RawWebSocketMessage {
@@ -380,8 +355,9 @@ async fn run_polymarket_consolidated(
                         // and single objects (incremental updates)
                         match parse_polymarket_market_all(&text, &all_asset_ids) {
                             Ok(updates) => {
-                                println!("[Polymarket Market] Received {} update(s): {:?}", updates.len(), updates);
+                                println!("[DEBUG] Polymarket consolidated: Received {} update(s)", updates.len());
                                 for update in updates {
+                                    println!("[DEBUG] Emitting orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
                                     if let Err(e) = app_handle.emit("orderbook:update", &update) {
                                         eprintln!("[Polymarket Consolidated] Failed to emit update: {}", e);
                                     }
@@ -642,6 +618,7 @@ async fn run_kalshi_consolidated(
                                 
                                 match parse_kalshi_message(&text, &ticker, bids, asks, &mut sequence) {
                                     Ok(Some(update)) => {
+                                        println!("[DEBUG] Emitting kalshi orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
                                         if let Err(e) = app_handle.emit("orderbook:update", &update) {
                                             eprintln!("[Kalshi Consolidated] Failed to emit update: {}", e);
                                         }

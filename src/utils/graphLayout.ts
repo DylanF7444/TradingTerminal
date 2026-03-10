@@ -5,114 +5,18 @@
 // Module: utils/graphLayout.ts
 // Purpose: Force-directed and hierarchical layout algorithms for node positioning
 //
-// OVERVIEW:
-// This module provides automatic positioning algorithms for the prediction market
-// node graph. It transforms abstract graph topology into concrete 2D coordinates,
-// enabling users to organize complex trading strategies visually without manual
-// drag-and-drop positioning.
+// Transforms abstract graph topology into 2D coordinates for the prediction
+// market node graph. Supports multiple layout strategies:
+//   - Force-directed: Physics-simulation based (general purpose)
+//   - Hierarchical: Layered top-down flow (sources -> analyzers -> markets)
+//   - Circular: Radial arrangement (comparative analysis)
+//   - Grid: Aligned rows/columns (structured dashboards)
 //
-// The module implements multiple layout strategies optimized for different
-// graph structures:
-//   - Force-directed: Organic, physics-simulation based (general purpose)
-//   - Hierarchical: Layered, top-down flow (sources → analyzers → markets)
-//   - Circular: Radial arrangement (comparative analysis views)
-//   - Grid: Aligned rows/columns (structured data dashboards)
+// Architecture: Strategy Pattern with Simulation Loop
+//   LayoutAlgorithm interface -> Concrete implementations
+//   Coordinates use world space with origin (0,0) at viewport center
 //
-// Architecture Pattern:
-// Strategy Pattern with Simulation Loop
-//   LayoutAlgorithm interface → Concrete implementations
-//   Physics simulation uses requestAnimationFrame-friendly time steps
-//   Constraints system for boundary conditions and alignment guides
-//
-// COORDINATE SYSTEMS:
-//
-// World Coordinates:
-//   - Origin (0, 0) at center of initial viewport
-//   - Arbitrary units, scaled by zoom factor
-//   - No bounds (infinite canvas)
-//   - Output of layout algorithms
-//
-// Layout Bounds:
-//   - Algorithms accept optional bounding box for containment
-//   - Nodes positioned within [minX, maxX] × [minY, maxY]
-//   - Aspect ratio preserved when scaling to fit
-//
-// FORCE-DIRECTED PHYSICS:
-//
-// The force-directed algorithm simulates physical forces between nodes:
-//
-// Repulsion (Coulomb's Law):
-//   F = k * (q1 * q2) / r²
-//   - All nodes repel each other (prevents overlap)
-//   - Force decreases with distance squared
-//   - Prevents nodes from collapsing to single point
-//
-// Attraction (Hooke's Law / Spring):
-//   F = k * (currentLength - idealLength)
-//   - Connected nodes attract each other
-//   - Force proportional to displacement from ideal length
-//   - Creates edge length uniformity
-//
-// Centering Gravity:
-//   F = k * distanceFromCenter
-//   - Weak force pulling all nodes toward origin
-//   - Prevents drift to infinity
-//   - Maintains compact layout
-//
-// Cooling Schedule:
-//   - Temperature decreases over iterations
-//   - Large movements early, fine-tuning late
-//   - Prevents oscillation, ensures convergence
-//
-// PERFORMANCE OPTIMIZATIONS:
-//
-// Spatial Indexing:
-//   - Quadtree for O(log n) neighbor queries
-//   - Barnes-Hut approximation for n-body forces
-//   - Reduces O(n²) to O(n log n) complexity
-//
-// Early Termination:
-//   - Stop when energy (total movement) below threshold
-//   - Maximum iteration cap for responsiveness
-//   - Adaptive cooling based on convergence rate
-//
-// GPU Acceleration (Future):
-//   - WebGL compute shaders for force calculations
-//   - Enables 1000+ node layouts at 60fps
-//   - Fallback to CPU for smaller graphs
-//
-// CONSTRAINTS SYSTEM:
-//
-// Hard Constraints (enforced absolutely):
-//   - Boundary containment (nodes stay within bounds)
-//   - Fixed node positions (user-locked nodes)
-//   - Minimum node separation (collision avoidance)
-//
-// Soft Constraints (optimization targets):
-//   - Alignment guides (horizontal/vertical)
-//   - Distribution (equal spacing along axis)
-//   - Aspect ratio (preferred width/height)
-//
-// HIERARCHICAL LAYOUT:
-//
-// Suitable for DAGs (directed acyclic graphs) common in trading strategies:
-//   Layer 0: Data sources (crypto feeds, news)
-//   Layer 1: Analyzers (correlation, sentiment)
-//   Layer 2: Markets (Polymarket, Kalshi)
-//
-// Algorithm steps:
-//   1. Assign nodes to layers (longest path from sources)
-//   2. Order nodes within layers (minimize edge crossings)
-//   3. Assign coordinates (uniform layer spacing)
-//   4. Route edges (orthogonal or curved)
-//
-// EXTENSIBILITY:
-//
-// Adding new layout algorithms:
-//   1. Implement LayoutAlgorithm interface
-//   2. Add to LayoutEngine registry
-//   3. Expose configuration options in UI
-//   4. Add animation support for transitions
+// Performance: Barnes-Hut approximation reduces O(n^2) to O(n log n)
 //
 // ============================================================================
 

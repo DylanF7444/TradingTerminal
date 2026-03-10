@@ -2,44 +2,15 @@
 // NODE GRAPH COMPOSABLE HOOK
 // ============================================================================
 //
-// Module: hooks/useNodeGraph.ts
-// Purpose: High-level React hook for node graph operations with layout integration
+// Purpose: High-level React hook for node graph operations with layout integration.
+// Combines Zustand store access with graph layout algorithms (force, hierarchical,
+// circular, grid) and provides animation support for smooth transitions.
 //
-// OVERVIEW:
-// This hook provides a convenient interface for components to interact with the
-// node graph system. It combines store access with graph layout algorithms,
-// offering both low-level node operations and high-level graph management.
-//
-// Features:
+// Key features:
 // - Direct access to all node store actions and state
-// - Integrated layout calculation and application
-// - Animation support for smooth transitions
-// - Graph validation and utility functions
+// - Integrated layout calculation and application via applyLayout()
 // - Optimized selectors to minimize re-renders
-//
-// USAGE:
-// ```tsx
-// function Canvas() {
-//   const { 
-//     nodes, 
-//     connections, 
-//     addNode, 
-//     applyLayout,
-//     selectedNode 
-//   } = useNodeGraph();
-//   
-//   return (
-//     <div>
-//       {Object.values(nodes).map(node => (
-//         <NodeComponent key={node.id} node={node} />
-//       ))}
-//       <button onClick={() => applyLayout('force')}>
-//         Auto Layout
-//       </button>
-//     </div>
-//   );
-// }
-// ```
+// - Graph validation and utility functions
 //
 // ============================================================================
 

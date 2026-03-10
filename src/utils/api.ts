@@ -2,91 +2,26 @@
 // TAURI API UTILITIES
 // ============================================================================
 //
-// Module: utils/api.ts
-// Purpose: Typed wrappers and utilities for Tauri backend command invocation
+// Purpose: Type-safe wrappers over Tauri's invoke API for all backend
+// command calls. Provides consistent error handling, logging, timeout,
+// and retry support.
 //
-// OVERVIEW:
-// This module provides a type-safe abstraction layer over Tauri's invoke API,
-// centralizing all backend command calls in a single location. It implements
-// consistent error handling, request/response logging, retry logic, and
-// type-safe wrappers for every backend command.
-//
-// The architecture separates low-level invoke wrappers from high-level
-// service functions, enabling both direct command access and domain-specific
-// APIs that compose multiple commands.
-//
-// Architecture Pattern:
-// Layered API with Error Boundary
-//   Raw Invoke → Typed Wrappers → Service Functions → React Hooks
-//   (tauri::invoke) (type-safe) (business logic) (useTauriCommand)
-//
-// ERROR HANDLING STRATEGY:
-//
-// All API functions return Promise<Result<T, ApiError>> using a Result pattern
-// instead of throwing exceptions. This forces explicit error handling at
-// call sites and prevents uncaught promise rejections.
-//
-// Error Types:
-//   - NetworkError: Tauri bridge communication failure
-//   - CommandError: Rust command returned Err variant
-//   - ValidationError: Input validation failed (frontend or backend)
-//   - TimeoutError: Request exceeded timeout
-//   - SerializationError: JSON parsing failure
-//
-// Retry Logic:
-//   - Idempotent commands (read operations): 3 retries with exponential backoff
-//   - Mutating commands (write operations): No retry, immediate failure
-//   - Network errors only: Command errors are not retried
-//
-// LOGGING:
-//
-// All API calls are logged with:
-//   - Timestamp
-//   - Command name
-//   - Execution duration
-//   - Success/failure status
-//   - Error details (on failure)
-//
-// Logs are sent to:
-//   - Console (when import.meta.env.DEV is true)
-//   - Backend logging (when import.meta.env.PROD, via log::info! in Rust)
-//
-// TYPE SAFETY:
-//
-// Commands are typed using TypeScript generics matching Rust signatures:
-//   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>
-//
-// Each command has:
-//   - Request type: Arguments passed to Rust
-//   - Response type: Value returned from Rust
-//   - Error type: Expected error variants
+// RESULT PATTERN:
+// All API functions return Promise<Result<T, ApiError>> instead of
+// throwing. This forces explicit error handling at call sites. See the
+// Result type, ok(), err(), map(), and andThen() helpers below.
 //
 // NAMING CONVENTION (CRITICAL):
-//
-// All Tauri commands MUST use the `_cmd` suffix when invoked from the frontend.
-// This matches the naming convention used in the Rust backend's main.rs.
-//
-// Example:
-//   // CORRECT - matches backend registration
-//   invoke('get_positions_cmd', { ... })
-//   invoke('place_order_cmd', { ... })
-//   invoke('subscribe_orderbook_cmd', { ... })
-//
-//   // WRONG - will fail with "command not found"
-//   invoke('get_positions', { ... })
-//   invoke('place_order', { ... })
-//   invoke('subscribe_orderbook', { ... })
-//
-// The `_cmd` suffix:
-//   - Prevents naming conflicts with Rust keywords
-//   - Makes it explicit that the function is a Tauri IPC command
-//   - Ensures consistency across the entire codebase
+// All Tauri commands MUST use the `_cmd` suffix to match the Rust
+// backend registration in main.rs. Example:
+//   invoke('get_positions_cmd', { ... })   // correct
+//   invoke('get_positions', { ... })       // WRONG - "command not found"
 //
 // When adding a new command:
-//   1. Define the command logic in src-tauri/src/commands/*.rs
-//   2. Create a wrapper in main.rs with `#[tauri::command]` and `_cmd` suffix
-//   3. Register it in `tauri::generate_handler![]`
-//   4. Call it from frontend using the exact `_cmd` name
+//   1. Define in src-tauri/src/commands/*.rs
+//   2. Wrap in main.rs with #[tauri::command] and _cmd suffix
+//   3. Register in tauri::generate_handler![]
+//   4. Call from frontend using the exact _cmd name
 //
 // ============================================================================
 

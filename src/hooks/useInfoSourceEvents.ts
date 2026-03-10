@@ -312,9 +312,12 @@ export function useMarketOrderbookEvents(): void {
           });
 
           if (!marketNode) {
+            console.log('[DEBUG] No market node found for market_id:', update.market_id);
             return;
           }
 
+          console.log('[DEBUG] Found market node:', marketNode.id, 'for market:', update.market_id, 'price:', update.last_price);
+          
           const currentMetadata = (marketNode.metadata as Record<string, any>) || {};
           
           const bestBid = update.bids?.length
@@ -340,6 +343,7 @@ export function useMarketOrderbookEvents(): void {
               value: lastPrice,
             },
           });
+          console.log('[DEBUG] Updated market node', marketNode.id, 'with price:', lastPrice);
         });
 
         console.log('[Global] orderbook:update listener registered');

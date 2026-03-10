@@ -5,265 +5,43 @@
 // Module: services/executor.rs
 // Purpose: Trade execution with risk management and position sizing
 //
-// OVERVIEW:
-// This module implements the "action" layer of the trading terminal. It receives
-// trading signals from the analyzer, applies risk management rules (Kelly criterion,
-// position limits), calculates optimal sizing, and executes orders on prediction
-// markets via external APIs.
-//
 // EXECUTION PIPELINE:
 //
-// Trading Signal (from analyzer via channel)
-//   ↓
-// Risk Check (exposure limits, correlation, cooldown)
-//   ↓
-// Position Sizing (Kelly criterion, max limits)
-//   ↓
-// Fee Calculation (entry + exit fees, slippage estimate)
-//   ↓
-// Order Submission (REST API calls to Polymarket/Kalshi)
-//   ↓
-// Fill Monitoring (retry logic, partial fill handling)
-//   ↓
-// Position Record (insert into database, update UI)
-//   ↓
-// Post-Trade Risk Update (exposure tracking)
+//   Trading Signal (from analyzer via channel)
+//     |
+//   Risk Check (exposure limits, correlation, cooldown)
+//     |
+//   Position Sizing (Kelly criterion)
+//     |
+//   Fee Calculation (entry + exit fees, slippage estimate)
+//     |
+//   Order Submission (REST API to Polymarket/Kalshi)
+//     |
+//   Fill Monitoring (retry logic, partial fill handling)
+//     |
+//   Position Record (database + UI update)
 //
 // KELLY CRITERION:
+// Determines optimal bet size based on edge and odds.
+//   f* = (bp - q) / b
+// Where: b = net profit per unit bet, p = win probability, q = 1 - p
 //
-// The Kelly criterion determines optimal bet size based on edge and odds.
-// Formula: f* = (bp - q) / b
-// Where:
-// - b = odds received (net profit per unit bet)
-// - p = probability of winning (confidence from analyzer)
-// - q = probability of losing (1 - p)
-// - f* = fraction of bankroll to bet
+// Example: Market price 0.60, model says 70% probability
+//   b = 0.40/0.60 = 0.667
+//   f* = (0.667 * 0.70 - 0.30) / 0.667 = 0.35 (bet 35% of bankroll)
 //
-// Example:
-// - Market price: 0.60 (implies 60% probability if efficient)
-// - Your model says: 70% probability (edge = 10%)
-// - If you win: gain 0.40 (1.00 - 0.60)
-// - If you lose: lose 0.60
-// - b = 0.40/0.60 = 0.667
-// - f* = (0.667 * 0.70 - 0.30) / 0.667 = 0.35 (bet 35% of bankroll)
+// In practice: use fractional Kelly (Half or Quarter) and a hard cap
+// of 10% per position to limit variance.
 //
-// Practical Use:
-// - Full Kelly is too aggressive (high variance)
-// - Use "Half Kelly" or "Quarter Kelly" (f*/2 or f*/4)
-// - Never bet more than 10% on single position (hard cap)
+// RISK MANAGEMENT (summary):
+// - Signal validation: TTL expiry, market status, slippage check
+// - Exposure limits: 10% per position, 5% daily loss circuit breaker
+// - Order safety: limit orders only, price bounds (0.01-0.99)
+// - Emergency stop: global kill switch cancels all pending orders
 //
-// RISK MANAGEMENT LAYERS:
-//
-// Layer 1: Signal Validation
-// - Check signal TTL (expired signals rejected)
-// - Verify market is still open (not resolved)
-// - Check price hasn't moved against us (slippage check)
-//
-// Layer 2: Exposure Limits
-// - Max position size: 10% of portfolio per trade
-// - Max correlated exposure: 30% (e.g., all crypto-related markets)
-// - Max daily loss: 5% of portfolio (circuit breaker)
-//
-// Layer 3: Order Validation
-// - Price bounds check (0.01 to 0.99, avoid extreme illiquidity)
-// - Minimum order size (market-specific, e.g., $1 on Polymarket)
-// - Available balance check (including unsettled funds)
-//
-// Layer 4: Execution Safety
-// - Limit orders only (no market orders during volatility)
-// - Maximum slippage tolerance (cancel if price moves >1%)
-// - Order timeout (cancel if not filled within 30 seconds)
-//
-// POSITION SIZING LOGIC:
-//
-// 1. Calculate Kelly fraction
-// 2. Apply fractional Kelly (divide by 2 or 4)
-// 3. Apply 10% hard cap
-// 4. Round to contract size (integer contracts)
-// 5. Check available balance
-// 6. Adjust down if insufficient funds
-//
-// FEE STRUCTURES:
-//
-// Polymarket:
-// - trading_fees: 2% for market orders, 0% for limit makers (sometimes)
-// - gas_fees: Variable (Polygon network), paid in MATIC
-// - withdrawal_fees: Variable
-//
-// Kalshi:
-// - trading_fees: 0.5% capped at $0.50 per contract side
-// - settlement_fees: None
-// - Inactivity fees: None
-//
-// Total Cost = Entry Fee + Exit Fee + Slippage + Gas
-// Must be < Expected Profit for positive expectancy
-//
-// ORDER EXECUTION STRATEGIES:
-//
-// Strategy 1: Passive Limit (default)
-// - Place limit order at current bid/ask (no crossing spread)
-// - Wait for natural fill (may take minutes/hours)
-// - Lower fees, uncertain fill time
-//
-// Strategy 2: Aggressive Limit
-// - Place limit order 1 tick better than market (cross half spread)
-// - Faster fill, slightly worse price
-//
-// Strategy 3: Immediate-or-Cancel (IOC)
-// - Fill immediately at available liquidity
-// - Cancel unfilled portion
-// - Used when signal is time-sensitive (arbitrage)
-//
-// RETRY LOGIC:
-//
-// Transient failures (retry with backoff):
-// - HTTP timeout
-// - Rate limit (429)
-// - Temporary maintenance (503)
-// - Nonce errors (blockchain)
-//
-// No retry (fail immediately):
-// - Insufficient funds
-// - Market closed
-// - Invalid price (out of bounds)
-// - Authentication failure
-//
-// Retry schedule: 1s, 2s, 4s (max 3 attempts)
-// Then mark as failed and alert user
-//
-// STATE MANAGEMENT:
-//
-// - PENDING_ORDERS: Arc<RwLock<HashMap<String, OrderState>>>
-//   - Tracks orders submitted but not yet confirmed
-//   - Used for fill monitoring and cancellation
-//
-// - POSITIONS: Arc<RwLock<HashMap<String, Position>>>
-//   - Local cache of open positions (synced with DB)
-//   - Used for exposure calculations
-//
-// - BALANCE_CACHE: Arc<RwLock<HashMap<String, f64>>>
-//   - Available balance per market
-//   - Updated after each trade and periodically (TTL 60s)
-//
-// - DAILY_STATS: Arc<RwLock<DailyStats>>
-//   - Tracks P&L and trade count for day
-//   - Used for circuit breaker (stop trading if daily loss > 5%)
-//
-// EXTERNAL INTEGRATIONS:
-//
-// Polymarket API:
-// - Authentication: API key + wallet signature (EIP-712)
-// - Endpoints: REST for orders, WebSocket for fills
-// - Settlement: Polygon blockchain (MATIC gas fees)
-//
-// Kalshi API:
-// - Authentication: Bearer token (email/password)
-// - Endpoints: RESTful JSON API
-// - Settlement: USD cash account (ACH withdrawal)
-//
-// ERROR HANDLING:
-//
-// All execution errors categorized:
-// - Retryable: Network issues, rate limits (retry with backoff)
-// - Terminal: Invalid parameters, insufficient funds (fail fast)
-// - Warning: Partial fills (monitor, may complete later)
-//
-// On error:
-// 1. Log detailed error (with request/response for debugging)
-// 2. Update order status in database
-// 3. Emit error event to frontend
-// 4. If terminal error: stop retrying, alert user
-// 5. If retryable: schedule retry or add to dead letter queue
-//
-// PERFORMANCE TARGETS:
-//
-// - End-to-end latency: <500ms (signal → order submitted)
-// - Order fill monitoring: Check every 5 seconds
-// - Concurrent orders: Max 5 per market (prevent spam)
-// - Database write: <10ms per position update
-//
-// TESTING:
-//
-// Unit tests:
-// - Kelly criterion calculations (verify math)
-// - Position sizing (edge cases: 0 balance, max size)
-// - Fee calculations (verify platform-specific logic)
-//
-// Integration tests:
-// - Mock exchange APIs (wiremock)
-// - Verify retry logic with simulated failures
-// - Test position reconciliation (mock fills)
-//
-// Paper Trading:
-// - Execute against real APIs but with "dry run" flag
-// - Track hypothetical fills (market price at time of order)
-// - Compare predicted P&L vs actual market movement
-// - Validate risk management without real money
-//
-// SAFETY FEATURES:
-//
-// 1. Maximum Order Limits:
-//    - Absolute: Cannot place order > 10% of portfolio (configurable)
-//    - Relative: Cannot exceed available balance + unsettled
-//
-// 2. Duplicate Prevention:
-//    - Idempotency keys on all orders (ExchangeIdempotency)
-//    - Position hash (market + side + price) within 1 min window
-//
-// 3. Emergency Stop:
-//    - Global "trading_enabled" flag (set via UI or circuit breaker)
-//    - Immediately cancels all pending orders
-//    - Prevents new orders until manually re-enabled
-//
-// 4. Audit Logging:
-//    - Every order attempt logged (success or failure)
-//    - Log entry: timestamp, signal_id, order_params, result, error
-//    - Immutable append-only log (for compliance/debugging)
-//
-// CONCURRENCY MODEL:
-//
-// Single-threaded per market (prevents race conditions on balance),
-// but multiple markets concurrently.
-//
-// Architecture:
-// - One task per market (Polymarket task, Kalshi task)
-// - Each task has queue of signals for that market
-// - Sequential processing ensures correct balance tracking
-// - Cross-market arbitrage handled by special coordinator
-//
-// USAGE EXAMPLE:
-//
-// ```rust
-// // In service initialization
-// let executor = Executor::new(config, signal_rx, db_pool, window);
-// tokio::spawn(executor.run());
-//
-// // Signal received automatically from analyzer
-// // Executor handles everything: sizing, risk checks, submission
-// ```
-//
-// TRADE LIFECYCLE EXAMPLE:
-//
-// 1. Receive signal: "Buy YES on BTC-100K market, confidence 0.8"
-// 2. Check risk: Current exposure 5%, adding 8% → total 13% < 30% limit ✓
-// 3. Calculate Kelly: f* = 0.25 → Half Kelly = 0.125 → 12.5% of $10k = $1250
-// 4. Hard cap: 10% max = $1000 ✓
-// 5. Convert to contracts: $1000 / $0.60 per share = 1666.67 → 1666 contracts
-// 6. Check balance: Available $2000 > $1000 needed ✓
-// 7. Calculate fees: 2% entry = $20, estimated 2% exit = $20, total $40
-// 8. Expected profit: 20% edge × $1000 = $200 gross - $40 fees = $160 net ✓
-// 9. Submit limit order: BUY 1666 YES @ 0.60
-// 10. Monitor: Filled partially (1000) after 10s, then fully after 30s
-// 11. Record position: Insert into database, emit to UI
-// 12. Start monitoring: Check for exit conditions (take profit/stop loss)
-//
-// FUTURE ENHANCEMENTS:
-// - Smart order routing (choose best exchange automatically)
-// - TWAP/VWAP execution (large orders split over time)
-// - Bracket orders (OCO: one-cancels-other for stop loss + take profit)
-// - Post-trade analysis (slippage analysis, fill quality)
-// - Multi-sig wallet support (institutional custody)
-// - Compliance reporting (tax lot tracking, wash sale detection)
+// MULTI-LEG ORDERS:
+// Supports Single, OCO (one-cancels-other), Bracket (entry + stop/take),
+// and Spread (parallel execution for arbitrage) order types.
 // ============================================================================
 
 use crate::models::{market::{TradeResult, TradeSide, OrderType}, position::Position, TradingSignal};
@@ -487,12 +265,10 @@ impl Executor {
         Ok(())
     }
 
-    /// Submit order to exchange API
+    /// Submit order to exchange API.
+    /// Not yet implemented -- requires Polymarket/Kalshi API integration.
     async fn submit_order(&self, _order: PreparedOrder) -> Result<TradeResult, anyhow::Error> {
-        // Implementation: Call Polymarket or Kalshi API
-        // Handle retry logic
-        // Parse response
-        todo!()
+        Err(anyhow::anyhow!("Order submission not yet implemented: exchange API integration required"))
     }
 
     /// Record new position in database

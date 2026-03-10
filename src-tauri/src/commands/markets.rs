@@ -2,107 +2,24 @@
 // MARKET CONNECTION COMMAND HANDLERS
 // ============================================================================
 //
-// Module: commands/markets.rs
-// Purpose: Tauri command handlers for prediction market market connections
+// Purpose: Tauri command handlers for prediction market platform connections
+// (Polymarket, Kalshi).
 //
-// OVERVIEW:
-// This module manages connections to prediction market platforms (Polymarket, Kalshi)
-// and handles real-time orderbook data. It serves as the abstraction layer between
-// market-specific APIs and the internal node graph representation.
+// COMMANDS:
+//   add_market                 - Authenticate, establish WebSocket, create node
+//   remove_market              - Close WebSocket, archive node
+//   get_markets                - Retrieve all connected market nodes
+//   get_orderbook              - Current bids/asks (cached <500ms, REST fallback)
+//   refresh_market_connection  - Force WebSocket reconnection
+//   get_market_status          - Connection health (latency, errors, heartbeat)
 //
-// Supported Platforms:
-// - Polymarket (Polygon blockchain-based, WebSocket + REST)
-// - Kalshi (regulated US exchange, WebSocket + REST)
+// STATE:
+//   MARKET_CONNECTIONS: Arc<RwLock<HashMap<node_id, MarketConnection>>>
+//   ORDERBOOK_CACHE: Arc<Mutex<LruCache>> with 5-minute TTL
+//   API credentials stored in Tauri secure store (keyring), never in memory.
 //
-// ARCHITECTURE:
-// User clicks "Add Market" in UI
-//   → Frontend calls add_market() with API credentials
-//   → Backend validates credentials against platform
-//   → Establishes WebSocket connection for real-time data
-//   → Creates Market node in database
-//   → Spawns WebSocket listener task (Tokio async)
-//   → Returns Node to frontend for canvas display
-//   → Continuously receives orderbook updates via WebSocket
-//   → Updates in-memory cache and emits events to frontend
-//
-// COMMANDS (Tauri-callable functions):
-//
-// 1. add_market(market_type, api_credentials, market_id) -> Result<Node, String>
-//    - Authenticates with prediction market platform
-//    - Establishes WebSocket connection for real-time feeds
-//    - Creates market node in graph
-//    - Returns: Complete Node object with connection status
-//    - Example: add_market(Polymarket, {"api_key": "xxx"}, "BTC-100K-2026")
-//
-// 2. remove_market(id) -> Result<(), String>
-//    - Closes WebSocket connection gracefully
-//    - Sends unsubscribe frames to platform
-//    - Archives market node (preserves trade history)
-//    - Cleans up API client resources
-//
-// 3. get_markets() -> Result<Vec<Node>, String>
-//    - Retrieves all connected market nodes
-//    - Includes connection health status
-//    - Used by UI to populate canvas on startup
-//    - Returns: Array of Node objects with metadata
-//
-// 4. get_orderbook(market_id) -> Result<Orderbook, String>
-//    - Returns current orderbook (bids/asks) for a market
-//    - Checks in-memory cache first (<500ms old)
-//    - Falls back to REST API if WebSocket disconnected
-//    - Returns: Structured orderbook with liquidity metrics
-//    - Format: { bids: [[price, size], ...], asks: [[price, size], ...], timestamp }
-//
-// 5. refresh_market_connection(id) -> Result<Node, String>
-//    - Forces reconnection to market WebSocket
-//    - Useful when connection drops or API key changes
-//    - Maintains node position and connections in graph
-//    - Updates connection state
-//
-// 6. get_market_status(id) -> Result<JsonValue, String>
-//    - Returns connection health metrics
-//    - Fields: connected, last_heartbeat, latency_ms, 
-//              subscription_count, error_count
-//    - Used by UI to show connection indicators (green/red dot)
-//
-// STATE MANAGEMENT:
-// - MARKET_CONNECTIONS: Arc<RwLock<HashMap<String, MarketConnection>>>
-//   - Maps node_id → MarketConnection struct
-//   - Contains: WebSocket stream, API client, last message timestamp
-//   - RwLock allows concurrent reads of orderbook data
-//
-// - ORDERBOOK_CACHE: Arc<Mutex<LruCache<String, Orderbook>>>
-//   - LRU cache with 5-minute TTL
-//   - Prevents hammering REST APIs when frontend polls frequently
-//   - Automatically evicts old entries
-//
-// - API_CREDENTIALS: Secure storage reference
-//   - API keys stored in Tauri's secure store (keyring)
-//   - Only handles/connection IDs stored in memory
-//   - Retrieved by ID when making authenticated calls
-//
-// ERROR HANDLING:
-// All commands return Result<T, String> for Tauri compatibility
-// Errors categorized as:
-// - AuthenticationError: Invalid API credentials
-// - ConnectionError: Network/WebSocket failures
-// - RateLimitError: HTTP 429 from platform
-// - NotFoundError: Market ID doesn't exist on platform
-// Errors include context (platform name, market ID) for debugging
-//
-// PERFORMANCE NOTES:
-// - WebSocket connections persisted across command calls (not per-request)
-// - Orderbook cache serves 95% of get_orderbook calls without network hit
-// - WebSocket listener tasks use zero-copy where possible
-// - Supports 20+ concurrent market connections without degradation
-// - Automatic reconnection with exponential backoff (1s, 2s, 4s... 60s max)
-//
-// SECURITY NOTES:
-// - API keys never logged or returned to frontend
-// - Credentials retrieved from secure storage by reference only
-// - WebSocket connections use wss:// (TLS) exclusively
-// - No plaintext credential storage in SQLite
-//
+// WebSocket connections persist across command calls with automatic reconnection
+// (exponential backoff up to 60s). All traffic uses wss:// (TLS).
 // ============================================================================
 
 use crate::db::get_connection;

@@ -5,67 +5,19 @@
 // Module: types/markets.ts
 // Purpose: Core TypeScript interfaces for prediction market data structures
 //
-// OVERVIEW:
-// This module defines the complete type system for prediction market interactions,
-// including orderbook structures, market metadata, trade execution results, and
-// WebSocket event payloads. These types ensure end-to-end type safety between
-// the Rust backend and React frontend, with serialization compatibility for
-// Tauri's IPC bridge.
+// Defines types for orderbooks, market metadata, trade execution, and
+// WebSocket event payloads. Mirrors Rust structs in src-tauri/src/models/market.rs
+// with Tauri IPC bridge serialization compatibility.
 //
-// The type hierarchy mirrors the backend's Rust structs (src-tauri/src/models/market.rs)
-// with TypeScript-specific enhancements for frontend consumption. All monetary
-// values use number (float) for calculations, with explicit precision notes
-// where fixed-point arithmetic is required.
-//
-// Architecture Pattern:
-// Domain-Driven Types with Discriminated Unions
-//   Market ↔ Orderbook ↔ Order ↔ Trade (entity relationships)
+// Architecture: Domain-Driven Types with Discriminated Unions
+//   Market <-> Orderbook <-> Order <-> Trade (entity relationships)
 //   WebSocketEvent = PriceUpdate | OrderbookUpdate | TradeUpdate (union types)
 //
-// SERIALIZATION NOTES:
-//
-// Tauri IPC Bridge Compatibility:
-//   - All types must be JSON-serializable (no functions, no undefined)
-//   - Enums use string literal unions (match Rust's serde serialization)
-//   - Optional fields use ? notation (maps to Rust Option<T>)
-//   - Timestamps use number (milliseconds since epoch) for JS compatibility
-//
-// Rust ↔ TypeScript Mapping:
-//   Rust f64           → TypeScript number
-//   Rust u64/i64       → TypeScript number (safe up to 2^53)
-//   Rust Option<T>     → TypeScript T | undefined
-//   Rust Vec<T>        → TypeScript T[]
-//   Rust enum          → TypeScript string literal union
-//   Rust struct        → TypeScript interface
-//   Rust chrono::DateTime → TypeScript number (timestamp)
-//
-// PRECISION HANDLING:
-//
-// Prediction markets use decimal prices (0.00 - 1.00 for binary markets).
-// JavaScript's floating point can introduce errors (0.1 + 0.2 !== 0.3).
-// Critical financial calculations should use:
-//   - toFixed(4) for display
-//   - Math.round(value * 10000) / 10000 for 4-decimal precision
-//   - Or integrate a decimal library (decimal.js) for complex calculations
-//
-// TYPE CATEGORIES:
-//
-// 1. Core Market Types (Market, MarketStatus, MarketCategory)
-//    - MarketType imported from types/nodes.ts (single source of truth)
-// 2. Orderbook Types (Orderbook, Level, Spread)
-// 3. Order Types (Order, OrderSide, OrderType, TimeInForce)
-// 4. Position/Trade Types (Trade, TradeResult, Fill)
-// 5. WebSocket Event Types (Real-time updates)
-// 6. API Response Types (Backend command returns)
-// 7. Utility Types (Pagination, Filters, Constraints)
-//
-// EXTENSIBILITY:
-//
-// New prediction markets (e.g., Betfair, PredictIt) can be added by:
-//   1. Extending MarketType enum in types/nodes.ts
-//   2. Adding market-specific metadata interfaces here
-//   3. Implementing corresponding scraper in backend services/scraper.rs
-//   4. Adding market-specific WebSocket event variants
+// Key notes:
+//   - All types must be JSON-serializable (Tauri IPC constraint)
+//   - Timestamps use number (ms since epoch)
+//   - MarketType imported from types/nodes.ts (single source of truth)
+//   - Prediction market prices are 0.00-1.00; use toFixed(4) for display
 //
 // ============================================================================
 
@@ -1376,51 +1328,3 @@ export interface HistoryQueryOptions {
 
 export type PositionStatus = 'pending' | 'open' | 'closing' | 'closed';
 
-// =============================================================================
-// EXAMPLE USAGE
-// =============================================================================
-//
-// // Creating a new market order
-// const order: Order = {
-//   id: crypto.randomUUID(),
-//   marketId: '0x123...',
-//   marketNodeId: 'node-456',
-//   market: MarketType.Polymarket,
-//   side: OrderSide.Buy,
-//   type: OrderType.Market,
-//   size: 100,
-//   filledSize: 0,
-//   remainingSize: 100,
-//   timeInForce: TimeInForce.IOC,
-//   status: OrderStatus.Pending,
-//   createdAt: Date.now(),
-//   updatedAt: Date.now(),
-//   avgFillPrice: 0,
-//   fees: 0,
-// };
-//
-// // Handling WebSocket event
-// function handleMarketEvent(event: MarketEvent) {
-//   if (isOrderbookUpdate(event)) {
-//     updateOrderbook(event.marketId, event.bids, event.asks);
-//   } else if (isTradeEvent(event)) {
-//     updateLastTrade(event.marketId, event.price, event.size);
-//   }
-// }
-//
-// // Calculating spread
-// function calculateSpread(orderbook: Orderbook): Spread {
-//   const bestBid = orderbook.bids[0]?.price ?? 0;
-//   const bestAsk = orderbook.asks[0]?.price ?? 0;
-//   const mid = (bestBid + bestAsk) / 2;
-//   return {
-//     bid: bestBid,
-//     ask: bestAsk,
-//     absolute: bestAsk - bestBid,
-//     relative: (bestAsk - bestBid) / mid,
-//     mid,
-//     weightedMid: mid, // Simplified - would weight by size
-//   };
-// }
-//
-// ============================================================================

@@ -2,83 +2,26 @@
 // NODE GRAPH TYPE DEFINITIONS
 // ============================================================================
 //
-// Module: types/nodes.ts
-// Purpose: Core TypeScript interfaces for the prediction market node graph system
+// Purpose: Core TypeScript interfaces for the prediction market node graph system.
+// Defines the type system for the visual node graph connecting information
+// sources to prediction markets (Polymarket, Kalshi).
 //
-// OVERVIEW:
-// This module defines the complete type system for the visual node graph that
-// connects information sources to prediction markets. The node graph is the
-// central abstraction of the trading terminal, representing data flow from
-// sources (crypto prices, news, weather) through analysis to trading decisions
-// on prediction markets (Polymarket, Kalshi).
+// Architecture: Heterogeneous graph with discriminated node types.
+//   Node = InfoSourceNode | MarketNode | ...
+//   NodeType determines behavior, visualization, and valid connections.
+//   Connections carry correlation strength metadata for visual weight.
 //
-// The type hierarchy supports a heterogeneous graph where nodes have different
-// behaviors, visual representations, and connection rules. Types are designed
-// for serialization across the Tauri IPC boundary while enabling rich
-// frontend visualization and backend processing.
+// Graph Topology (DAG, sources → markets):
 //
-// Architecture Pattern:
-// Heterogeneous Graph with Discriminated Node Types
-//   Node = InfoSourceNode | MarketNode | (extensible for future types)
-//   NodeType determines behavior, visualization, and valid connections
-//   Connections carry correlation strength metadata for visual weight
-//
-// GRAPH TOPOLOGY:
-//
-// The node graph forms a directed acyclic graph (DAG) conceptually flowing
-// from sources to markets, though cycles are technically possible for
-// feedback loops (e.g., market prices influencing sentiment analysis).
-//
-// Typical Flow:
 //   CryptoPricesNode → AnalyzerNode → PolymarketNode
 //        ↓                ↓
-//   NewsSourceNode → SentimentNode → KalshiNode
+//   NewsSourceNode  → SentimentNode → KalshiNode
 //
-// Node Types:
-//   - Info Sources (inputs): Crypto, News, Weather, Social Media, etc.
-//   - Markets (outputs): Polymarket, Kalshi prediction markets
-//   - Future: Analyzer nodes, Alert nodes, Strategy nodes
-//
-// SERIALIZATION NOTES:
-//
-// Tauri IPC Compatibility:
-//   - All types JSON-serializable (no methods, no circular references)
-//   - Enums use string literal unions (match Rust serde)
-//   - Tuples for coordinates: [number, number] instead of {x, y}
-//   - Metadata uses Record<string, any> for extensibility
-//
-// Rust Backend Mapping:
-//   src-tauri/src/models/node.rs
+// Rust Backend Mapping (src-tauri/src/models/node.rs):
 //   - NodeType enum variants map exactly to TypeScript enums
-//   - Position tuple [f64, f64] maps to [number, number]
-//   - Connections Vec<String> maps to string[]
-//   - serde_json::Value maps to Record<string, any>
-//
-// TYPE CATEGORIES:
-//
-// 1. Node Type Enums (InfoSourceType, MarketType, NodeType)
-// 2. Core Node Interface (Node, base structure for all nodes)
-// 3. Specialized Node Interfaces (InfoSourceNode, MarketNode)
-// 4. Connection Types (Connection, ConnectionStrength)
-// 5. Node Configuration Types (per-source-type configs)
-// 6. Graph State Types (NodeGraph, Layout, Viewport)
-// 7. Event Types (NodeEvents for real-time updates)
-// 8. Utility Types (Validation, Constraints, Serialization)
-//
-// EXTENSIBILITY:
-//
-// Adding new node types requires:
-//   1. Add variant to InfoSourceType or MarketType enum
-//   2. Define configuration interface for node metadata
-//   3. Add scraper/adapter in backend services/scraper.rs
-//   4. Add visual component in components/Canvas/Node.tsx
-//   5. Update connection validation rules
-//
-// Future node types:
-//   - AnalysisNode: Custom indicator calculation
-//   - AlertNode: Notification triggers
-//   - StrategyNode: Automated trading logic
-//   - CompositeNode: Nested subgraphs
+//   - Position [f64, f64] ↔ [number, number]
+//   - Connections Vec<String> ↔ string[]
+//   - serde_json::Value ↔ Record<string, any>
 //
 // ============================================================================
 

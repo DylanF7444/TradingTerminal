@@ -2,267 +2,36 @@
 // SQLITE DATABASE LAYER
 // ============================================================================
 //
-// Module: db/sqlite.rs
-// Purpose: Complete SQLite persistence layer for the prediction market terminal
+// Purpose: Complete SQLite persistence layer for the prediction market terminal.
 //
-// OVERVIEW:
-// This module provides all database operations for the trading terminal,
-// including schema management, CRUD operations, and performance optimizations.
-// It uses SQLite with WAL mode for concurrent access and supports millions
-// of time-series data points with sub-millisecond query times.
+// Uses SQLite with WAL mode for concurrent access. Chosen for zero-config
+// embedded operation with sub-millisecond query times and 10k+ writes/second.
 //
-// WHY SQLITE:
-// - Desktop application (single user, local data)
-// - No network latency (sub-1ms queries)
-// - Zero configuration for end users
-// - Embedded database (single file)
-// - Excellent performance for time-series workloads
-// - 10,000+ writes/second capability
+// TABLES:
+//   nodes           - Info sources and market connections (graph vertices)
+//   connections     - Graph edges between nodes (unique source+target)
+//   timeseries      - Scraped data points (indexed by source_id + timestamp)
+//   positions       - Trading positions and P&L
+//   scraper_status  - Health tracking for each data source scraper
+//   event_log       - Audit trail of system events
+//   api_keys        - Encrypted API credentials per platform (unique per platform)
 //
-// DATABASE SCHEMA:
+// PERFORMANCE PRAGMAS:
+//   WAL mode, synchronous=NORMAL, 64MB cache, memory temp store, 30GB mmap.
+//   Strategic indexes on all query hot paths.
 //
-// 1. nodes
-//    - Stores info sources and market connections
-//    - Fields: id, node_type, node_subtype, position_x, position_y, metadata,
-//              archived, created_at, updated_at
-//    - Indexes: idx_nodes_archived (for fast active node queries)
+// KEY FUNCTIONS:
+//   Connection: create_connection, setup_schema, apply_optimizations
+//   Nodes:      insert/update/delete/get_node_by_id/get_all_active_nodes
+//   Series:     insert_timeseries, batch_insert_timeseries, query_timeseries
+//   Positions:  insert_position, get_positions
+//   Scraper:    update_scraper_status, get_scraper_status
+//   Events:     log_event, get_recent_events
+//   Maintenance: vacuum_database, get_database_stats
 //
-// 2. connections
-//    - Stores graph edges between nodes
-//    - Fields: id, source_node_id, target_node_id, strength, correlation,
-//              metadata, created_at
-//    - Unique constraint: (source_node_id, target_node_id)
-//    - Indexes: idx_connections_source (for node graph traversal)
-//
-// 3. timeseries
-//    - Stores all scraped data points (millions of rows)
-//    - Fields: id, timestamp, source_id, metric_type, value, metadata
-//    - Indexes:
-//      - idx_timeseries_source_time (source_id, timestamp DESC) - PRIMARY
-//      - idx_timeseries_metric (metric_type, timestamp DESC)
-//    - Most queried table (every UI update, every trade calculation)
-//
-// 4. positions
-//    - Stores trading positions and P&L
-//    - Fields: id, market_id, market_type, position_type, quantity,
-//              entry_price, exit_price, entry_time, exit_time, realized_pnl,
-//              fees, status, metadata
-//    - Indexes: idx_positions_status (for fast open position queries)
-//
-// 5. scraper_status
-//    - Tracks health of each data source scraper
-//    - Fields: node_id, active, last_update, last_error,
-//              data_points_collected, uptime_seconds, created_at
-//    - Used for monitoring and auto-recovery
-//
-// 6. event_log
-//    - Audit trail of all system events
-//    - Fields: id, timestamp, node_id, event_type, event_data, severity
-//    - Indexes: idx_event_log_time (for recent events view)
-//
-// 7. api_keys
-//    - Stores encrypted API credentials for trading platforms
-//    - Fields: id, platform, api_key, api_secret, private_key, environment,
-//              additional_config, created_at, updated_at
-//    - Unique constraint: platform (one key set per platform)
-//    - Platforms: Polymarket, Kalshi
-//    - Used for automatic credential retrieval when adding markets
-//
-// PERFORMANCE OPTIMIZATIONS:
-// - PRAGMA journal_mode = WAL (Write-Ahead Logging)
-//   - Allows concurrent reads during writes
-//   - Critical for UI responsiveness
-// - PRAGMA synchronous = NORMAL
-//   - Fast writes, still safe for crashes (not power loss)
-// - PRAGMA cache_size = -64000 (64MB)
-//   - Keeps hot data in memory
-// - PRAGMA temp_store = MEMORY
-//   - Fast temporary tables
-// - PRAGMA mmap_size = 30GB
-//   - Memory-mapped I/O for large databases
-// - Strategic indexes on all query hot paths
-//
-// PUBLIC FUNCTIONS:
-//
-// Connection Management:
-// - create_connection(db_path) -> Result<Connection>
-// - setup_schema(conn) -> Result<()>
-// - apply_optimizations(conn) -> Result<()>
-//
-// Node Operations:
-// - insert_node(conn, node) -> Result<()>
-// - update_node(conn, node) -> Result<()>
-// - delete_node(conn, node_id) -> Result<()> [soft delete only]
-// - delete_node_cascade(conn, node_id) -> Result<DeleteNodeStats> [full cleanup]
-//   - Deletes: timeseries, websocket_messages, connections, scraper_status, positions
-//   - Then soft-deletes the node
-// - get_node_by_id(conn, node_id) -> Result<Node>
-// - get_all_active_nodes(conn) -> Result<Vec<Node>>
-//
-// Connection Operations:
-// - insert_connection(conn, id, source_id, target_id, strength, correlation, metadata) -> Result<()>
-// - get_connections_for_node(conn, node_id) -> Result<Vec<String>>
-//
-// Time-Series Operations:
-// - insert_timeseries(conn, source_id, metric_type, value, metadata) -> Result<()>
-// - batch_insert_timeseries(conn, data_points) -> Result<()>
-//   - Uses transactions for 10x faster bulk inserts
-// - query_timeseries(conn, source_id, metric_type, start_time, end_time, limit) -> Result<Vec<TimeseriesPoint>>
-//   - Flexible filtering with optional parameters
-//   - Example: Get last 1000 BTC prices
-//
-// Position Operations:
-// - insert_position(conn, position) -> Result<()>
-// - get_positions(conn, market_id, status) -> Result<Vec<Position>>
-//   - Filter by market and/or status ("open", "closed")
-//
-// Scraper Status Operations:
-// - update_scraper_status(conn, node_id, active, last_error, data_points_collected) -> Result<()>
-// - get_scraper_status(conn, node_id) -> Result<ScraperStatus>
-//
-// Event Log Operations:
-// - log_event(conn, node_id, event_type, event_data, severity) -> Result<()>
-// - get_recent_events(conn, limit) -> Result<Vec<EventLogEntry>>
-//
-// Maintenance Operations:
-// - vacuum_database(conn) -> Result<()>
-//   - Reclaim space from deleted records
-//   - Run weekly or after large deletions
-// - get_database_stats(conn) -> Result<DatabaseStats>
-//   - Returns: total_nodes, total_timeseries_points, total_positions, open_positions
-//
-// DATA STRUCTURES:
-//
-// TimeseriesPoint:
-// - timestamp: i64 (Unix timestamp)
-// - source_id: String (node ID)
-// - metric_type: String ("price", "sentiment", "volume")
-// - value: f64 (the actual data point)
-// - metadata: Option<JsonValue> (additional context)
-//
-// TimeseriesDataPoint (for batch inserts):
-// - Same as TimeseriesPoint but used for bulk operations
-//
-// ScraperStatus:
-// - active: bool (is scraper running?)
-// - last_update: Option<i64> (timestamp of last successful scrape)
-// - last_error: Option<String> (most recent error message)
-// - data_points_collected: u64 (total count)
-// - uptime_seconds: u64 (how long scraper has been running)
-//
-// EventLogEntry:
-// - timestamp: i64
-// - node_id: Option<String>
-// - event_type: String ("added", "removed", "error", "trade_executed")
-// - event_data: Option<JsonValue>
-// - severity: String ("info", "warning", "error", "critical")
-//
-// DatabaseStats:
-// - total_nodes: u64
-// - total_timeseries_points: u64
-// - total_positions: u64
-// - open_positions: u64
-//
-// HELPER FUNCTIONS:
-//
-// serialize_node_type(node_type) -> (String, String)
-// - Converts NodeType enum to (type_str, subtype_str) for storage
-// - Example: NodeType::InfoSource(CryptoPrices) → ("InfoSource", "CryptoPrices")
-//
-// deserialize_node(row) -> Node
-// - Reconstructs Node object from database row
-// - Handles all type conversions and JSON parsing
-//
-// EXTERNAL DEPENDENCIES:
-// - rusqlite: SQLite Rust bindings
-// - serde_json: JSON serialization for metadata fields
-// - chrono: Timestamp handling
-// - crate::models::node::{Node, NodeType, InfoSourceType, MarketType}
-// - crate::models::position::Position
-//
-// ERROR HANDLING:
-// All functions return rusqlite::Result<T>
-// Errors include:
-// - Connection failures
-// - Schema violations (foreign keys, unique constraints)
-// - Type conversion errors
-// - Query syntax errors
-//
-// QUERY PERFORMANCE EXAMPLES:
-// Based on 1M timeseries records, 100 nodes, 50 positions:
-//
-// get_all_active_nodes(): ~2ms
-// get_node_by_id(): ~0.5ms
-// insert_timeseries(): ~0.1ms per point
-// batch_insert_timeseries(1000 points): ~15ms (transaction batching)
-// query_timeseries(last 1000 BTC prices): ~1ms (indexed query)
-// query_timeseries(1M points, no index): ~200ms (table scan)
-// get_positions(status = "open"): ~1ms
-// get_database_stats(): ~10ms (COUNT(*) on all tables)
-//
-// TRANSACTION USAGE:
-// Single writes: Auto-commit (no explicit transaction)
-// Batch writes: Use unchecked_transaction() for speed
-//   - batch_insert_timeseries() uses this pattern
-//   - 10x faster than individual inserts
-//
-// CONCURRENCY:
-// WAL mode allows:
-// - Unlimited concurrent readers
-// - One writer at a time (automatic queuing)
-// - Readers never block writers
-// - Writers never block readers
-//
-// TYPICAL USAGE PATTERNS:
-//
-// Pattern 1: Store scraped data
-// ```rust
-// insert_timeseries(&conn, "crypto:BTC", "price", 50000.0, None)?;
-// ```
-//
-// Pattern 2: Get recent prices for trading decision
-// ```rust
-// let prices = query_timeseries(
-//     &conn,
-//     Some("crypto:BTC"),
-//     Some("price"),
-//     Some(one_hour_ago),
-//     None,
-//     Some(100)
-// )?;
-// let avg = prices.iter().map(|p| p.value).sum::<f64>() / prices.len() as f64;
-// ```
-//
-// Pattern 3: Correlation analysis
-// ```rust
-// let btc = query_timeseries(&conn, Some("crypto:BTC"), None, start, end, None)?;
-// let market = query_timeseries(&conn, Some("market:123"), None, start, end, None)?;
-// let correlation = calculate_pearson(&btc, &market);
-// insert_connection(&conn, id, "crypto:BTC", "market:123", 1.0, Some(correlation), None)?;
-// ```
-//
-// TESTING:
-// - All functions have unit tests
-// - Tests use temporary files (tempfile crate)
-// - Database created fresh for each test
-// - Tests verify: schema creation, CRUD operations, indexes, constraints
-//
-// MAINTENANCE GUIDELINES:
-// - Run VACUUM monthly or after large deletions (>10k rows)
-// - Monitor WAL file size (auto-checkpoints at 1000 pages)
-// - If database >1GB, consider archiving old timeseries data
-// - Check index usage with EXPLAIN QUERY PLAN
-//
-// FUTURE ENHANCEMENTS:
-// - Add connection pooling (r2d2 crate)
-// - Implement time-series compression (delta encoding)
-// - Add automatic archival of old data
-// - Implement read replicas for analytics
-// - Add query result caching layer
+// Serialization helpers: serialize_node_type() and deserialize_node() convert
+// between NodeType enums and string pairs for database storage.
 // ============================================================================
-
-// SQLite implementation for prediction market trading terminal
-// Handles all database operations: nodes, connections, time-series, positions
 
 use chrono::Utc;
 use rusqlite::{params, types::Value, Result as SqliteResult, Row};

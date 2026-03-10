@@ -2,223 +2,32 @@
 // MARKETS SLICE - PREDICTION MARKET CONNECTIONS & DATA
 // ============================================================================
 //
-// Module: store/marketsSlice.ts
-// Purpose: Zustand state slice for managing prediction market connections and real-time data
+// Zustand slice managing prediction market connections, real-time orderbook
+// streaming, and connection health. Central hub for trading venue interactions.
 //
-// OVERVIEW:
-// This slice manages the complete lifecycle of prediction market connections,
-// from initial API authentication through real-time orderbook streaming to
-// disconnection and cleanup. It serves as the central hub for all trading
-// venue interactions.
+// State Shape:
+//   markets: Node[]                                - Connected market nodes
+//   orderbooks: Record<string, Orderbook>          - Latest orderbook per market
+//   marketStatus: Record<string, MarketConnectionStatus> - Connection health
+//   selectedMarketId: string | null                 - Active detail view
+//   isLoading: boolean                              - Global async loading flag
+//   error: string | null                            - Last error message
 //
-// Architecture Pattern:
-// User adds market (via MarketPanel)
-//   → addMarket() action called with credentials
-//   → Zustand optimistically adds to markets[] with status 'connecting'
-//   → Tauri command 'add_market' invoked via useTauriCommand in component
-//   → Backend validates credentials, establishes WebSocket
-//   → Backend emits 'market:connected' event via Tauri
-//   → useWebSocket hook receives event, slice updates status to 'connected'
-//   → Orderbook stream begins, 'orderbook:update' events flow in
-//   → updateOrderbook() action merges deltas into orderbooks cache
-//   → React components re-render with live data
+// Actions: addMarket, removeMarket, updateMarket, updateOrderbook,
+//   setMarketStatus, updateMarketPrice, clearOrderbook, selectMarket,
+//   setMarketLoading, setMarketError, clearMarketError,
+//   reconnectMarket, disconnectMarket
 //
-// Connection State Machine:
-// 'idle' → 'connecting' → 'connected' → 'disconnected' → 'reconnecting' → 'connected'
-//     ↓         ↓            ↓              ↓                ↓              ↓
-//  (initial)  (spinner)   (green dot)   (red dot)       (yellow)      (green dot)
+// Selectors: getMarketOrderbook, getMarketStatus, getConnectedMarkets,
+//   getSelectedMarket, selectOrderbookWithSpread, selectMarketsByType,
+//   selectHealthyMarkets
 //
-// Data Flow - Orderbook Updates:
-// WebSocket Message (Rust Backend)
-//   → deserialize to Orderbook struct
-//   → emit('orderbook:update', {market_id, bids, asks, timestamp})
-//   → useWebSocket hook in frontend receives payload
-//   → calls marketsSlice.updateOrderbook(payload)
-//   → update orderbooks[market_id] in state (immutable update)
-//   → OrderbookView component selector detects change
-//   → React re-renders with new depth data
-//   → Canvas draws updated bars (CSS transition smooths change)
-//
-// STATE STRUCTURE:
-//
-// markets: Node[]
-//   - Array of market nodes currently connected
-//   - Same structure as nodes in nodesSlice but filtered to type 'Market'
-//   - Maintains position on canvas, metadata (api_key reference, market_id)
-//   - Status field tracks connection health
-//
-// orderbooks: Record<string, Orderbook>
-//   - Cache of latest orderbook snapshot per market
-//   - Key: market node id (e.g., "market-btc-100k-uuid")
-//   - Value: { bids: [price, size][], asks: [price, size][], timestamp }
-//   - TTL: No explicit TTL, updated via WebSocket or poller every 500ms
-//   - Eviction: Entry removed when market disconnected
-//
-// marketStatus: Record<string, MarketStatus>
-//   - Connection health metadata per market
-//   - { connected: boolean, latency: number, lastHeartbeat: Date, errorCount: number }
-//   - Updated by WebSocket heartbeat events or connection error handlers
-//   - Used for status indicators in MarketPanel (green/red dots)
-//
-// selectedMarketId: string | null
-//   - Currently selected market (for right sidebar detail view)
-//   - Separated from nodesSlice selection to allow different selection contexts
-//
-// isLoading: boolean
-//   - Global loading state for async operations (connecting new market)
-//   - Individual market statuses track per-market connection state
-//
-// error: string | null
-//   - Last error message from market operations
-//   - Cleared on successful operations
-//
-// ACTIONS:
-//
-// 1. addMarket(market: Node)
-//    - Adds market node to markets array
-//    - Initializes empty orderbook placeholder
-//    - Sets initial status to 'connecting'
-//    - Persists via Tauri (caller provides node from command response)
-//
-// 2. removeMarket(id: string)
-//    - Removes from markets array
-//    - Deletes orderbook cache entry
-//    - Clears status
-//    - Triggers backend cleanup via Tauri command (in component)
-//
-// 3. updateOrderbook(marketId: string, orderbook: Orderbook)
-//    - Merges new orderbook data into cache
-//    - Immutable update (new object reference)
-//    - Validates price ordering (bids descending, asks ascending)
-//    - Updates timestamp for staleness detection
-//
-// 4. setMarketStatus(id: string, status: Partial<MarketStatus>)
-//    - Updates connection health indicators
-//    - Triggers UI changes (color-coded status dots)
-//    - Auto-reconnect logic hooks into status changes
-//
-// 5. updateMarketPrice(id: string, price: number)
-//    - Updates mid-price or last trade price
-//    - Used for PnL calculations in positionsSlice
-//    - Triggers price flash animation in UI
-//
-// 6. reconnectMarket(id: string)
-//    - Sets status to 'reconnecting'
-//    - Clears error state
-//    - Component calls Tauri 'refresh_market_connection'
-//
-// 7. selectMarket(id: string | null)
-//    - Sets selectedMarketId for detail view
-//    - Clears other selections (nodesSlice coordination)
-//
-// CACHING STRATEGY:
-//
-// Orderbook Cache:
-// - In-memory only (volatile)
-// - Refreshed via WebSocket (push) or REST fallback (pull on disconnect)
-// - Max 50 price levels per side (backend filters deep liquidity)
-// - Memory constraint: ~10KB per market (negligible for <20 markets)
-//
-// Status Cache:
-// - Heartbeat every 5 seconds from backend
-// - Frontend tracks last heartbeat timestamp
-// - If >30 seconds old, marks as stale (yellow indicator)
-//
-// INTEGRATION WITH OTHER SLICES:
-//
-// nodesSlice:
-//   - Markets ARE nodes, but this slice manages market-specific data
-//   - nodesSlice manages position/layout, this slice manages connection/data
-//   - Coordinate on add/remove (both slices updated, but nodesSlice persists position)
-//
-// positionsSlice:
-//   - Needs orderbook prices for PnL calculation
-//   - Selector: getCurrentPrice(marketId) reads from this slice's orderbooks
-//   - Position updates triggered when orderbook.price changes
-//
-// WebSocket Events Handled:
-//
-// 'market:connected': { marketId, timestamp }
-//   → setMarketStatus(marketId, { connected: true, latency: 0 })
-//
-// 'market:disconnected': { marketId, reason }
-//   → setMarketStatus(marketId, { connected: false, error: reason })
-//
-// 'orderbook:update': { marketId, bids, asks, timestamp }
-//   → updateOrderbook(marketId, { bids, asks, timestamp })
-//
-// 'market:error': { marketId, error, retryInMs }
-//   → setMarketStatus(marketId, { error, connected: false })
-//   → Auto-reconnect if retryInMs provided
-//
-// 'market:latency': { marketId, latencyMs }
-//   → setMarketStatus(marketId, { latency: latencyMs })
-//   → Updates performance metrics display
-//
-// ERROR HANDLING:
-//
-// Connection Failed:
-// - Status set to 'error', error message stored
-// - Orderbook cleared (show '--' in UI)
-// - Auto-reconnect attempts with exponential backoff
-// - After 5 failures, stop auto-retry, require manual reconnect
-//
-// Parse Error:
-// - Invalid orderbook payload from backend
-// - Log error, skip update, keep previous valid data
-// - Alert user if persistent (>3 errors in 1 minute)
-//
-// Stale Data:
-// - Last update >30 seconds ago
-// - Background color change in orderbook (subtle yellow tint)
-//   "Reconnect" button appears in MarketPanel
-//
-// PERFORMANCE:
-//
-// Update Frequency:
-// - Orderbook updates: Up to 10/second in volatile markets
-// - Zustand batches rapid updates (React 18 automatic batching)
-// - OrderbookView uses shallow comparison on bids/asks arrays
-//
-// Memory Optimization:
-// - Orderbooks eviction: Removed when market disconnected
-// - Status objects: Lightweight (<100 bytes each)
-// - No history maintained (use storageSlice for time-series)
-//
-// Selector Optimization:
-// - createSelector pattern for derived data (spread calculation)
-// - useShallow for array returns to prevent re-renders
-//
-// TESTING:
-//
-// Mock State:
-// ```typescript
-// const mockStore = createMarketsSlice(() => {}, () => ({}), {} as any);
-// mockStore.addMarket({ id: 'test', node_type: { Market: 'Polymarket' }, ... });
-// expect(mockStore.markets).toHaveLength(1);
-// ```
-//
-// Mock Updates:
-// ```typescript
-// mockStore.updateOrderbook('test', { bids: [[0.5, 100]], asks: [[0.6, 100]], timestamp: Date.now() });
-// expect(mockStore.orderbooks['test'].bids[0][0]).toBe(0.5);
-// ```
-//
-// DEPENDENCIES:
-// - zustand (State creator type)
-// - immer (via middleware in index.ts for mutable-style updates)
-// - ../types/nodes (Node, MarketType)
-// - ../types/markets (Orderbook, MarketStatus)
-// - ../hooks/useWebSocket (for real-time updates, subscribed in component)
-//
-// FUTURE ENHANCEMENTS:
-// - Orderbook aggregation (combine Polymarket + Kalshi for same event)
-// - Smart order routing (best price across markets)
-// - Market discovery (search/browse available markets)
-// - Favorite markets (persist to localStorage)
-// - Price alerts (trigger when threshold crossed)
-// - Market metadata caching (descriptions, resolution criteria)
-//
+// Key Design Decisions:
+//   - Connection state machine: idle -> connecting -> connected -> disconnected
+//   - Orderbooks are in-memory only (volatile); evicted on disconnect
+//   - Markets are also nodes in nodesSlice; this slice owns market-specific
+//     data (orderbooks, status) while nodesSlice owns layout/position
+//   - positionsSlice reads orderbook prices for P&L calculation
 // ============================================================================
 
 import { StateCreator } from 'zustand';

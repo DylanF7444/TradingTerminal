@@ -2,259 +2,27 @@
 // MARKET DATA MODELS
 // ============================================================================
 //
-// Module: models/market.rs
-// Purpose: Data structures for prediction market orderbooks, trades, and market data
+// Purpose: Data structures for prediction market orderbooks, trades, and
+// time-series data. Abstracts platform-specific formats (Polymarket, Kalshi)
+// into unified internal representations.
 //
-// OVERVIEW:
-// This module defines the structures necessary for interacting with prediction
-// markets, including orderbook representations, trade execution results, and
-// time-series data points. It abstracts platform-specific formats (Polymarket vs
-// Kalshi) into unified internal representations.
+// CORE TYPES:
+//   Orderbook      - Bid/ask price levels with liquidity metrics and sequence
+//                    numbers. Bids sorted descending, asks ascending.
+//   OrderSide      - Buy (YES) or Sell (NO) direction
+//   OrderType      - Limit(price) or Market execution
+//   TimeInForce    - GTC, GTT, IOC, FOK order duration policies
+//   TradeResult    - Execution confirmation with fill details, fees, and status
+//   TimeseriesPoint - Single time-series observation (timestamp, source, metric, value)
+//   DataPoint      - Alias for TimeseriesPoint used in batch operations
 //
-// PREDICTION MARKET MECHANICS:
-// Unlike traditional exchanges with continuous prices, prediction markets trade
-// binary outcomes (YES/NO) priced as probabilities between $0.00 and $1.00.
+// PREDICTION MARKET PRICING:
+//   Binary outcomes priced as probabilities 0.0-1.0. YES + NO ~ 1.0.
+//   Payout is $1.00 if correct, $0.00 if incorrect.
 //
-// Key Concepts:
-// - Contract: A share representing a bet on an outcome
-// - Price: Probability of occurrence (0.0 to 1.0)
-// - Payout: $1.00 if correct, $0.00 if incorrect
-// - Implied Probability: Market consensus on likelihood
-// - Binary Outcome: Event either happens (YES pays) or doesn't (NO pays)
-//
-// Example Market: "Will it rain tomorrow?"
-// - YES price: 0.30 (30% chance)
-// - NO price: 0.72 (72% chance, includes spread)
-// - Buying 100 YES shares at $0.30 costs $30
-// - If it rains: receive $100 (profit $70)
-// - If no rain: receive $0 (loss $30)
-//
-// DATA STRUCTURES:
-//
-// Orderbook (Struct):
-// Represents the current liquidity available for trading. Prediction markets
-// typically use limit order books similar to stock exchanges, but with binary
-// constraints (prices must be 0.0-1.0).
-//
-// Fields:
-// - market_id: String          // Associated market node ID
-// - bids: Vec<[f64; 2]>        // Buy orders [price, size]
-// - asks: Vec<[f64; 2]>        // Sell orders [price, size]
-// - timestamp: i64             // Unix timestamp of snapshot
-// - liquidity: f64             // Total value available (sum of bids + asks)
-// - spread: f64                // Difference between best ask and best bid
-// - last_price: Option<f64>    // Last trade price
-// - last_size: Option<f64>     // Last trade size
-// - last_trade_at: Option<i64>  // Last trade timestamp
-// - sequence: i64              // Sequence number for ordering updates
-//
-// Bids are sorted descending (highest price first - best bid)
-// Asks are sorted ascending (lowest price first - best ask)
-// Example:
-//   bids: [[0.52, 1000], [0.51, 500], [0.50, 200]]
-//   asks: [[0.53, 800], [0.54, 1200]]
-//   spread: 0.53 - 0.52 = 0.01 (1 cent)
-//
-// OrderSide (Enum - renamed from TradeSide to match TypeScript):
-// Direction of trade relative to the outcome:
-// - Buy: Purchasing YES contracts (betting event WILL happen)
-// - Sell: Purchasing NO contracts (betting event WON'T happen)
-//   OR selling previously bought YES contracts (closing long)
-//
-// Note: In prediction markets, "Buy NO" is equivalent to "Sell YES" in terms
-// of directional exposure, but has different margin requirements.
-//
-// OrderType (Enum):
-// Execution strategy for the trade:
-// - Limit(price): Execute only at specified price or better
-//   - Buy limit: Fill at price or lower (cheaper)
-//   - Sell limit: Fill at price or higher (more expensive)
-// - Market: Execute immediately at best available price
-//   - Accepts current spread (slippage)
-//   - Guaranteed fill, uncertain price
-//
-// TimeInForce (Enum - added to match TypeScript):
-// How long order remains active:
-// - GTC: Good till cancelled
-// - GTT: Good till time
-// - IOC: Immediate or cancel
-// - FOK: Fill or kill
-//
-// TradeResult (Struct):
-// Confirmation of executed trade with actual fill details.
-// Fields:
-// - trade_id: String           // Exchange-assigned trade identifier
-// - market_id: String          // Market where trade occurred  
-// - side: OrderSide            // Direction (Buy/Sell)
-// - order_type: OrderType      // Limit or Market
-// - requested_size: f64        // Contracts requested
-// - filled_size: f64           // Contracts actually filled (partial fills)
-// - avg_price: f64             // Volume-weighted average fill price
-// - fees_paid: f64             // Total fees (entry + platform fees)
-// - status: String             // "filled", "partial", "failed", "pending"
-// - timestamp: i64             // Execution time
-// - metadata: JsonValue        // Platform-specific details (tx hashes, etc.)
-//
-// TimeseriesPoint (Struct):
-// Single observation for storage in time-series database.
-// Fields:
-// - timestamp: i64             // Unix epoch seconds
-// - source_id: String          // Node ID or market ID
-// - metric_type: String        // "price", "volume", "spread", "liquidity"
-// - value: f64                 // Numeric value
-// - metadata: Option<JsonValue>// Additional context
-//
-// Used by storage.rs for historical data persistence.
-//
-// DataPoint (Type Alias):
-// Convenience alias for TimeseriesPoint used in batch operations.
-//
-// PLATFORM ADAPTERS:
-//
-// The trading terminal normalizes different market APIs into these structures:
-//
-// Polymarket → Orderbook conversion:
-// - Polymarket uses CLOB (Central Limit Order Book) with order IDs
-// - Bids: tokenId + price + size
-// - Asks: tokenId + price + size  
-// - Normalization aggregates by price level (ignoring order IDs)
-//
-// Kalshi → Orderbook conversion:
-// - Kalshi uses REST snapshot + WebSocket deltas
-// - Format: {"yes": [[price, count], ...], "no": [[price, count], ...]}
-// - Normalization converts NO prices to YES equivalents (1 - price) for consistency
-//
-// API RESPONSE HANDLING:
-//
-// Successful trades:
-// - TradeResult.status = "filled"
-// - filled_size == requested_size
-// - avg_price within slippage tolerance of expected
-//
-// Partial fills:
-// - TradeResult.status = "partial"
-// - filled_size < requested_size
-// - Remaining size stays as open order (until cancelled or filled)
-// - Common in low-liquidity markets
-//
-// Failed trades:
-// - TradeResult.status = "failed"
-// - reasons: insufficient_funds, market_closed, price_out_of_bounds, rate_limited
-// - fees_paid = 0.0
-// - metadata contains error details from exchange
-//
-// MATH UTILITIES:
-//
-// Bid-Ask Spread calculation:
-// if !bids.is_empty() && !asks.is_empty() {
-//     spread = asks[0][0] - bids[0][0];  // Best ask - Best bid
-// }
-//
-// Midpoint price (fair value estimate):
-// midpoint = (best_bid + best_ask) / 2.0;
-//
-// Liquidity calculation:
-// total_liquidity = bids.iter().map(|b| b[0] * b[1]).sum::<f64>() +
-//                   asks.iter().map(|a| a[0] * a[1]).sum::<f64>();
-//
-// SERIALIZATION NOTES:
-//
-// Orderbook JSON format optimized for frontend charting libraries:
-// {
-//   "marketId": "poly-123",
-//   "bids": [[0.52, 1000], [0.51, 500]],
-//   "asks": [[0.53, 800], [0.54, 1200]],
-//   "timestamp": 1706200000,
-//   "spread": 0.01,
-//   "liquidity": 25000.00
-// }
-//
-// TradeResult includes platform-specific details in metadata:
-// Polymarket: {"transactionHash": "0x...", "orderId": "...", "gasPaid": "0.001"}
-// Kalshi: {"orderId": "uuid", "commission": 0.50}
-//
-// DATABASE MAPPING:
-//
-// Orderbooks are typically transient (stored in memory cache), but can be
-// snapshotted to timeseries table for analysis:
-// - metric_type: "bid_ask_spread", "best_bid", "liquidity"
-// - source_id: market node ID
-//
-// TradeResults are stored in positions table (entry/exit details) and
-// event_log table (audit trail).
-//
-// VALIDATION RULES:
-//
-// Orderbook:
-// - All prices must be 0.0 <= price <= 1.0
-// - All sizes must be > 0.0
-// - Bids must be < Asks (otherwise arbitrage exists)
-// - Timestamp must be recent (< 60 seconds for "live" data)
-//
-// TradeResult:
-// - filled_size <= requested_size
-// - 0.0 <= avg_price <= 1.0
-// - fees_paid >= 0.0
-// - timestamp >= entry_time (for closing positions)
-//
-// USAGE PATTERNS:
-//
-// Creating an orderbook from WebSocket update:
-// ```rust
-// let orderbook = Orderbook {
-//     market_id: "market-123".to_string(),
-//     bids: vec![[0.52, 1000.0], [0.51, 500.0]],
-//     asks: vec![[0.53, 800.0], [0.54, 1200.0]],
-//     timestamp: Utc::now().timestamp(),
-//     liquidity: 25000.0,
-//     spread: 0.01,
-// };
-// ```
-//
-// Executing a trade:
-// ```rust
-// let result = TradeResult {
-//     trade_id: "trade-789".to_string(),
-//     market_id: "market-123".to_string(),
-//     side: TradeSide::Buy,
-//     order_type: OrderType::Limit(0.52),
-//     requested_size: 100.0,
-//     filled_size: 100.0,
-//     avg_price: 0.52,
-//     fees_paid: 2.04,  // 2% of 102
-//     status: "filled".to_string(),
-//     timestamp: Utc::now().timestamp(),
-//     metadata: serde_json::json!({}),
-// };
-// ```
-//
-// PRICE NORMALIZATION BETWEEN MARKETS:
-//
-// When comparing Polymarket and Kalshi for arbitrage:
-// - Polymarket YES at 0.52 means 52 cents to bet YES
-// - Kalshi NO at 0.48 means 48 cents to bet NO
-// - These are equivalent positions (YES 0.52 vs NO 0.48)
-// - Arbitrage exists if: YES_price + NO_price != 1.0 (accounting for fees)
-//
-// TESTING:
-//
-// Unit tests verify:
-// - Orderbook sorting (bids descending, asks ascending)
-// - TradeResult validation (filled <= requested)
-// - Price bounds checking (0.0-1.0)
-// - JSON serialization symmetry
-//
-// Integration tests:
-// - Platform-specific JSON parsing (Polymarket/Kalshi samples)
-// - Spread calculations with edge cases (empty books, single-sided)
-//
-// FUTURE ENHANCEMENTS:
-// - Add Candlestick struct for OHLC aggregations
-// - Implement Orderbook diff/patch for efficient WebSocket updates
-// - Add TradeHistory struct for position reconciliation
-// - Support decimal precision (Decimal128) for exact arithmetic
-// - Add OrderbookImbalance calculation (bid volume vs ask volume)
-// - Implement VWAP (Volume Weighted Average Price) calculations
+// PLATFORM NORMALIZATION:
+//   Polymarket CLOB orders are aggregated by price level.
+//   Kalshi NO prices are converted to YES equivalents (1 - price).
 // ============================================================================
 
 use serde::{Deserialize, Serialize};

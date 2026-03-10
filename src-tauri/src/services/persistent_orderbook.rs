@@ -2,46 +2,20 @@
 // PERSISTENT ORDERBOOK MONITORING SERVICE
 // ============================================================================
 //
-// Module: services/persistent_orderbook.rs
-// Purpose: Always-on orderbook monitoring for ALL active market nodes
+// Purpose: Always-on orderbook monitoring for ALL active market nodes.
 //
-// OVERVIEW:
-// This service maintains persistent WebSocket subscriptions to all connected
-// market nodes, regardless of which UI component is currently viewing them.
-// Orderbook data is stored in a central in-memory cache and emitted via
-// Tauri events for frontend consumption.
+// Maintains persistent WebSocket subscriptions regardless of which UI
+// component is currently viewing them. Uses the consolidated WebSocketManager
+// (one connection per platform) and stores updates in a central in-memory cache.
 //
-// ARCHITECTURE:
-//   App Startup / Market Added
-//     → PersistentOrderbookMonitor detects market node
-//     → Subscribes via WebSocketManager (consolidated connections)
-//     → Stores updates in central OrderbookCache
-//     → Emits 'orderbook:update' events to frontend
-//     → All UI components read from central store
+// LIFECYCLE:
+//   Market Added   -> subscribe via WebSocketManager, cache updates
+//   Market Removed -> unsubscribe, remove cache entry
+//   Continuous     -> emit 'orderbook:update' events to frontend
 //
-// KEY DESIGN DECISIONS:
-// - Uses consolidated WebSocketManager (one connection per platform)
-// - Memory-bounded cache (~100KB per market max)
-// - Subscribes on market add, unsubscribes on market remove ONLY
-// - Periodic cache cleanup for stale markets
-//
-// DATA FLOW:
-//   Market Node Added → subscribe_market()
-//     → WebSocketManager.subscribe(platform, token_id)
-//     → Backend emits 'orderbook:update' events
-//     → PersistentOrderbookMonitor caches updates
-//     → Frontend reads from central marketsSlice.orderbooks
-//
-//   Market Node Removed → unsubscribe_market()
-//     → WebSocketManager.unsubscribe(platform, token_id)
-//     → Cache entry removed
-//
-// MEMORY MANAGEMENT:
-// - Max 50 price levels per side per market
-// - Max 20 recent trades per market
-// - Stale entries cleaned after 5 minutes of no updates
-// - Total cache bounded by number of active markets (~100KB each)
-//
+// MEMORY BOUNDS:
+//   Max 50 price levels per side, 20 recent trades per market.
+//   Stale entries cleaned after 5 minutes of no updates.
 // ============================================================================
 
 use std::collections::HashMap;

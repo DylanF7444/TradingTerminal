@@ -2,139 +2,26 @@
 // DATA SOURCES COMMAND HANDLERS
 // ============================================================================
 //
-// Module: commands/data_sources.rs
-// Purpose: Tauri command handlers for managing information source nodes
+// Purpose: Tauri command handlers for managing information source nodes.
 //
-// OVERVIEW:
-// This module provides the bridge between the frontend UI and backend scraping
-// services. It handles the complete lifecycle of data sources (info nodes) that
-// feed information into the prediction market trading terminal.
+// Bridges the frontend UI and backend scraping services, handling the full
+// lifecycle of data sources (crypto, financial, commodity prices, news,
+// social media, weather, livestreams).
 //
-// Data sources include:
-// - Crypto prices (Bitcoin, Ethereum, etc.)
-// - Financial prices (stocks, forex)
-// - Commodity prices (gold, oil)
-// - News feeds (Reuters, AP)
-// - Social media sentiment (Twitter, Reddit)
-// - Weather data
-// - Livestream monitoring
+// COMMANDS:
+//   add_data_source        - Create node, store in DB, spawn scraper task
+//   remove_data_source     - Stop scraper, archive node (soft delete)
+//   get_data_sources       - Retrieve all active (non-archived) sources
+//   update_data_source     - Update config, restart scraper
+//   get_data_source_status - Health metrics (active, last_update, errors, uptime)
 //
-// ARCHITECTURE:
-// User clicks "Add Source" in UI
-//   → Frontend calls add_data_source() via Tauri invoke
-//   → Backend creates Node object
-//   → Stores in SQLite database
-//   → Spawns background scraper task (Tokio async)
-//   → Returns Node to frontend for canvas display
-//   → Scraper continuously polls external APIs
-//   → Emits WebSocket events to frontend on new data
+// STATE:
+//   ACTIVE_SCRAPERS: HashMap<node_id, JoinHandle> protected by Arc<Mutex>
+//   for tracking and graceful shutdown of background scraper tasks.
 //
-// COMMANDS (Tauri-callable functions):
-//
-// 1. add_data_source(source_type, config) -> Result<Node, String>
-//    - Creates a new data source node
-//    - Starts background scraping service
-//    - Stores node in database
-//    - Returns: Complete Node object for UI rendering
-//    - Example: add_data_source(CryptoPrices, {"symbols": ["BTC", "ETH"]})
-//
-// 2. remove_data_source(id) -> Result<(), String>
-//    - Stops the scraping service
-//    - Archives node data (soft delete)
-//    - Removes from active scrapers map
-//    - Logs removal event
-//
-// 3. get_data_sources() -> Result<Vec<Node>, String>
-//    - Retrieves all active (non-archived) data sources
-//    - Used by UI to populate canvas on startup
-//    - Returns: Array of Node objects
-//
-// 4. update_data_source(id, config) -> Result<Node, String>
-//    - Updates existing source configuration
-//    - Restarts scraper with new settings
-//    - Example: Change BTC update interval from 5s to 10s
-//
-// 5. get_data_source_status(id) -> Result<JsonValue, String>
-//    - Returns health metrics for a scraper
-//    - Fields: active, last_update, error, data_points_collected, uptime_seconds
-//    - Used by UI to show status indicators
-//
-// STATE MANAGEMENT:
-// - ACTIVE_SCRAPERS: HashMap<String, JoinHandle>
-//   - Maps node_id → background task handle
-//   - Allows graceful shutdown of scrapers
-//   - Protected by Arc<Mutex> for thread safety
-//
-// EXTERNAL METHODS CALLED:
-//
-// Database operations (implemented in db/sqlite.rs):
-// - store_node_in_db(node) -> Result<(), Error>
-// - archive_node_in_db(id) -> Result<(), Error>
-// - fetch_active_nodes_from_db() -> Result<Vec<Node>, Error>
-// - fetch_node_from_db(id) -> Result<Node, Error>
-// - update_node_in_db(node) -> Result<(), Error>
-//
-// Scraper services (implemented in services/scraper.rs):
-// - start_scraper_service(node_id, source_type, config) -> Result<JoinHandle, Error>
-//   - Spawns Tokio task that polls external APIs
-//   - Returns handle for later cancellation
-// - stop_scraper_service(node_id) -> Result<(), Error>
-//   - Sends shutdown signal to scraper task
-//   - Waits for graceful cleanup
-// - fetch_scraper_status(node_id) -> Result<ScraperStatus, Error>
-//   - Queries scraper task for health metrics
-//
-// Logging (stub implementation):
-// - log_data_source_event(node_id, event_type) -> ()
-//   - Logs to event_log table in database
-//   - Event types: "added", "removed", "updated", "error"
-//
-// DEPENDENCIES:
-// - crate::models::node::{Node, NodeType, InfoSourceType}
-// - crate::services::scraper (background workers)
-// - crate::db::sqlite (persistence)
-// - serde_json (config serialization)
-// - tokio::sync::Mutex (async state management)
-// - lazy_static (global scraper map)
-//
-// ERROR HANDLING:
-// All commands return Result<T, String> for Tauri compatibility
-// Errors are converted to user-friendly strings before returning
-// Database errors, scraper failures, and validation errors all propagated
-//
-// PERFORMANCE NOTES:
-// - Scraper tasks run on Tokio async runtime (non-blocking)
-// - Database writes are fast (SQLite with WAL mode)
-// - Typical add_data_source() completes in <50ms
-// - Supports 50+ concurrent scrapers without performance degradation
-//
-// TESTING:
-// - Unit tests for each command function
-// - Tests use dummy implementations of external methods
-// - No actual network calls or database writes in tests
-//
-// USAGE EXAMPLE (from frontend):
-// ```typescript
-// import { invoke } from '@tauri-apps/api/tauri';
-// 
-// const node = await invoke('add_data_source', {
-//   sourceType: 'CryptoPrices',
-//   config: {
-//     symbols: ['BTC', 'ETH', 'SOL'],
-//     update_interval_seconds: 5
-//   }
-// });
-// 
-// console.log('Created node:', node.id);
-// ```
-//
-// FUTURE ENHANCEMENTS:
-// - Add pause/resume functionality for scrapers
-// - Implement rate limiting configuration
-// - Add scraper health auto-recovery
-// - Support custom scraper plugins
+// Scraper tasks run on the Tokio async runtime. Database operations use
+// SQLite with WAL mode. All commands return Result<T, String> for Tauri IPC.
 // ============================================================================
-
 
 use crate::models::node::{Node, NodeType, InfoSourceType};
 use crate::AppState;

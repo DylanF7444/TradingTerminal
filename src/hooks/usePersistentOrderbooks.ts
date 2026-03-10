@@ -2,43 +2,17 @@
 // PERSISTENT ORDERBOOK MONITORING HOOK
 // ============================================================================
 //
-// Module: hooks/usePersistentOrderbooks.ts
-// Purpose: React hook for always-on orderbook monitoring across ALL market nodes
+// Purpose: Always-on orderbook monitoring across ALL market nodes.
+// Mount ONCE at App level. Unlike useOrderbook (per-component), this hook
+// keeps subscriptions alive regardless of which UI panel is open.
 //
-// OVERVIEW:
-// This hook manages persistent orderbook subscriptions for all connected
-// market nodes. Unlike useOrderbook (which subscribes per-component),
-// this hook:
-//   - Subscribes to ALL active markets automatically
-//   - Keeps subscriptions alive regardless of which UI is open
-//   - Stores data in the central Zustand store (marketsSlice.orderbooks)
-//   - Only unsubscribes when a market is removed/deleted
+// Key behaviors:
+// - Subscribes to ALL active markets, stores in Zustand (marketsSlice.orderbooks)
+// - Watches marketsSlice.markets for add/remove, auto-subscribes/unsubscribes
+// - Listens for 'orderbook:update' Tauri events and updates central store
+// - Max 50 levels/side, max 20 recent trades/market, stale after 5 min
 //
-// USAGE:
-// Mount this hook ONCE at the App level (or a top-level layout component).
-// It will automatically:
-//   1. Listen for orderbook:update events from the backend
-//   2. Update the central marketsSlice.orderbooks store
-//   3. Subscribe new markets when they're added
-//   4. Unsubscribe markets when they're removed
-//
-// All other UI components (OrderbookView, GlobalOrderbookOverlay,
-// NodeOrderbookPopup) should READ from the central store instead of
-// creating their own subscriptions.
-//
-// ARCHITECTURE:
-//   App.tsx mounts usePersistentOrderbooks()
-//     → Listens for 'orderbook:update' Tauri events
-//     → Updates marketsSlice.orderbooks for ALL markets
-//     → Watches marketsSlice.markets for add/remove
-//     → Invokes monitor_market_orderbook_cmd on add
-//     → Invokes unmonitor_market_orderbook_cmd on remove
-//
-// MEMORY MANAGEMENT:
-// - Max 50 levels per side stored in central state
-// - Max 20 recent trades per market
-// - Stale data flagged after 5 minutes
-// - Cleanup automatic on market removal
+// UI components should READ from the central store, not create own subscriptions.
 //
 // ============================================================================
 

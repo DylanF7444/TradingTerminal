@@ -2,62 +2,29 @@
 // REMOTE GATEWAY SERVICE
 // ============================================================================
 //
-// Module: services/remote_gateway.rs
-// Purpose: WebSocket relay-based remote access gateway for the trading terminal
+// Purpose: WebSocket relay-based remote access gateway for the trading terminal.
 //
-// OVERVIEW:
-// This service enables remote access to the trading terminal running on a home
-// desktop. It establishes an outbound WebSocket connection to a relay server,
-// authenticates with device credentials, and manages sessions for connected
-// remote devices. Market data and Tauri commands are proxied bidirectionally.
+// Enables remote access to the desktop terminal via an outbound WebSocket
+// connection to a relay server. Market data and Tauri commands are proxied
+// bidirectionally between remote devices and the home desktop.
 //
 // ARCHITECTURE:
 //   [Remote Device] <--WS--> [Relay Server] <--WS--> [Home Desktop (this)]
-//                                                          |
-//                                                    [Market APIs]
 //
-// WHY RELAY (vs Direct P2P):
-//   - NAT traversal: Home desktops are typically behind routers/firewalls
-//   - No port forwarding required: Outbound connections only
-//   - Works through corporate firewalls and restrictive networks
-//   - Simpler than STUN/TURN/ICE for WebRTC
-//   - TLS encryption handled by standard wss:// URLs
+// Uses a relay model (vs direct P2P) to avoid NAT traversal and port
+// forwarding -- outbound connections only, works through firewalls.
 //
 // FLOW:
-//   1. User enables remote access in settings
-//   2. Gateway connects to relay server via outbound WebSocket
-//   3. Gateway registers with device_id, receives pairing code
-//   4. Remote device connects to same relay, enters pairing code
-//   5. Relay bridges the two connections
-//   6. Remote device authenticates with auth_token
-//   7. Commands from remote are executed locally and results returned
-//   8. Market data events are forwarded to remote in real-time
+//   1. Gateway connects to relay, registers with device_id
+//   2. Remote device connects to relay, enters pairing code
+//   3. Relay bridges connections; remote authenticates with auth_token
+//   4. Commands executed locally, results + market data forwarded
 //
-// SECURITY:
-//   - All traffic encrypted via TLS (wss://)
-//   - Device pairing requires physical access to see pairing code
-//   - Auth tokens are 256-bit random hex strings
-//   - Session timeouts prevent stale connections
-//   - Paired devices can be revoked at any time
+// SECURITY: TLS (wss://), 256-bit auth tokens, session timeouts, device
+// revocation. Pairing requires physical access to see the pairing code.
 //
-// CONCURRENCY:
-//   - Gateway runs as a Tokio task spawned from main.rs setup
-//   - Command channel (mpsc) for control from Tauri commands
-//   - Read/write halves of WebSocket run in separate tasks
-//   - Session state protected by Arc<RwLock<>>
-//
-// ERROR HANDLING:
-//   - Relay disconnection: Automatic reconnection with exponential backoff
-//   - Auth failure: Log error, notify frontend, do not retry
-//   - Command forwarding failure: Return error to remote device
-//   - Panic in gateway task: Supervisor restarts (future enhancement)
-//
-// FUTURE ENHANCEMENTS:
-//   - WebRTC data channel for lower-latency P2P (with relay fallback)
-//   - Tailscale integration for WireGuard-based VPN tunneling
-//   - Multi-device support (multiple remotes connected simultaneously)
-//   - Bandwidth throttling and QoS for metered connections
-//   - End-to-end encryption (beyond TLS) using device key pairs
+// Runs as a Tokio task with mpsc command channel. WebSocket read/write
+// halves run in separate tasks. Session state protected by Arc<RwLock<>>.
 // ============================================================================
 
 use std::collections::HashMap;

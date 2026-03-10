@@ -2,42 +2,10 @@
 // API KEY MANAGEMENT HOOK
 // ============================================================================
 //
-// Module: hooks/useApiKeys.ts
-// Purpose: React hook for managing stored API keys
+// Purpose: React hook for managing stored API keys via Tauri commands.
+// Wraps Tauri IPC with loading state, error handling, and automatic refresh.
 //
-// OVERVIEW:
-// This hook provides a convenient interface for components to interact with
-// the stored API keys. It wraps the Tauri commands and provides loading state,
-// error handling, and automatic refresh.
-//
-// USAGE:
-// ```tsx
-// const { 
-//   apiKeys, 
-//   hasKey, 
-//   getKey, 
-//   saveKey, 
-//   deleteKey, 
-//   loading, 
-//   error 
-// } = useApiKeys();
-//
-// // Check if key exists
-// const hasPolymarket = await hasKey('Polymarket');
-//
-// // Get stored key
-// const key = await getKey('Polymarket');
-//
-// // Save new key
-// await saveKey({
-//   platform: 'Polymarket',
-//   api_key: 'xxx',
-//   api_secret: null,
-//   private_key: '0x...',
-//   environment: 'demo',
-//   additional_config: null
-// });
-// ```
+// Returns: { apiKeys, hasKey, getKey, saveKey, deleteKey, loading, error }
 //
 // ============================================================================
 

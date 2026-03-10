@@ -2,45 +2,22 @@
 // ORDERBOOK WEBSOCKET SERVICE
 // ============================================================================
 //
-// Module: services/orderbook.rs
-// Purpose: Real-time orderbook streaming from Polymarket and Kalshi
+// Purpose: Real-time orderbook streaming from Polymarket and Kalshi.
 //
-// OVERVIEW:
-// This module implements WebSocket connections to prediction market orderbook
-// feeds. It manages subscriptions, parses incoming messages, normalizes data
-// formats, and emits events to the frontend via Tauri's event system.
+// Manages WebSocket connections to prediction market orderbook feeds.
+// Messages are parsed, normalized to a common format, and emitted
+// to the frontend via Tauri events.
 //
 // SUPPORTED PLATFORMS:
-// - Polymarket: CLOB WebSocket API (wss://ws-subscriptions-clob.polymarket.com/ws)
-// - Kalshi: WebSocket API (wss://api.elections.kalshi.com/trade-api/v2/ws)
-//
-// ARCHITECTURE:
-// Each market subscription spawns a dedicated WebSocket connection task.
-// Messages are parsed, normalized to a common OrderbookUpdate format, and
-// emitted to the frontend via Tauri events.
+//   Polymarket: wss://ws-subscriptions-clob.polymarket.com/ws
+//   Kalshi:     wss://api.elections.kalshi.com/trade-api/v2/ws
 //
 // DATA FLOW:
-// WebSocket Message → Parse → Normalize → Emit Tauri Event → Frontend
+//   WebSocket Message -> Parse -> Normalize -> Emit Tauri Event -> Frontend
 //
-// NORMALIZED FORMAT:
-// All orderbook updates are normalized to:
-// {
-//   market_id: String,
-//   bids: Vec<(f64, f64)>,  // (price, size)
-//   asks: Vec<(f64, f64)>,
-//   timestamp: i64,
-//   sequence: u64,
-// }
-//
-// LIFECYCLE:
-// 1. subscribe_orderbook() - Start streaming for a market
-// 2. Connection maintained with auto-reconnect
-// 3. unsubscribe_orderbook() - Stop streaming
-//
-// ERROR HANDLING:
-// - Connection failures trigger automatic reconnection with exponential backoff
-// - Parse errors are logged but don't crash the connection
-// - Stale data detection (no updates for 30s triggers reconnect)
+// Each subscription spawns a dedicated connection task with auto-reconnect
+// (exponential backoff). Parse errors are logged without crashing the connection.
+// Stale data (no updates for 30s) triggers reconnection.
 // ============================================================================
 
 use anyhow::{Result, Context, anyhow};
@@ -844,6 +821,8 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
                         last_update = std::time::Instant::now();
                         last_pong = std::time::Instant::now();
                         
+                        println!("[DEBUG] Emitting Polymarket orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
+                        
                         // Emit to frontend
                         if let Err(e) = app_handle.emit("orderbook:update", &update) {
                             eprintln!("Failed to emit Polymarket market update: {}", e);
@@ -965,6 +944,7 @@ fn parse_polymarket_market_single(value: &JsonValue, asset_ids: &[String]) -> Re
     match msg.event_type.as_deref().or(event_type) {
         Some("book") | Some("book_update") => {
             // Full orderbook snapshot
+            println!("[DEBUG] Polymarket received BOOK SNAPSHOT for market_id: {}", market_id);
             let bids = parse_market_levels(msg.bids);
             let asks = parse_market_levels(msg.asks);
 
@@ -981,6 +961,7 @@ fn parse_polymarket_market_single(value: &JsonValue, asset_ids: &[String]) -> Re
         }
         Some("price_change") => {
             // Incremental price level update via price_changes array
+            println!("[DEBUG] Polymarket received PRICE_CHANGE for market_id: {}", market_id);
             if let Some(changes) = msg.price_changes {
                 // Find the change matching one of our subscribed asset_ids
                 for change in &changes {

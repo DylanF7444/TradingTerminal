@@ -2,153 +2,36 @@
 // PREDICTION MARKET TERMINAL - MAIN ENTRY POINT
 // ============================================================================
 //
-// File: src-tauri/src/main.rs
-// Purpose: Application bootstrap, initialization, and lifecycle management
-//
-// OVERVIEW:
-// This is the entry point for the Tauri desktop application. It initializes
-// the SQLite database, starts background services (scrapers, analyzer, executor),
-// registers Tauri commands for frontend IPC, and manages application lifecycle
-// including graceful shutdown.
-//
-// WHY TAURI (vs Electron):
-// - Binary size: ~5MB vs ~150MB (no bundled Chromium)
-// - Memory usage: ~50MB vs ~300MB RAM idle
-// - Security: Rust memory safety, OS-native webview sandboxing
-// - Performance: Native Rust backend, no Node.js bridge overhead
-// - CPU efficiency: Critical for 24/7 trading operations
+// Purpose: Application bootstrap, initialization, and lifecycle management.
+// Initializes SQLite, starts background services (scrapers, analyzer, executor),
+// registers Tauri IPC commands, and manages graceful shutdown.
 //
 // APPLICATION ARCHITECTURE:
 //
-// Main Thread (Tauri):
-//   - UI event loop (macOS/Android requirement)
-//   - Command dispatch (invoke_handler)
-//   - Window management
+//   Main Thread (Tauri):
+//     UI event loop, command dispatch, window management
 //
-// Tokio Runtime (Async):
-//   - Database connection pool
-//   - HTTP client connections (reqwest)
-//   - Scraper tasks (one per data source)
-//   - Analyzer task (signal processing)
-//   - Executor task (trade execution)
-//   - WebSocket listeners (market data feeds)
+//   Tokio Runtime (Async):
+//     DB pool, HTTP clients, scraper/analyzer/executor tasks, WebSocket feeds
 //
 // THREADING MODEL:
-//
-// There's no true "main thread" blocking in Tauri apps. Instead:
-// 1. main() runs briefly to build the Tauri app
-// 2. .run() enters the native event loop (platform-specific)
-// 3. Tokio runtime (configured by Tauri) handles async work
-// 4. Commands are dispatched on Tokio threads
-// 5. State is shared via Arc<Mutex<T>> across threads
+//   1. main() builds the Tauri app, .run() enters the native event loop
+//   2. Tokio runtime handles all async work; commands dispatch on Tokio threads
+//   3. State shared via Arc<Mutex<T>> across threads
 //
 // BOOT SEQUENCE:
+//   1. Build Tauri app -> setup() hook:
+//      - Resolve app data dir, init SQLite (schema + WAL pragmas)
+//      - Start background services, register global state
+//   2. Register IPC command handlers and event handlers
+//   3. Run application (blocks until exit)
+//   4. Cleanup: shutdown signal to services, close DB, flush logs
 //
-// 1. Parse command line arguments (if any)
-// 2. Initialize logging (env_logger/tracing)
-// 3. Configure panic hooks (graceful crash reporting)
-// 4. Build Tauri application:
-//    a. setup() hook runs:
-//       - Resolve app data directory (platform-specific)
-//       - Create SQLite database file if missing
-//       - Initialize schema (tables, indexes)
-//       - Apply performance pragmas (WAL mode, etc.)
-//       - Start background services (scrapers, analyzer, executor)
-//       - Register global state (DB pool, HTTP client, service handles)
-//    b. Configure menu / system tray
-//    c. Configure window attributes
-// 5. Register command handlers (IPC functions callable from frontend)
-// 6. Configure event handlers:
-//    - Window close requested (graceful shutdown)
-//    - System tray click
-//    - Deep links (future: handle market URLs)
-// 7. Run application (blocks until exit)
-// 8. Cleanup on exit:
-//    - Shutdown signal to all services
-//    - Wait for scrapers to finish current iteration
-//    - Close database connections
-//    - Flush logs
-//
-// STATE MANAGEMENT:
-//
-// Tauri uses "managed state" pattern - objects stored in AppHandle and accessible
-// to all commands via State<'_, T>. We store:
-//
-// - Database: Arc<Mutex<Connection>> (or deadpool/r2d2 pool in production)
-// - HttpClient: reqwest::Client (shared across all HTTP requests)
-// - ServiceHandles: Abort handles for scrapers, analyzer, executor
-// - Config: ApplicationSettings (hot-reloadable config)
-//
-// SAFETY:
-// - Database path uses app_data_dir() (sandboxed, user-writable)
-// - Fallback to temp dir if data_dir unavailable (rare edge case)
-// - All unwraps/expects are for programmer errors (config missing), not runtime
-// - Database migrations are idempotent (CREATE TABLE IF NOT EXISTS)
-//
-// ERROR HANDLING STRATEGY:
-//
-// - Database initialization failure: Fatal, show error dialog, exit
-// - Service startup failure: Log error, continue with degraded functionality
-// - Command errors: Return Result<T, String> to frontend for display
-// - Panics: Catch and log to file, attempt graceful shutdown
-//
-// PLATFORM CONSIDERATIONS:
-//
-// macOS:
-//   -_app_data_dir: ~/Library/Application Support/com.yourcompany.terminal/
-//   - Requires Info.plist for bundle ID
-//   - Menu bar integration expected
-//
-// Windows:
-//   - app_data_dir: %APPDATA%/YourCompany/terminal/
-//   - System tray recommended for background operation
-//   - Console window hidden in release (windows_subsystem)
-//
-// Linux:
-//   - app_data_dir: ~/.local/share/terminal/ or $XDG_DATA_HOME
-//   - Follows XDG Base Directory Specification
-//
-// SECURITY:
-//
-// - Database file permissions: User-only read/write (0o600 on Unix)
-// - API keys: Never logged, retrieved from keyring on demand
-// - CORS: Not applicable (desktop app, no web server)
-// - CSP: Configured in tauri.conf.json to prevent XSS
-// - Updater: Verify signatures before installing updates
-//
-// PERFORMANCE OPTIMIZATIONS:
-//
-// - Single HTTP client instance (connection pooling)
-// - Database WAL mode (reads don't block writes)
-// - Batch inserts for time-series data
-// - Lazy loading of heavy modules
-//
-// ENVIRONMENT VARIABLES:
-//
-// RUST_LOG=debug          # Enable verbose logging
-// RUST_BACKTRACE=1        # Show backtraces on panic
-// APP_DATA_DIR=/path      # Override data directory (dev only)
-//
-// EXIT CODES:
-//
-// 0: Clean exit
-// 1: Initialization error (database, config)
-// 2: Runtime panic
-// 130: Ctrl+C interrupt (SIGINT)
-//
-// TESTING:
-//
-// Integration tests don't use main.rs directly. Instead test individual
-// commands via Tauri::test::mock_builder(). See tests/integration.rs.
-//
-// FUTURE ENHANCEMENTS:
-//
-// - Single Instance: Prevent multiple app instances (tauri-plugin-single-instance)
-// - Updater: Auto-update via GitHub releases (tauri-plugin-updater)
-// - CLI: Command-line interface for headless operation (tauri-cli)
-// - Plugin System: Dynamic loading of custom scrapers (libloading)
-// - Multi-Window: Detached charts in separate windows
-// - Protocol Handler: Register app for market://deep/links
+// STATE (Tauri managed state, accessible via State<'_, T>):
+//   - Database: Arc<Mutex<Connection>>
+//   - HttpClient: reqwest::Client (shared, connection-pooled)
+//   - ServiceHandles: Abort handles for background tasks
+//   - Config: ApplicationSettings (hot-reloadable)
 // ============================================================================
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

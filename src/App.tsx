@@ -2,53 +2,16 @@
 // MAIN APPLICATION COMPONENT
 // ============================================================================
 //
-// Module: App.tsx
-// Purpose: Root application shell, layout management, and global UI state
+// Purpose: Root layout shell and global UI state for the trading terminal.
+// Orchestrates panel visibility, selected nodes, and responsive layout.
 //
-// OVERVIEW:
-// This component serves as the primary layout controller for the prediction
-// market trading terminal. It orchestrates the three-panel interface design
-// (sidebar controls, main canvas, detail panels) and manages global UI state
-// such as panel visibility, selected nodes, and responsive layout adaptations.
+// Extracted modules:
+//   Components: Clock, ErrorBoundary, NodeDetailsPanel.extracted, RawStreamTab
+//   Hooks:      useInfoSourceEvents (event listener + quality metrics)
+//   Utilities:  nodeTransform, nodeHelpers, demoData
 //
-// MODULAR ARCHITECTURE:
-// Logic previously embedded in this file has been extracted into dedicated
-// modules to keep App.tsx focused purely on layout orchestration:
-//
-//   Extracted Components:
-//     components/UI/Clock.tsx           ← Real-time clock display
-//     components/UI/ErrorBoundary.tsx   ← Panel-level error isolation
-//     components/Nodes/NodeDetailsPanel.extracted.tsx
-//                                       ← Node detail panel (monitoring, config)
-//     components/Nodes/RawStreamTab.tsx  ← Raw data stream viewer
-//
-//   Extracted Hooks:
-//     hooks/useInfoSourceEvents.ts      ← Tauri event listener + data propagation
-//       • useInfoSourceEvents()          ← Global 'infosource:update' handler
-//       • useNodeQualityMetrics()        ← Periodic quality metric simulation
-//
-//   Extracted Utilities:
-//     utils/nodeTransform.ts            ← Backend→frontend node format transform
-//     utils/nodeHelpers.ts              ← Type guards, display names, color schemes
-//     utils/demoData.ts                 ← Demo node creation for first-time users
-//
-// LAYOUT DEDUPLICATION:
-// Three responsive renderers (desktop/tablet/mobile) share common JSX fragments
-// computed once and referenced in each layout:
-//   • controlPanels     — SourcePanel + MarketPanel (wrapped in ErrorBoundary)
-//   • canvasProps       — Memoized props object for Canvas component
-//   • detailPanelContent — Tabbed detail view (Details / Raw Stream / Stored Data)
-//   • bottomPanel       — Positions panel
-//
-// Architecture Pattern:
-// Compound Component Layout with Zustand State Integration
-//   App (layout shell)
-//   ├── LeftSidebar (controls) — SourcePanel, MarketPanel, PerformanceMetrics
-//   ├── MainCanvas (visualization) — Canvas component with node graph
-//   ├── RightSidebar (details) — NodeDetailsPanel, RawStreamTab, NodeDataPanel
-//   └── BottomPanel (positions) — Position monitor (placeholder)
-//
-// LAYOUT:
+// Shared JSX fragments (computed once, used in desktop/tablet/mobile renderers):
+//   controlPanels, canvasProps, detailPanelContent, bottomPanel
 //
 // ┌─────────────────┬──────────────────────────┬─────────────────┐
 // │  Left Sidebar   │      Main Canvas         │  Right Sidebar  │
@@ -60,11 +23,6 @@
 // │                    Bottom Panel (240px)                       │
 // └──────────────────────────────────────────────────────────────┘
 //
-// RESPONSIVE:
-//   Desktop (>1400px): Full three-panel layout
-//   Tablet (768-1400px): Collapsible sidebars, slide-over details
-//   Mobile (<768px): Tab-based navigation, single panel visible
-//
 // KEYBOARD SHORTCUTS:
 //   Ctrl/Cmd + S: Save graph
 //   Ctrl/Cmd + Z / Shift+Z: Undo / Redo
@@ -73,11 +31,6 @@
 //   Escape: Close panels / Deselect
 //   C: Toggle connection mode
 //   F11: Toggle fullscreen
-//
-// ERROR BOUNDARIES:
-// Each major panel is wrapped in PanelErrorBoundary (components/UI/ErrorBoundary.tsx)
-// to isolate failures. A crash in Canvas, SourcePanel, or NodeDetails won't
-// bring down the entire application.
 // ============================================================================
 
 import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';

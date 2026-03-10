@@ -1,70 +1,31 @@
 //! # Commands Module
-//! 
-//! This module serves as the central registry for all Tauri command handlers exposed to the frontend.
-//! Commands are Rust functions annotated with `#[tauri::command]` that form the IPC (Inter-Process Communication)
-//! boundary between the React frontend and Rust backend.
-//! 
-//! ## Architecture Pattern
-//! - **Command Functions**: Act as thin HTTP-like controllers - they validate input, acquire resources from the
-//!   application state, and delegate to service layers in `crate::services`
-//! - **State Management**: Uses Tauri's managed state (`AppHandle`, `State<T>`) to share expensive resources
-//!   (DB connections, HTTP clients, background task handles) across command invocations
-//! - **Error Handling**: Commands return `Result<T, String>` where errors are serialized for frontend display
-//!   (production apps should use structured error types)
-//! 
-//! ## Concurrency Model
-//! Commands are executed on Tokio's async runtime (configured in `main.rs`). Long-running operations
-//! (scraping, API calls) are spawned as background tasks to prevent blocking the frontend.
-//! 
-//! ## Security Considerations
-//! - API keys and sensitive config are NEVER logged or returned to frontend
-//! - Input validation happens at boundary before passing to services
-//! - Rate limiting is enforced before external API calls
+//!
+//! Central registry for all Tauri command handlers exposed to the frontend.
+//! Commands are `#[tauri::command]` functions forming the IPC boundary between
+//! the React frontend and Rust backend.
+//!
+//! ## Architecture
+//! - **Thin Controllers**: Commands validate input, acquire state, and delegate
+//!   to service layers in `crate::services`. Business logic lives in services.
+//! - **State Management**: Uses Tauri's managed state (`AppHandle`, `State<T>`)
+//!   to share DB connections, HTTP clients, and task handles across invocations.
+//! - **Error Handling**: Commands return `Result<T, String>` where errors are
+//!   serialized for frontend display.
+//! - **Concurrency**: Runs on Tokio async runtime. Long-running operations are
+//!   spawned as background tasks to avoid blocking the frontend.
 //!
 //! ## Naming Convention (CRITICAL)
 //!
-//! All Tauri commands MUST follow a consistent naming convention to ensure frontend-backend compatibility:
+//! All commands follow a `_cmd` suffix pattern for frontend-backend compatibility:
 //!
-//! ### Backend (Rust) Naming:
-//! - Command functions in this module are named descriptively: `add_data_source`, `get_positions`, etc.
-//! - Commands registered in `main.rs` MUST use the `_cmd` suffix: `add_data_source_cmd`, `get_positions_cmd`
-//! - This is achieved by defining wrapper functions in `main.rs` with the `_cmd` suffix
+//! 1. Define logic in `commands/*.rs`: `pub async fn add_data_source(...)`
+//! 2. Re-export from this module
+//! 3. Create `#[tauri::command]` wrapper in `main.rs` with `_cmd` suffix
+//! 4. Register in `tauri::generate_handler![]`
+//! 5. Frontend invokes with the `_cmd` name: `invoke('add_data_source_cmd', { ... })`
 //!
-//! ### Frontend (TypeScript) Naming:
-//! - Frontend MUST invoke commands using the exact name registered in `main.rs` (with `_cmd` suffix)
-//! - Example: `invoke('get_positions_cmd', { ... })` NOT `invoke('get_positions', { ... })`
-//!
-//! ### Why the `_cmd` suffix?
-//! - Prevents naming conflicts with Rust keywords and reserved names
-//! - Makes it explicit that the function is a Tauri IPC command
-//! - Consistent pattern across all commands in the codebase
-//!
-//! ### Command Registration Flow:
-//! 1. Define command logic in `commands/*.rs` (e.g., `pub async fn add_data_source(...)`)
-//! 2. Re-export from `commands/mod.rs`
-//! 3. Create wrapper in `main.rs` with `#[tauri::command]` and `_cmd` suffix
-//! 4. Register in `tauri::generate_handler![]` macro
-//! 5. Frontend invokes using the `_cmd` name
-//!
-//! ### Example:
-//! ```rust
-//! // In commands/data_sources.rs:
-//! pub async fn add_data_source(...) -> Result<Node, String> { ... }
-//!
-//! // In main.rs:
-//! #[tauri::command]
-//! async fn add_data_source_cmd(...) -> Result<Node, String> {
-//!     data_sources::add_data_source(...).await
-//! }
-//!
-//! // In invoke_handler:
-//! tauri::generate_handler![add_data_source_cmd, ...]
-//! ```
-//!
-//! ```typescript
-//! // In frontend:
-//! await invoke('add_data_source_cmd', { ... });
-//! ```
+//! The suffix prevents naming conflicts with Rust keywords and makes IPC
+//! boundaries explicit. See README for full examples.
 
 pub mod data_sources;
 pub mod markets;

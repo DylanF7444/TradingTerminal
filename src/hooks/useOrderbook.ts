@@ -2,57 +2,22 @@
 // ORDERBOOK SUBSCRIPTION HOOK
 // ============================================================================
 //
-// Module: hooks/useOrderbook.ts
-// Purpose: React hooks for subscribing to real-time orderbook updates
+// Purpose: React hooks for subscribing to real-time orderbook updates from
+// Polymarket/Kalshi prediction markets via Tauri IPC and event listeners.
 //
-// OVERVIEW:
-// This module provides React hooks for components to subscribe to live
-// orderbook data from Polymarket or Kalshi prediction markets. It handles:
-// - Subscribing via Tauri IPC commands
-// - Listening for orderbook:update events from backend
-// - Managing connection state and stale data detection
+// Hooks provided:
+// - useOrderbook(autoReconnect?, maxTrades?): Base hook with full subscribe/unsubscribe control
+// - useMarketOrderbook(platform, marketId): Auto-subscribes on mount for a single market
+// - useMultipleOrderbooks(markets): Subscribe to multiple markets simultaneously
+//
+// Data flow:
+//   Hook invokes Tauri command -> Backend connects to exchange WebSocket
+//   -> Backend emits 'orderbook:update' events -> Hook updates state
+//
+// Key behaviors:
 // - Auto-cleanup on component unmount
-//
-// AVAILABLE HOOKS:
-// 1. useOrderbook(autoReconnect?, maxTrades?)
-//    - Base hook with full control over subscriptions
-//    - Returns: { orderbook, status, error, recentTrades, subscribe, unsubscribe, ... }
-//
-// 2. useMarketOrderbook(platform, marketId)
-//    - Simplified hook for single market subscription
-//    - Auto-subscribes on mount, auto-unsubscribes on unmount
-//    - Returns: { orderbook, status, error, recentTrades }
-//
-// 3. useMultipleOrderbooks(markets)
-//    - Hook for subscribing to multiple markets simultaneously
-//    - Returns: Map<marketId, OrderbookData>
-//
-// USAGE EXAMPLES:
-// ```typescript
-// // Simple single-market subscription
-// const { orderbook, status } = useMarketOrderbook('polymarket', marketId);
-//
-// // Full control with base hook
-// const { orderbook, subscribe, unsubscribe } = useOrderbook();
-// useEffect(() => {
-//   subscribe('polymarket', marketId);
-//   return () => unsubscribe();
-// }, [marketId]);
-//
-// // Multiple markets
-// const orderbooks = useMultipleOrderbooks([
-//   { platform: 'polymarket', marketId: '0x123...' },
-//   { platform: 'kalshi', marketId: 'KX123' }
-// ]);
-// ```
-//
-// DATA FLOW:
-// 1. Component calls hook with platform/marketId
-// 2. Hook invokes Tauri command to start WebSocket subscription
-// 3. Backend connects to exchange WebSocket (Polymarket/Kalshi)
-// 4. Backend emits 'orderbook:update' events
-// 5. Hook listens for events and updates state
-// 6. Component re-renders with new orderbook data
+// - Connection state and stale data detection
+// - Returns: orderbook, status, error, recentTrades
 //
 // ============================================================================
 

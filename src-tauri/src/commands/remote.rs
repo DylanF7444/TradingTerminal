@@ -2,41 +2,21 @@
 // REMOTE ACCESS COMMANDS
 // ============================================================================
 //
-// Module: commands/remote.rs
-// Purpose: Tauri IPC command handlers for remote desktop gateway management
+// Purpose: Tauri IPC commands for remote desktop gateway management.
 //
-// OVERVIEW:
-// Exposes the remote gateway service to the React frontend via Tauri's invoke
-// system. These commands allow users to enable/disable remote access, manage
-// device pairing, monitor connection status, and configure relay settings.
+// Exposes the remote gateway service to the React frontend via Tauri invoke.
+// Commands: enable/disable remote access, device pairing, connection status,
+// relay configuration.
 //
 // ARCHITECTURE:
-// Frontend (React) --invoke()--> Commands (this) --channel--> Gateway Service
+//   Frontend (React) --invoke()--> Commands (this) --channel--> Gateway Service
 //
-// All commands follow the _cmd suffix convention required by this codebase.
-// They receive the RemoteConnectionManager from Tauri managed state and
-// delegate to the gateway service via async channels.
+// All commands use the _cmd suffix convention and receive the
+// RemoteConnectionManager from Tauri managed state.
 //
 // SECURITY:
-// - Pairing codes are only displayed on the home desktop (physical access required)
-// - Auth tokens are never exposed to the frontend (only existence is confirmed)
-// - Device revocation immediately disconnects the remote device
-// - Relay URL changes require explicit user action
-//
-// COMMAND NAMING CONVENTION:
-// All commands registered in main.rs use the `_cmd` suffix:
-//   - enable_remote_access_cmd
-//   - disable_remote_access_cmd
-//   - get_remote_status_cmd
-//   - generate_pairing_code_cmd
-//   - revoke_remote_device_cmd
-//   - get_paired_devices_cmd
-//   - update_relay_config_cmd
-//
-// FRONTEND USAGE:
-//   await invoke('enable_remote_access_cmd', { relayUrl: 'wss://...' })
-//   await invoke('get_remote_status_cmd')
-//   await invoke('generate_pairing_code_cmd')
+//   Pairing codes require physical access. Auth tokens are never exposed to
+//   the frontend. Device revocation immediately disconnects the remote device.
 // ============================================================================
 
 use std::sync::Arc;

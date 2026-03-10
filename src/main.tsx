@@ -2,79 +2,18 @@
 // REACT APPLICATION ENTRY POINT
 // ============================================================================
 //
-// Module: main.tsx
-// Purpose: Application bootstrap, root rendering, and global providers
+// Purpose: Application bootstrap, root rendering, and global providers.
+// Handles Tauri-specific initialization and platform integration.
 //
-// OVERVIEW:
-// This module serves as the entry point for the React frontend application.
-// It initializes the React root, configures global providers (Redux-style state
-// via Zustand, routing, theming), sets up error boundaries, and mounts the
-// application to the DOM. It also handles Tauri-specific initialization and
-// platform integration.
+// Initialization sequence:
+//   1. Platform detection (Tauri vs browser)
+//   2. Tauri init (event listeners, native window controls)
+//   3. React root creation (concurrent mode, StrictMode in dev)
+//   4. Global providers (Zustand store, theme, toast, modal)
+//   5. App mount and post-render init
 //
-// Architecture Pattern:
-// Layered Bootstrap with Error Boundaries
-//   Platform Detection → Tauri Init → React Root → Providers → App
-//   Each layer has error handling and graceful degradation
-//
-// INITIALIZATION SEQUENCE:
-//
-// 1. Platform Detection
-//    - Detect Tauri vs browser environment
-//    - Configure polyfills for missing APIs
-//    - Set up logging appropriate to environment
-//
-// 2. Tauri Initialization
-//    - Register Tauri event listeners
-//    - Initialize native window controls
-//    - Set up system tray / menu integration
-//    - Configure native notifications
-//
-// 3. React Root Creation
-//    - Create React 18+ concurrent root
-//    - Enable StrictMode for development checks
-//    - Configure production error handling
-//
-// 4. Global Providers
-//    - Zustand store providers (state management)
-//    - Theme provider (dark/light mode, system preference)
-//    - Toast/notification provider
-//    - Modal/dialog provider
-//
-// 5. Application Mount
-//    - Render App component
-//    - Post-render initialization (analytics, etc.)
-//
-// ERROR HANDLING STRATEGY:
-//
-// Fatal Errors (prevent app launch):
-//   - React root creation failure
-//   - Critical provider initialization failure
-//   - Unhandled promise rejection during bootstrap
-//
-// Recoverable Errors (allow degraded operation):
-//   - Tauri API unavailable (fallback to browser mode)
-//   - Non-critical provider failure
-//   - Theme detection failure
-//
-// Runtime Errors (caught by boundaries):
-//   - Component render errors
-//   - Event handler errors
-//   - Async operation errors
-//
-// PERFORMANCE OPTIMIZATIONS:
-//
-// - Code splitting at route level (React.lazy + Suspense)
-// - Preload critical assets
-// - Defer non-essential initialization
-// - Use React 18 concurrent features
-//
-// SECURITY CONSIDERATIONS:
-//
-// - CSP (Content Security Policy) compliance
-// - Sanitize external data before rendering
-// - Secure storage for sensitive configuration
-// - Disable dangerous browser APIs in Tauri context
+// Note: Tauri API unavailability is handled gracefully -- the app falls
+// back to browser mode with native features disabled.
 //
 // ============================================================================
 

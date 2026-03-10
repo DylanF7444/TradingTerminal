@@ -2,47 +2,21 @@
 // WEBSOCKET SCRAPER SERVICE FOR INFOSOURCE NODES
 // ============================================================================
 //
-// Module: services/websocket_scraper.rs
-// Purpose: WebSocket-based data collection for InfoSource nodes
+// Purpose: WebSocket-based real-time data collection for InfoSource nodes
+// (e.g., Coinbase crypto price feeds).
 //
-// OVERVIEW:
-// This module implements WebSocket-based data ingestion for InfoSource nodes
-// that support real-time streaming (e.g., Coinbase for crypto prices).
-// Unlike HTTP polling scrapers, WebSocket scrapers maintain persistent connections
-// and receive data as it becomes available.
-//
-// KEY FEATURES:
-// - Real-time data streaming via WebSocket
-// - Timeframe-based metric storage (aggregate over interval)
-// - Automatic reconnection with exponential backoff
-// - Graceful shutdown handling
-// - Per-node subscription management
-//
-// ARCHITECTURE:
-// ┌─────────────────────────────────────────────────────────────────┐
-// │                    WebSocketScraperManager                       │
-// ├─────────────────────────────────────────────────────────────────┤
-// │  connections: HashMap<NodeId, WebSocketConnection>              │
-// │  storage_intervals: HashMap<NodeId, StorageConfig>              │
-// │  pending_data: HashMap<NodeId, Vec<DataPoint>>                 │
-// └─────────────────────────────────────────────────────────────────┘
+// Unlike HTTP polling scrapers, WebSocket scrapers maintain persistent
+// connections and receive data as it becomes available.
 //
 // FLOW:
-// 1. spawn_websocket_scraper() called with node config
-// 2. Connect to WebSocket endpoint (e.g., Coinbase)
-// 3. Subscribe to channels (ticker, level2) for configured symbols
-// 4. On message: Update in-memory state, emit to frontend
-// 5. On storage interval: Batch write accumulated data to SQLite
-// 6. On shutdown: Close connection, flush pending data
+//   1. spawn_websocket_scraper() connects to WebSocket endpoint
+//   2. Subscribe to channels (ticker, level2) for configured symbols
+//   3. On message: update in-memory state, emit to frontend
+//   4. On storage interval: batch write accumulated data to SQLite
+//   5. On shutdown: close connection, flush pending data
 //
-// STORAGE INTERVAL:
-// To prevent excessive database writes, data is accumulated in memory
-// and only written to SQLite at the configured storage interval.
-// For example, with storageIntervalMs=60000 (1 minute):
-// - Real-time price updates are received every ~100ms
-// - Frontend receives all updates via events
-// - Database only stores aggregated data once per minute
-//
+// Storage interval prevents excessive DB writes by accumulating data
+// in memory and writing aggregated values at the configured interval.
 // ============================================================================
 
 use anyhow::{Result, anyhow};

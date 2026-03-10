@@ -5,64 +5,15 @@
 // Module: types/sources.ts
 // Purpose: TypeScript interfaces for information source configurations and APIs
 //
-// OVERVIEW:
-// This module defines the complete type system for configuring and interacting
-// with external data sources that feed into the prediction market trading
-// terminal. These sources provide the raw data (prices, news, sentiment) that
-// drives trading decisions, forming the input layer of the node graph.
+// Defines the type system for external data sources (prices, news, sentiment)
+// feeding into the prediction market trading terminal.
 //
-// The type hierarchy separates source configuration (static setup parameters)
-// from source runtime state (dynamic connection status, data quality metrics).
-// This separation enables serialization of configurations while maintaining
-// rich runtime monitoring capabilities.
-//
-// Architecture Pattern:
-// Configuration/State Separation with Provider Pattern
+// Architecture: Configuration/State Separation with Provider Pattern
 //   SourceConfig = Static parameters (serializable, persistable)
-//   SourceState = Runtime metrics (ephemeral, computed)
-//   SourceProvider = Interface abstraction over different APIs
+//   SourceState  = Runtime metrics (ephemeral, computed)
 //
-// DATA SOURCE CATEGORIES:
-//
-// 1. Price Feeds (Crypto, Financial, Commodity)
-//    - Real-time tick data and OHLCV candles
-//    - WebSocket streams preferred over polling
-//    - Normalized format regardless of provider (CoinGecko, Binance, etc.)
-//
-// 2. News Aggregators (RSS, APIs, Web Scraping)
-//    - Headlines, full text, metadata (author, timestamp, source)
-//    - NLP preprocessing (sentiment scoring, entity extraction)
-//    - Deduplication and relevance filtering
-//
-// 3. Social Media (Twitter/X, Reddit, Telegram)
-//    - Volume metrics, sentiment analysis, trending topics
-//    - Rate limiting challenges require careful queue management
-//    - Privacy compliance (GDPR, platform ToS)
-//
-// 4. Alternative Data (Weather, On-chain, Satellite)
-//    - Non-traditional signals with predictive value
-//    - Often require specialized processing pipelines
-//    - Higher latency but lower correlation with traditional signals
-//
-// BACKEND INTEGRATION:
-//
-// Each source type maps to a scraper implementation in:
-//   src-tauri/src/services/scraper.rs
-//
-// The scraper service uses these types for:
-//   - Configuration deserialization from frontend
-//   - API client initialization (reqwest HTTP clients)
-//   - Data normalization into common formats
-//   - Event emission to frontend via WebSocket
-//
-// EXTENSIBILITY:
-//
-// Adding new source types requires:
-//   1. Extend InfoSourceType enum in types/nodes.ts
-//   2. Define configuration interface in this file
-//   3. Implement scraper in backend services/scraper.rs
-//   4. Add provider client in backend services/providers/
-//   5. Create frontend UI component in components/InfoSources/
+// Source categories: Price feeds, News aggregators, Social media, Alt data
+// Backend: Each source type maps to a scraper in src-tauri/src/services/scraper.rs
 //
 // ============================================================================
 
@@ -1274,74 +1225,3 @@ export const DEFAULT_RATE_LIMITS: Record<string, number> = {
   [WeatherProvider.OpenWeatherMap]: 60, // Free tier
 };
 
-// =============================================================================
-// EXAMPLE USAGE
-// =============================================================================
-//
-// // Creating a crypto price source
-// const cryptoConfig: CryptoPricesConfig = {
-//   id: 'src-123' as SourceId,
-//   name: 'Bitcoin Tracker',
-//   type: InfoSourceType.CryptoPrices,
-//   deliveryMode: DeliveryMode.Polling,
-//   auth: {
-//     type: AuthType.ApiKey,
-//     keyName: 'x-cg-pro-api-key',
-//     keyValue: 'secret-key-here',
-//     inHeader: true,
-//   },
-//   interval: 5,
-//   timeout: 10000,
-//   maxRetries: 3,
-//   enabled: true,
-//   createdAt: Date.now(),
-//   updatedAt: Date.now(),
-//   provider: CryptoProvider.CoinGecko,
-//   symbols: ['BTC-USD', 'ETH-USD'],
-//   granularity: '1m',
-//   includeOrderbook: true,
-//   orderbookDepth: 20,
-// };
-//
-// // Type narrowing
-// if (isCryptoPricesConfig(config)) {
-//   console.log(`Tracking ${config.symbols.join(', ')}`);
-// }
-//
-// // Creating source params for backend
-// const createParams: CreateSourceParams = {
-//   type: InfoSourceType.NewsSource,
-//   name: 'Crypto News',
-//   config: {
-//     providers: [NewsProvider.NewsAPI],
-//     keywords: ['bitcoin', 'ethereum', 'crypto'],
-//     categories: ['business', 'technology'],
-//     languages: ['en'],
-//     countries: ['US', 'GB'],
-//     minRelevance: 0.6,
-//     nlpProcessing: {
-//       extractEntities: true,
-//       sentimentAnalysis: true,
-//       extractKeywords: true,
-//       summarize: false,
-//     },
-//     lookbackHours: 24,
-//   } as Partial<NewsSourceConfig>,
-// };
-//
-// // Handling source events
-// function handleSourceEvent(event: SourceEvents) {
-//   switch (event.type) {
-//     case 'data':
-//       console.log(`New data from ${event.sourceId}:`, event.data.normalized);
-//       break;
-//     case 'status_change':
-//       console.log(`Source ${event.sourceId}: ${event.from} → ${event.to}`);
-//       break;
-//     case 'error':
-//       console.error(`Source ${event.sourceId} error:`, event.error.message);
-//       break;
-//   }
-// }
-//
-// ============================================================================
