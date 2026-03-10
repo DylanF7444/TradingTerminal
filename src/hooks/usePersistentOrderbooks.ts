@@ -27,8 +27,6 @@ import type { OrderbookUpdate } from './useOrderbook';
 // CONSTANTS
 // ============================================================================
 
-/** Max price levels per side to store in central state */
-const MAX_LEVELS_PER_SIDE = 50;
 
 // ============================================================================
 // TYPES
@@ -66,14 +64,14 @@ function toOrderbook(update: OrderbookUpdate, existing?: Orderbook): Orderbook {
   const bidsRaw = hasNewBids ? update.bids : (existing?.bids ?? []);
   const asksRaw = hasNewAsks ? update.asks : (existing?.asks ?? []);
 
-  const bids: Level[] = bidsRaw.slice(0, MAX_LEVELS_PER_SIDE).map((l) => ({
+  const bids: Level[] = bidsRaw.map((l) => ({
     price: 'price' in l ? l.price : (l as Level).price,
     size: 'size' in l ? l.size : (l as Level).size,
     orderCount: ('order_count' in l ? (l as any).order_count : (l as Level).orderCount) ?? 1,
     value: (('price' in l ? l.price : 0) * ('size' in l ? l.size : 0)),
   }));
 
-  const asks: Level[] = asksRaw.slice(0, MAX_LEVELS_PER_SIDE).map((l) => ({
+  const asks: Level[] = asksRaw.map((l) => ({
     price: 'price' in l ? l.price : (l as Level).price,
     size: 'size' in l ? l.size : (l as Level).size,
     orderCount: ('order_count' in l ? (l as any).order_count : (l as Level).orderCount) ?? 1,

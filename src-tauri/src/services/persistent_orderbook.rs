@@ -33,9 +33,6 @@ use crate::services::websocket_manager::{WebSocketManager, PlatformType};
 // TYPES
 // ============================================================================
 
-/// Maximum number of price levels to keep per side (memory bound)
-const MAX_LEVELS_PER_SIDE: usize = 50;
-
 /// Maximum number of recent trades to keep per market
 const MAX_RECENT_TRADES: usize = 20;
 
@@ -347,12 +344,16 @@ impl PersistentOrderbookMonitor {
         // Update bid/ask levels (only if non-empty, preserving existing on trade-only updates)
         if !update.bids.is_empty() {
             entry.bids = update.bids.clone();
-            // Enforce memory bound
-            entry.bids.truncate(MAX_LEVELS_PER_SIDE);
         }
         if !update.asks.is_empty() {
             entry.asks = update.asks.clone();
-            entry.asks.truncate(MAX_LEVELS_PER_SIDE);
+        }
+
+        // Print full orderbook for Polymarket debug
+        if update.platform == "polymarket" {
+            println!("[DEBUG] Polymarket orderbook update for {}:", update.market_id);
+            println!("  Bids ({} levels): {:?}", entry.bids.len(), entry.bids);
+            println!("  Asks ({} levels): {:?}", entry.asks.len(), entry.asks);
         }
 
         // Update trade data
