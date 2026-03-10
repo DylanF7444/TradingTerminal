@@ -9,7 +9,7 @@
 // Extracted from App.tsx to improve modularity and reduce file size.
 // ============================================================================
 
-import { type ReactNode } from 'react';
+import { type ReactNode, useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore, type StoreState } from '../../store';
 import type { Node } from '../../types/nodes';
@@ -262,6 +262,9 @@ export function NodeDetailsPanelExtracted({
         )}
       </div>
 
+      {/* Storage Usage - shown for ALL node types */}
+      <StorageUsageIndicator nodeId={node.id} />
+
       {/* Incoming Data from InfoSources (for Market nodes) */}
       {isMarket(node) && metadata.incomingData && Object.keys(metadata.incomingData).length > 0 && (
         <div className="bg-gray-800/50 rounded-lg p-3">
@@ -331,7 +334,7 @@ export function NodeDetailsPanelExtracted({
 
         {/* Storage Interval Adjustment for Coinbase CryptoPrices */}
         {isInfoSource(node) && nodeSubtype === 'CryptoPrices' && metadata.provider === 'coinbase' && (
-          <StorageIntervalSlider node={node} metadata={metadata} />
+          <StorageIntervalSlider node={node} metadata={metadata} nodeCategory="infosource" />
         )}
       </div>
 
@@ -355,8 +358,8 @@ export function NodeDetailsPanelExtracted({
               <div className="flex justify-between">
                 <span className="text-gray-500">Status:</span>
                 <span className={`${
-                  (metadata.market_status || metadata.status) === 'open' ? 'text-green-400' : 
-                  (metadata.market_status || metadata.status) === 'closed' ? 'text-yellow-400' : 
+                  (metadata.market_status || metadata.status) === 'open' ? 'text-green-400' :
+                  (metadata.market_status || metadata.status) === 'closed' ? 'text-yellow-400' :
                   (metadata.market_status || metadata.status) === 'resolved' ? 'text-blue-400' : 'text-gray-400'
                 }`}>
                   {(metadata.market_status || metadata.status).charAt(0).toUpperCase() + (metadata.market_status || metadata.status).slice(1)}
@@ -364,21 +367,21 @@ export function NodeDetailsPanelExtracted({
               </div>
             )}
             {(metadata.created_at || metadata.createdAt) && (
-              <ConfigRow 
-                label="Created" 
-                value={new Date(metadata.created_at || metadata.createdAt).toLocaleDateString()} 
+              <ConfigRow
+                label="Created"
+                value={new Date(metadata.created_at || metadata.createdAt).toLocaleDateString()}
               />
             )}
             {metadata.end_date && (
-              <ConfigRow 
-                label="Closes" 
-                value={new Date(metadata.end_date).toLocaleDateString()} 
+              <ConfigRow
+                label="Closes"
+                value={new Date(metadata.end_date).toLocaleDateString()}
               />
             )}
             {metadata.resolution_date && (
-              <ConfigRow 
-                label="Resolves" 
-                value={new Date(metadata.resolution_date).toLocaleDateString()} 
+              <ConfigRow
+                label="Resolves"
+                value={new Date(metadata.resolution_date).toLocaleDateString()}
               />
             )}
             {metadata.slug && (
@@ -393,7 +396,7 @@ export function NodeDetailsPanelExtracted({
             {metadata.tags && Array.isArray(metadata.tags) && metadata.tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-1">
                 {metadata.tags.map((tag: string, idx: number) => (
-                  <span 
+                  <span
                     key={idx}
                     className="px-2 py-0.5 bg-gray-700 text-gray-400 rounded text-xs"
                   >
@@ -404,22 +407,25 @@ export function NodeDetailsPanelExtracted({
             )}
             {(metadata.image_url || metadata.imageUrl) && (
               <div className="mt-2">
-                <img 
-                  src={metadata.image_url || metadata.imageUrl} 
-                  alt="Market" 
+                <img
+                  src={metadata.image_url || metadata.imageUrl}
+                  alt="Market"
                   className="w-full h-24 object-cover rounded"
                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                 />
               </div>
             )}
-            
+
             {/* Show placeholder if no details available */}
-            {!metadata.title && !metadata.question && !metadata.description && !metadata.category && 
-             !metadata.market_status && !metadata.status && !metadata.created_at && 
+            {!metadata.title && !metadata.question && !metadata.description && !metadata.category &&
+             !metadata.market_status && !metadata.status && !metadata.created_at &&
              !metadata.end_date && !metadata.slug && !metadata.condition_id && (
               <p className="text-gray-600 italic">No additional details available</p>
             )}
           </div>
+
+          {/* Storage Interval Adjustment for Market nodes */}
+          <StorageIntervalSlider node={node} metadata={metadata} nodeCategory="market" />
         </div>
       )}
 
@@ -470,55 +476,187 @@ function ConfigRow({
   );
 }
 
-/** Slider to adjust the DB storage interval for Coinbase CryptoPrices nodes. */
+/** Slider to adjust the DB storage interval for nodes that persist data. */
 function StorageIntervalSlider({
   node,
   metadata,
+  nodeCategory = 'infosource',
 }: {
   node: Node;
   metadata: Record<string, any>;
+  nodeCategory?: 'infosource' | 'market';
 }) {
   const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
+  const [localMode, setLocalMode] = useState<string>(metadata.storage_mode || 'off');
+  const [localInterval, setLocalInterval] = useState<number>(metadata.storage_interval_seconds || 60);
 
-  const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Sync from metadata if it changes externally
+  useEffect(() => {
+    setLocalMode(metadata.storage_mode || 'off');
+    setLocalInterval(metadata.storage_interval_seconds || 60);
+  }, [metadata.storage_mode, metadata.storage_interval_seconds]);
+
+  const handleIntervalChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const newInterval = parseInt(e.target.value);
+    setLocalInterval(newInterval);
     try {
-      await invoke('update_data_source_cmd', {
-        node_id: node.id,
-        config: {
-          ...metadata,
-          storage_interval_seconds: newInterval,
-          storageIntervalMs: newInterval * 1000,
-        },
-      });
+      if (nodeCategory === 'market') {
+        await invoke('set_market_storage_interval_cmd', {
+          nodeId: node.id,
+          intervalMs: newInterval * 1000,
+          storageMode: localMode,
+        });
+      } else {
+        await invoke('update_data_source_cmd', {
+          node_id: node.id,
+          config: {
+            ...metadata,
+            storage_interval_seconds: newInterval,
+            storageIntervalMs: newInterval * 1000,
+          },
+        });
+      }
       updateNodeMetadata(node.id, {
         ...metadata,
         storage_interval_seconds: newInterval,
         storageIntervalMs: newInterval * 1000,
+        ...(nodeCategory === 'market' ? { storage_mode: localMode } : {}),
       });
     } catch (err) {
       console.error('Failed to update storage interval:', err);
     }
   };
 
+  const handleModeChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newMode = e.target.value;
+    setLocalMode(newMode);
+    try {
+      await invoke('set_market_storage_interval_cmd', {
+        nodeId: node.id,
+        intervalMs: localInterval * 1000,
+        storageMode: newMode,
+      });
+      updateNodeMetadata(node.id, {
+        ...metadata,
+        storage_mode: newMode,
+        storage_interval_seconds: localInterval,
+        storageIntervalMs: localInterval * 1000,
+      });
+    } catch (err) {
+      console.error('Failed to update storage mode:', err);
+    }
+  };
+
   return (
     <div className="mt-3 pt-3 border-t border-gray-700">
-      <label className="block text-xs text-gray-400 mb-1">Adjust DB Storage Interval</label>
-      <div className="flex items-center gap-2">
-        <input
-          type="range"
-          min="10"
-          max="300"
-          step="10"
-          value={metadata.storage_interval_seconds || 60}
-          onChange={handleChange}
-          className="flex-1 h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer"
-        />
-        <span className="text-xs text-gray-400 w-8">{metadata.storage_interval_seconds || 60}s</span>
+      {/* Storage mode selector for market nodes */}
+      {nodeCategory === 'market' && (
+        <div className="mb-3">
+          <label className="block text-xs text-gray-400 mb-1">DB Storage Mode</label>
+          <select
+            value={localMode}
+            onChange={handleModeChange}
+            className="w-full bg-gray-700 text-gray-200 text-xs rounded px-2 py-1.5 border border-gray-600 focus:border-blue-500 focus:outline-none"
+          >
+            <option value="off">Off - No DB storage</option>
+            <option value="best_bid_ask">Best Bid/Ask - Top of book only</option>
+            <option value="full_orderbook">Full Orderbook - All price levels</option>
+          </select>
+          <p className="text-xs text-gray-600 mt-1">
+            {localMode === 'off' && 'Orderbook data streams in real-time but is not persisted.'}
+            {localMode === 'best_bid_ask' && 'Stores best bid/ask prices and sizes at each interval.'}
+            {localMode === 'full_orderbook' && 'Stores all orderbook levels at each interval. Uses more storage.'}
+          </p>
+        </div>
+      )}
+
+      {/* Interval slider - shown when storage is enabled (or for infosource nodes) */}
+      {(nodeCategory !== 'market' || localMode !== 'off') && (
+        <>
+          <label className="block text-xs text-gray-400 mb-1">DB Storage Interval</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min="10"
+              max="300"
+              step="10"
+              value={localInterval}
+              onChange={handleIntervalChange}
+              className="flex-1 h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+            />
+            <span className="text-xs text-gray-400 w-8">{localInterval}s</span>
+          </div>
+          <p className="text-xs text-gray-600 mt-1">
+            Raw stream updates in real-time. DB writes at this interval.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Displays per-node storage usage: estimated size, data rate, row counts. */
+function StorageUsageIndicator({ nodeId }: { nodeId: string }) {
+  const [usage, setUsage] = useState<{
+    timeseries_rows: number;
+    websocket_message_rows: number;
+    estimated_bytes: number;
+    data_rate_bytes_per_sec: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const fetchUsage = async () => {
+      try {
+        const result = await invoke<{
+          node_id: string;
+          timeseries_rows: number;
+          websocket_message_rows: number;
+          estimated_bytes: number;
+          data_rate_bytes_per_sec: number;
+        }>('get_node_storage_usage_cmd', { nodeId });
+        if (mounted) setUsage(result);
+      } catch (err) {
+        console.error('Failed to fetch storage usage:', err);
+      }
+    };
+    fetchUsage();
+    const timer = setInterval(fetchUsage, 10000);
+    return () => { mounted = false; clearInterval(timer); };
+  }, [nodeId]);
+
+  if (!usage) return null;
+
+  const formatBytes = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+
+  const formatRate = (bps: number): string => {
+    if (bps < 1) return `< 1 B/s`;
+    if (bps < 1024) return `${bps.toFixed(1)} B/s`;
+    if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+    return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+  };
+
+  const totalRows = usage.timeseries_rows + usage.websocket_message_rows;
+
+  return (
+    <div className="bg-gray-800/50 rounded-lg p-3">
+      <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Storage Usage</h3>
+      <div className="space-y-1 text-xs">
+        <ConfigRow label="Total Size" value={formatBytes(usage.estimated_bytes)} />
+        <ConfigRow label="Data Rate" value={formatRate(usage.data_rate_bytes_per_sec)} />
+        <ConfigRow label="Total Rows" value={totalRows.toLocaleString()} />
+        {usage.timeseries_rows > 0 && (
+          <ConfigRow label="Timeseries" value={usage.timeseries_rows.toLocaleString()} />
+        )}
+        {usage.websocket_message_rows > 0 && (
+          <ConfigRow label="WS Messages" value={usage.websocket_message_rows.toLocaleString()} />
+        )}
       </div>
-      <p className="text-xs text-gray-600 mt-1">
-        Raw stream updates in real-time. DB writes at this interval.
-      </p>
     </div>
   );
 }

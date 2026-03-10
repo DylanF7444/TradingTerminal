@@ -36,6 +36,7 @@ import {
   Network
 } from 'lucide-react';
 import { getSystemInfo, getNetworkMetrics, type SystemInfo } from '../../utils/api';
+import { invoke } from '@tauri-apps/api/core';
 import type { NetworkMetrics } from '../../types/markets';
 
 // Date formatting utility (replaces date-fns for smaller bundle)
@@ -313,6 +314,11 @@ export default function PerformanceMetrics({
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [networkMetrics, setNetworkMetrics] = useState<NetworkMetrics | null>(null);
+  const [storageStats, setStorageStats] = useState<{
+    total_estimated_bytes: number;
+    aggregate_data_rate_bytes_per_sec: number;
+    db_size_bytes: number;
+  } | null>(null);
   
   // Memoize thresholds to prevent unnecessary re-renders
   const thresholds = useMemo(
@@ -343,16 +349,35 @@ export default function PerformanceMetrics({
     // Initial fetch
     fetchSystemInfo();
     fetchNetworkMetrics();
-    
+
+    // Fetch storage stats (less frequently - every 10s)
+    const fetchStorageStats = async () => {
+      try {
+        const result = await invoke<{
+          total_timeseries_rows: number;
+          total_ws_message_rows: number;
+          total_estimated_bytes: number;
+          aggregate_data_rate_bytes_per_sec: number;
+          db_size_bytes: number;
+        }>('get_aggregate_storage_stats_cmd');
+        if (mounted) setStorageStats(result);
+      } catch {
+        // Silently ignore - storage stats are non-critical
+      }
+    };
+    fetchStorageStats();
+    const storageIntervalId = setInterval(fetchStorageStats, 10000);
+
     // Poll every 2 seconds
     intervalId = setInterval(() => {
       fetchSystemInfo();
       fetchNetworkMetrics();
     }, 2000);
-    
+
     return () => {
       mounted = false;
       clearInterval(intervalId);
+      clearInterval(storageIntervalId);
     };
   }, []);
 
@@ -569,6 +594,15 @@ export default function PerformanceMetrics({
             compact
             icon={Network}
           />
+
+          <MetricCard
+            label="DB Rate"
+            value={storageStats ? storageStats.aggregate_data_rate_bytes_per_sec : 0}
+            unit="B/s"
+            compact
+            icon={HardDrive}
+            color="text-purple-400"
+          />
         </div>
 
         {/* Last Update */}
@@ -662,6 +696,22 @@ export default function PerformanceMetrics({
             unit="B"
             icon={Network}
             color="text-blue-400"
+          />
+
+          <MetricCard
+            label="DB Write Rate"
+            value={storageStats ? storageStats.aggregate_data_rate_bytes_per_sec : 0}
+            unit="B/s"
+            icon={HardDrive}
+            color="text-purple-400"
+          />
+
+          <MetricCard
+            label="DB Size"
+            value={storageStats ? storageStats.db_size_bytes / (1024 * 1024) : 0}
+            unit="MB"
+            icon={HardDrive}
+            color="text-purple-400"
           />
         </div>
       </div>

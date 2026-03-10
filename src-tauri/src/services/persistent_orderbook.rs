@@ -20,11 +20,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 use tauri::{AppHandle, Emitter};
 use chrono::Utc;
 use serde::{Serialize, Deserialize};
 
+use crate::db::sqlite::Connection;
 use crate::services::orderbook::{OrderbookUpdate, OrderbookLevel};
 use crate::services::websocket_manager::{WebSocketManager, PlatformType};
 
@@ -40,6 +41,48 @@ const MAX_RECENT_TRADES: usize = 20;
 
 /// Stale threshold in seconds - markets with no updates are flagged
 const STALE_THRESHOLD_SECS: i64 = 300; // 5 minutes
+
+/// Default storage interval (60 seconds)
+const DEFAULT_STORAGE_INTERVAL_MS: u64 = 60_000;
+
+/// What to store to the database
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketStorageMode {
+    /// Don't persist any orderbook data
+    Off,
+    /// Store only best bid and best ask (top of book)
+    BestBidAsk,
+    /// Store the full orderbook snapshot (all levels)
+    FullOrderbook,
+}
+
+impl Default for MarketStorageMode {
+    fn default() -> Self {
+        MarketStorageMode::Off
+    }
+}
+
+/// Per-node storage configuration
+#[derive(Debug, Clone)]
+pub struct MarketStorageConfig {
+    /// What level of detail to store
+    pub mode: MarketStorageMode,
+    /// How often to flush to DB (milliseconds)
+    pub interval_ms: u64,
+    /// Last time this node's data was flushed
+    pub last_flush_ms: i64,
+}
+
+impl Default for MarketStorageConfig {
+    fn default() -> Self {
+        Self {
+            mode: MarketStorageMode::Off,
+            interval_ms: DEFAULT_STORAGE_INTERVAL_MS,
+            last_flush_ms: 0,
+        }
+    }
+}
 
 /// Cached orderbook data for a single market
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,8 +156,12 @@ pub struct PersistentOrderbookMonitor {
     cache: Arc<RwLock<HashMap<String, CachedOrderbook>>>,
     /// Mapping from node_id to market_id (for add/remove by node)
     node_to_market: Arc<RwLock<HashMap<String, MarketMapping>>>,
+    /// Per-node storage configuration (node_id -> config)
+    storage_configs: Arc<RwLock<HashMap<String, MarketStorageConfig>>>,
     /// Reference to the WebSocket manager
     ws_manager: Arc<WebSocketManager>,
+    /// Database connection for persisting orderbook snapshots
+    db: Arc<Mutex<Connection>>,
     /// Tauri app handle for emitting events
     app_handle: AppHandle,
 }
@@ -128,11 +175,13 @@ struct MarketMapping {
 
 impl PersistentOrderbookMonitor {
     /// Create a new persistent orderbook monitor
-    pub fn new(ws_manager: Arc<WebSocketManager>, app_handle: AppHandle) -> Self {
+    pub fn new(ws_manager: Arc<WebSocketManager>, app_handle: AppHandle, db: Arc<Mutex<Connection>>) -> Self {
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             node_to_market: Arc::new(RwLock::new(HashMap::new())),
+            storage_configs: Arc::new(RwLock::new(HashMap::new())),
             ws_manager,
+            db,
             app_handle,
         }
     }
@@ -390,6 +439,154 @@ impl PersistentOrderbookMonitor {
     }
 
     // ========================================================================
+    // STORAGE CONFIGURATION
+    // ========================================================================
+
+    /// Set storage configuration for a specific node
+    pub async fn set_storage_config(&self, node_id: &str, mode: MarketStorageMode, interval_ms: u64) {
+        let mut configs = self.storage_configs.write().await;
+        let config = configs.entry(node_id.to_string()).or_insert_with(MarketStorageConfig::default);
+        config.mode = mode.clone();
+        config.interval_ms = interval_ms;
+        println!(
+            "[PersistentOrderbook] Storage config for node {}: mode={:?}, interval={}ms",
+            node_id, mode, interval_ms
+        );
+    }
+
+    /// Get storage configuration for a specific node
+    pub async fn get_storage_config(&self, node_id: &str) -> MarketStorageConfig {
+        let configs = self.storage_configs.read().await;
+        configs.get(node_id).cloned().unwrap_or_default()
+    }
+
+    // ========================================================================
+    // DATABASE PERSISTENCE
+    // ========================================================================
+
+    /// Flush cached orderbook data to the database for all nodes that have
+    /// storage enabled and whose interval has elapsed.
+    ///
+    /// Called periodically from main.rs (every 5 seconds). The actual per-node
+    /// flush interval is controlled by each node's MarketStorageConfig.
+    pub async fn flush_to_database(&self) {
+        let now_ms = Utc::now().timestamp_millis();
+        let mappings = self.node_to_market.read().await;
+        let cache = self.cache.read().await;
+        let mut configs = self.storage_configs.write().await;
+
+        // Collect data to write outside the locks
+        let mut to_write: Vec<(String, MarketStorageMode, CachedOrderbook)> = Vec::new();
+
+        for (node_id, mapping) in mappings.iter() {
+            let config = configs.entry(node_id.clone()).or_insert_with(MarketStorageConfig::default);
+
+            // Skip if storage is off
+            if config.mode == MarketStorageMode::Off {
+                continue;
+            }
+
+            // Skip if interval hasn't elapsed
+            let elapsed = now_ms - config.last_flush_ms;
+            if elapsed < config.interval_ms as i64 {
+                continue;
+            }
+
+            // Get cached orderbook
+            if let Some(cached) = cache.get(&mapping.market_id) {
+                // Only write if there's actual data and the cache has been updated since last flush
+                if cached.update_count > 0 && cached.last_updated > config.last_flush_ms {
+                    to_write.push((node_id.clone(), config.mode.clone(), cached.clone()));
+                    config.last_flush_ms = now_ms;
+                }
+            }
+        }
+
+        // Drop locks before doing DB work
+        drop(configs);
+        drop(cache);
+        drop(mappings);
+
+        if to_write.is_empty() {
+            return;
+        }
+
+        // Write to database
+        let conn = self.db.lock().await;
+        for (node_id, mode, cached) in &to_write {
+            let timestamp = Utc::now().timestamp();
+
+            match mode {
+                MarketStorageMode::BestBidAsk => {
+                    let best_bid = cached.bids.first().map(|l| l.price).unwrap_or(0.0);
+                    let best_ask = cached.asks.first().map(|l| l.price).unwrap_or(0.0);
+                    let best_bid_size = cached.bids.first().map(|l| l.size).unwrap_or(0.0);
+                    let best_ask_size = cached.asks.first().map(|l| l.size).unwrap_or(0.0);
+                    let mid = if best_bid > 0.0 && best_ask > 0.0 {
+                        (best_bid + best_ask) / 2.0
+                    } else {
+                        best_bid.max(best_ask)
+                    };
+
+                    let metadata = serde_json::json!({
+                        "market_id": cached.market_id,
+                        "platform": cached.platform,
+                        "best_bid": best_bid,
+                        "best_bid_size": best_bid_size,
+                        "best_ask": best_ask,
+                        "best_ask_size": best_ask_size,
+                        "spread": best_ask - best_bid,
+                        "last_price": cached.last_price,
+                        "last_size": cached.last_size,
+                        "sequence": cached.sequence,
+                        "storage_mode": "best_bid_ask",
+                    });
+
+                    let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
+                    if let Err(e) = conn.execute(
+                        "INSERT INTO timeseries (timestamp, source_id, metric_type, value, metadata) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![timestamp, node_id, "orderbook:bbo", mid, metadata_str],
+                    ) {
+                        eprintln!("[PersistentOrderbook] DB write error for {}: {}", node_id, e);
+                    }
+                }
+                MarketStorageMode::FullOrderbook => {
+                    let mid = if !cached.bids.is_empty() && !cached.asks.is_empty() {
+                        (cached.bids[0].price + cached.asks[0].price) / 2.0
+                    } else {
+                        cached.last_price.unwrap_or(0.0)
+                    };
+
+                    let metadata = serde_json::json!({
+                        "market_id": cached.market_id,
+                        "platform": cached.platform,
+                        "bids": cached.bids,
+                        "asks": cached.asks,
+                        "last_price": cached.last_price,
+                        "last_size": cached.last_size,
+                        "sequence": cached.sequence,
+                        "storage_mode": "full_orderbook",
+                    });
+
+                    let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
+                    if let Err(e) = conn.execute(
+                        "INSERT INTO timeseries (timestamp, source_id, metric_type, value, metadata) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![timestamp, node_id, "orderbook:full", mid, metadata_str],
+                    ) {
+                        eprintln!("[PersistentOrderbook] DB write error for {}: {}", node_id, e);
+                    }
+                }
+                MarketStorageMode::Off => {} // Already filtered above
+            }
+        }
+
+        println!(
+            "[PersistentOrderbook] Flushed {} market snapshots to database",
+            to_write.len()
+        );
+    }
+
+    // ========================================================================
     // MAINTENANCE
     // ========================================================================
 
@@ -424,6 +621,7 @@ pub type PersistentOrderbookState = Arc<PersistentOrderbookMonitor>;
 pub fn create_persistent_monitor(
     ws_manager: Arc<WebSocketManager>,
     app_handle: AppHandle,
+    db: Arc<Mutex<Connection>>,
 ) -> PersistentOrderbookState {
-    Arc::new(PersistentOrderbookMonitor::new(ws_manager, app_handle))
+    Arc::new(PersistentOrderbookMonitor::new(ws_manager, app_handle, db))
 }

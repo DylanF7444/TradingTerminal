@@ -74,6 +74,7 @@ use crate::services::persistent_orderbook::{
     create_persistent_monitor,
 };
 use sysinfo::SystemExt;
+use chrono::Utc;
 use rusqlite::params;
 
 /// System monitor for CPU/memory metrics
@@ -240,6 +241,9 @@ fn main() {
             get_storage_stats_cmd,
             get_node_stored_data_cmd,
             delete_node_stored_data_cmd,
+            get_node_storage_usage_cmd,
+            get_aggregate_storage_stats_cmd,
+            set_market_storage_interval_cmd,
             
             // System commands
             get_system_info_cmd,
@@ -371,9 +375,11 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     // 4. Initialize application state
     // Create WebSocket manager first (needed for both state and startup)
     let ws_manager = create_websocket_manager(app.handle().clone());
-    
+
+    let db = Arc::new(Mutex::new(conn));
+
     let state = AppState {
-        db: Arc::new(Mutex::new(conn)),
+        db: db.clone(),
         http_client,
         active_scrapers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         analyzer_handle: Arc::new(Mutex::new(None)),
@@ -396,7 +402,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     app.manage(orderbook_state);
     
     // 5c. Initialize persistent orderbook monitor (ALWAYS-ON monitoring)
-    let persistent_monitor = create_persistent_monitor(ws_manager.clone(), app.handle().clone());
+    let persistent_monitor = create_persistent_monitor(ws_manager.clone(), app.handle().clone(), db);
     app.manage(persistent_monitor.clone());
     
     // 6. Start background services (scraper supervisor, analyzer, executor)
@@ -449,6 +455,33 @@ async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc
                     );
                 }
             }
+
+            // ================================================================
+            // RESTORE STORAGE CONFIGS FROM NODE METADATA
+            // ================================================================
+            {
+                use crate::services::persistent_orderbook::MarketStorageMode;
+                let conn = state.db.lock().await;
+                for market_info in &active_services.market_subscriptions {
+                    if let Ok(node) = sqlite::get_node_by_id(&conn, &market_info.node_id) {
+                        let mode = match node.metadata.get("storage_mode").and_then(|v| v.as_str()) {
+                            Some("best_bid_ask") => MarketStorageMode::BestBidAsk,
+                            Some("full_orderbook") => MarketStorageMode::FullOrderbook,
+                            _ => MarketStorageMode::Off,
+                        };
+                        let interval_ms = node.metadata.get("storage_interval_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(60_000);
+                        if mode != MarketStorageMode::Off {
+                            persistent_monitor.set_storage_config(
+                                &market_info.node_id,
+                                mode,
+                                interval_ms,
+                            ).await;
+                        }
+                    }
+                }
+            }
         }
         Err(e) => {
             eprintln!("Failed to initialize saved nodes: {}", e);
@@ -487,6 +520,20 @@ async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             monitor_for_stale.check_staleness().await;
+        }
+    });
+
+    // ====================================================================
+    // PERIODIC ORDERBOOK DB FLUSH
+    // ====================================================================
+    // Every 5 seconds, check if any market nodes need their cached
+    // orderbook data flushed to the database (based on per-node interval).
+    // ====================================================================
+    let monitor_for_flush = persistent_monitor.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            monitor_for_flush.flush_to_database().await;
         }
     });
     
@@ -1456,6 +1503,208 @@ async fn delete_node_stored_data_cmd(
         
         Ok(ts_count + ws_count)
     })
+}
+
+// -------------------------------------------------------------------------
+// Node Storage Usage & Aggregate Stats Commands
+// -------------------------------------------------------------------------
+
+/// Per-node storage usage (estimated bytes, rows, data rate)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NodeStorageUsage {
+    pub node_id: String,
+    pub timeseries_rows: i64,
+    pub websocket_message_rows: i64,
+    pub estimated_bytes: i64,
+    pub data_rate_bytes_per_sec: f64,
+}
+
+/// Get storage usage for a specific node
+#[tauri::command]
+async fn get_node_storage_usage_cmd(
+    node_id: String,
+    state: State<'_, AppState>,
+) -> Result<NodeStorageUsage, String> {
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+
+        // Count timeseries rows + approximate size
+        // 40 bytes overhead per row: timestamp(8) + source_id avg(16) + metric_type avg(8) + value(8)
+        let (ts_rows, ts_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(COALESCE(LENGTH(metadata), 0) + 40), 0) FROM timeseries WHERE source_id = ?",
+            params![node_id],
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ).map_err(|e| format!("DB error (timeseries): {}", e))?;
+
+        // Count websocket_messages rows + approximate size
+        // 60 bytes overhead per row: id(8) + timestamp(8) + node_id avg(16) + message_type avg(16) + processed(4) + overhead(8)
+        let (ws_rows, ws_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(COALESCE(LENGTH(payload), 0) + 60), 0) FROM websocket_messages WHERE node_id = ?",
+            params![node_id],
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ).map_err(|e| format!("DB error (websocket_messages): {}", e))?;
+
+        let total_bytes = ts_bytes + ws_bytes;
+
+        // Get time range for data rate calculation
+        // Query oldest and newest timestamps across both tables
+        let oldest: Option<i64> = conn.query_row(
+            "SELECT MIN(t) FROM (
+                SELECT MIN(timestamp) as t FROM timeseries WHERE source_id = ?1
+                UNION ALL
+                SELECT MIN(timestamp) as t FROM websocket_messages WHERE node_id = ?1
+            )",
+            params![node_id],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        let newest: Option<i64> = conn.query_row(
+            "SELECT MAX(t) FROM (
+                SELECT MAX(timestamp) as t FROM timeseries WHERE source_id = ?1
+                UNION ALL
+                SELECT MAX(timestamp) as t FROM websocket_messages WHERE node_id = ?1
+            )",
+            params![node_id],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        let data_rate = match (oldest, newest) {
+            (Some(o), Some(n)) if n > o => {
+                // Timestamps may be in seconds or milliseconds; handle both
+                let diff = (n - o) as f64;
+                let duration_secs = if diff > 1_000_000_000.0 { diff / 1000.0 } else { diff };
+                if duration_secs > 0.0 { total_bytes as f64 / duration_secs } else { 0.0 }
+            }
+            _ => 0.0,
+        };
+
+        Ok(NodeStorageUsage {
+            node_id,
+            timeseries_rows: ts_rows,
+            websocket_message_rows: ws_rows,
+            estimated_bytes: total_bytes,
+            data_rate_bytes_per_sec: data_rate,
+        })
+    })
+}
+
+/// Aggregate storage statistics across all nodes
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AggregateStorageStats {
+    pub total_timeseries_rows: i64,
+    pub total_ws_message_rows: i64,
+    pub total_estimated_bytes: i64,
+    pub aggregate_data_rate_bytes_per_sec: f64,
+    pub db_size_bytes: i64,
+}
+
+/// Get aggregate storage stats for all nodes combined
+#[tauri::command]
+async fn get_aggregate_storage_stats_cmd(
+    state: State<'_, AppState>,
+) -> Result<AggregateStorageStats, String> {
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+
+        // Total timeseries
+        let (ts_rows, ts_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(COALESCE(LENGTH(metadata), 0) + 40), 0) FROM timeseries",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ).map_err(|e| format!("DB error (timeseries): {}", e))?;
+
+        // Total websocket messages
+        let (ws_rows, ws_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(COALESCE(LENGTH(payload), 0) + 60), 0) FROM websocket_messages",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ).map_err(|e| format!("DB error (websocket_messages): {}", e))?;
+
+        let total_bytes = ts_bytes + ws_bytes;
+
+        // DB file size via PRAGMA
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap_or(0);
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap_or(0);
+        let db_size = page_count * page_size;
+
+        // Recent data rate: bytes written in last 5 minutes / 300 seconds
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_secs = chrono::Utc::now().timestamp();
+        // Try both ms and seconds timestamps since tables may use either
+        let recent_ts_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(LENGTH(metadata), 0) + 40), 0) FROM timeseries WHERE timestamp > ?1 OR timestamp > ?2",
+            params![now_ms - 300_000, now_secs - 300],
+            |row| row.get(0)
+        ).unwrap_or(0);
+
+        let recent_ws_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(LENGTH(payload), 0) + 60), 0) FROM websocket_messages WHERE timestamp > ?1 OR timestamp > ?2",
+            params![now_ms - 300_000, now_secs - 300],
+            |row| row.get(0)
+        ).unwrap_or(0);
+
+        let recent_total = recent_ts_bytes + recent_ws_bytes;
+        let data_rate = recent_total as f64 / 300.0;
+
+        Ok(AggregateStorageStats {
+            total_timeseries_rows: ts_rows,
+            total_ws_message_rows: ws_rows,
+            total_estimated_bytes: total_bytes,
+            aggregate_data_rate_bytes_per_sec: data_rate,
+            db_size_bytes: db_size,
+        })
+    })
+}
+
+/// Set storage interval and mode for a market node's database writes
+#[tauri::command]
+async fn set_market_storage_interval_cmd(
+    node_id: String,
+    interval_ms: u64,
+    storage_mode: Option<String>,
+    state: State<'_, AppState>,
+    monitor: State<'_, PersistentOrderbookState>,
+) -> Result<(), String> {
+    use crate::services::persistent_orderbook::MarketStorageMode;
+
+    let mode = match storage_mode.as_deref() {
+        Some("best_bid_ask") => MarketStorageMode::BestBidAsk,
+        Some("full_orderbook") => MarketStorageMode::FullOrderbook,
+        Some("off") | None => MarketStorageMode::Off,
+        Some(other) => return Err(format!("Unknown storage mode: {}", other)),
+    };
+
+    info!("Setting market storage for {} to mode={:?}, interval={}ms", node_id, mode, interval_ms);
+
+    // Update node metadata in DB
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+
+        // Fetch existing node
+        let mut node = sqlite::get_node_by_id(&conn, &node_id)
+            .map_err(|e| format!("Database error: {}", e))?;
+
+        // Update metadata with storage interval and mode
+        if let serde_json::Value::Object(ref mut map) = node.metadata {
+            map.insert("storage_interval_ms".to_string(), serde_json::json!(interval_ms));
+            map.insert("storage_interval_seconds".to_string(), serde_json::json!(interval_ms / 1000));
+            map.insert("storage_mode".to_string(), serde_json::json!(match &mode {
+                MarketStorageMode::Off => "off",
+                MarketStorageMode::BestBidAsk => "best_bid_ask",
+                MarketStorageMode::FullOrderbook => "full_orderbook",
+            }));
+        }
+
+        sqlite::update_node(&conn, &node)
+            .map_err(|e| format!("Database error: {}", e))?;
+
+        Ok::<(), String>(())
+    })?;
+
+    // Notify the persistent monitor of the new config
+    monitor.set_storage_config(&node_id, mode, interval_ms).await;
+
+    Ok(())
 }
 
 // -------------------------------------------------------------------------
