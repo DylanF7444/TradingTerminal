@@ -138,7 +138,7 @@ const OrderbookSide: React.FC<{
             <span className="text-xs text-gray-500">{orderbook.asks.length} lvls</span>
           </div>
           <div className="flex-1 overflow-y-auto">
-            {[...orderbook.asks].reverse().slice(0, 20).map((level, i) => (
+            {orderbook.asks.slice(0, 20).map((level, i) => (
               <div
                 key={`ask-${i}`}
                 className="relative flex items-center justify-between px-2 py-1 hover:bg-red-900/10"
@@ -493,7 +493,7 @@ export const GlobalOrderbookOverlay: React.FC<GlobalOrderbookOverlayProps> = ({
                           <span className="text-xs text-gray-500">{orderbook?.asks.length ?? 0} levels</span>
                         </div>
                         <div className="flex-1 overflow-y-auto">
-                          {[...(orderbook?.asks ?? [])].reverse().slice(0, 20).map((level, i) => (
+                          {(orderbook?.asks ?? []).slice(0, 20).map((level, i) => (
                             <div
                               key={`ask-${i}`}
                               className="relative flex items-center justify-between px-2 py-1 hover:bg-red-900/10"

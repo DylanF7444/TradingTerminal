@@ -502,9 +502,9 @@ export const OrderbookView: React.FC<OrderbookViewProps> = ({
         </div>
       )}
       
-      {/* Asks (sell orders) - displayed in reverse (lowest ask at bottom) */}
+      {/* Asks (sell orders) - lowest ask at top, closest to real price */}
       <div className="space-y-0.5">
-        {processedAsks.slice().reverse().map((level) => (
+        {processedAsks.map((level) => (
           <OrderbookLevel
             key={`ask-${level.price}`}
             level={level}

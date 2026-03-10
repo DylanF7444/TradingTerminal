@@ -224,7 +224,7 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
                 </div>
                 {/* Asks */}
                 <div className="px-1 py-0.5">
-                  {yesTopAsks.slice().reverse().map((level, i) => (
+                  {yesTopAsks.map((level, i) => (
                     <div key={`yes-ask-${i}`} className="flex justify-between text-[10px] py-0.5">
                       <span className="text-red-400 font-mono">{formatPrice(level.price)}</span>
                       <span className="text-gray-400 font-mono">{formatSize(level.size)}</span>
@@ -252,7 +252,7 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
                 </div>
                 {/* Asks */}
                 <div className="px-1 py-0.5">
-                  {noTopAsks.slice().reverse().map((level, i) => (
+                  {noTopAsks.map((level, i) => (
                     <div key={`no-ask-${i}`} className="flex justify-between text-[10px] py-0.5">
                       <span className="text-red-400 font-mono">{formatPrice(level.price)}</span>
                       <span className="text-gray-400 font-mono">{formatSize(level.size)}</span>
@@ -283,7 +283,7 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
 
               {/* Asks */}
               <div className="px-1 py-0.5">
-                {yesTopAsks.slice().reverse().map((level, i) => (
+                {yesTopAsks.map((level, i) => (
                   <div key={`ask-${i}`} className="flex justify-between text-[10px] py-0.5">
                     <span className="text-red-400 font-mono">{formatPrice(level.price)}</span>
                     <span className="text-gray-400 font-mono">{formatSize(level.size)}</span>
