@@ -301,7 +301,7 @@ export interface CryptoPricesConfig extends BaseSourceConfig {
   /** Storage interval for WebSocket data (milliseconds)
    *  When using WebSocket providers (Coinbase), data is received in real-time
    *  but only stored to database at this interval to reduce write load.
-   *  Default: 60000 (1 minute)
+   *  Default: 1000 (1 second)
    */
   storageIntervalMs?: number;
   

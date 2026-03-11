@@ -86,12 +86,16 @@ export const NodeOrderbookPopup: React.FC<NodeOrderbookPopupProps> = ({
   const [viewMode, setViewMode] = useState<ViewMode>('orderbook');
 
   // Get orderbooks for both tokens
+  // For Polymarket: tokenIds[0] = YES, tokenIds[1] = NO
+  // For Kalshi: YES is at marketId, NO is always at marketId:no
   const yesOrderbook: Orderbook | undefined = allOrderbooks[marketId];
-  const noTokenId = tokenIds && tokenIds.length > 1
-    ? tokenIds.find(id => id !== marketId) ?? tokenIds[1]
-    : undefined;
+  const noTokenId = platform === 'kalshi'
+    ? `${marketId}:no`
+    : (tokenIds && tokenIds.length > 1
+        ? tokenIds.find(id => id !== marketId) ?? tokenIds[1]
+        : undefined);
   const noOrderbook: Orderbook | undefined = noTokenId ? allOrderbooks[noTokenId] : undefined;
-  const hasBothSides = platform === 'polymarket' && noOrderbook !== undefined;
+  const hasBothSides = noOrderbook !== undefined;
 
   // Derive connection status from store data
   const status = useMemo((): 'connected' | 'connecting' | 'stale' | 'error' | 'idle' => {

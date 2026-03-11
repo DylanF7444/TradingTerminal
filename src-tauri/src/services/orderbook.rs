@@ -1641,15 +1641,21 @@ async fn run_kalshi_connection(
     
     println!("Sent subscriptions for Kalshi market {}", market_ticker);
     
-    // Track orderbook state (Kalshi sends deltas)
-    let mut current_bids: Vec<OrderbookLevel> = Vec::new();
-    let mut current_asks: Vec<OrderbookLevel> = Vec::new();
+    // Track orderbook state for YES and NO sides separately
+    // YES side is keyed by market_ticker, NO side by market_ticker:no
+    let mut yes_bids: Vec<OrderbookLevel> = Vec::new();
+    let mut yes_asks: Vec<OrderbookLevel> = Vec::new();
+    let mut no_bids: Vec<OrderbookLevel> = Vec::new();
+    let mut no_asks: Vec<OrderbookLevel> = Vec::new();
     let mut sequence: u64 = 0;
 
     // Receive messages - persist subscription without staleness timeout
     while let Some(msg) = ws_receiver.next().await {
         match msg {
             Ok(WsMessage::Text(text)) => {
+                // Debug: Print incoming websocket message
+                println!("[Kalshi WS IN] {}: {}", market_ticker, text);
+
                 // Emit raw message for debugging/display
                 let raw_msg = RawWebSocketMessage {
                     market_id: market_ticker.to_string(),
@@ -1664,13 +1670,14 @@ async fn run_kalshi_connection(
                     eprintln!("Failed to emit raw Kalshi message: {}", e);
                 }
 
-                match parse_kalshi_message(&text, market_ticker, &mut current_bids, &mut current_asks, &mut sequence) {
-                    Ok(Some(update)) => {
-                        if let Err(e) = app_handle.emit("orderbook:update", &update) {
-                            eprintln!("Failed to emit Kalshi orderbook update: {}", e);
+                match parse_kalshi_message(&text, market_ticker, &mut yes_bids, &mut yes_asks, &mut no_bids, &mut no_asks, &mut sequence) {
+                    Ok(updates) => {
+                        for update in updates {
+                            if let Err(e) = app_handle.emit("orderbook:update", &update) {
+                                eprintln!("Failed to emit Kalshi orderbook update: {}", e);
+                            }
                         }
                     }
-                    Ok(None) => {}
                     Err(e) => {
                         eprintln!("Failed to parse Kalshi message: {}", e);
                     }
@@ -1696,192 +1703,298 @@ async fn run_kalshi_connection(
 
 /// Parse a Kalshi WebSocket message
 /// Per Kalshi docs: https://docs.kalshi.com/websockets
-/// Message format: { "type": "ticker", "msg": { "market_ticker": "XXX", "yes_bid": 45, "yes_ask": 55 } }
+/// Returns Vec of updates: one for YES (market_ticker) and one for NO (market_ticker:no)
+///
+/// Kalshi binary markets have YES and NO sides. A YES bid at price X implies a NO ask at (100-X),
+/// and vice versa. We maintain separate orderbooks for each side so the frontend can display
+/// them side-by-side, matching the Polymarket two-token architecture.
 pub fn parse_kalshi_message(
     text: &str,
     market_ticker: &str,
-    current_bids: &mut Vec<OrderbookLevel>,
-    current_asks: &mut Vec<OrderbookLevel>,
+    yes_bids: &mut Vec<OrderbookLevel>,
+    yes_asks: &mut Vec<OrderbookLevel>,
+    no_bids: &mut Vec<OrderbookLevel>,
+    no_asks: &mut Vec<OrderbookLevel>,
     sequence: &mut u64,
-) -> Result<Option<OrderbookUpdate>> {
+) -> Result<Vec<OrderbookUpdate>> {
     let value: JsonValue = serde_json::from_str(text)?;
-    
+
     let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    
+    let no_market_id = format!("{}:no", market_ticker);
+
     match msg_type {
         "subscribed" => {
             println!("Kalshi subscription confirmed: {}", text);
-            Ok(None)
+            Ok(vec![])
         }
         "ticker" => {
             // Ticker message format: { "type": "ticker", "msg": { "market_ticker": "XXX", "yes_bid": 45, "yes_ask": 55 } }
             let msg = value.get("msg").ok_or_else(|| anyhow!("Missing msg field in ticker"))?;
-            let yes_bid = msg.get("yes_bid").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 100.0;
-            let yes_ask = msg.get("yes_ask").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 100.0;
-            
-            // Create a simple orderbook from bid/ask
-            // yes_bid is the best bid price, yes_ask is the best ask price
-            *current_bids = vec![OrderbookLevel { price: yes_bid, size: 1.0, order_count: None }];
-            *current_asks = vec![OrderbookLevel { price: yes_ask, size: 1.0, order_count: None }];
+            let yes_bid_price = msg.get("yes_bid").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 100.0;
+            let yes_ask_price = msg.get("yes_ask").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 100.0;
+
+            // YES orderbook: yes_bid is the best bid, yes_ask is the best ask
+            *yes_bids = vec![OrderbookLevel { price: yes_bid_price, size: 1.0, order_count: None }];
+            *yes_asks = vec![OrderbookLevel { price: yes_ask_price, size: 1.0, order_count: None }];
+
+            // NO orderbook: derived by inverting YES prices
+            // NO bid = 1 - YES ask, NO ask = 1 - YES bid
+            let no_bid_price = 1.0 - yes_ask_price;
+            let no_ask_price = 1.0 - yes_bid_price;
+            *no_bids = vec![OrderbookLevel { price: no_bid_price, size: 1.0, order_count: None }];
+            *no_asks = vec![OrderbookLevel { price: no_ask_price, size: 1.0, order_count: None }];
+
             *sequence += 1;
-            
-            Ok(Some(OrderbookUpdate {
-                market_id: market_ticker.to_string(),
-                platform: "kalshi".to_string(),
-                bids: current_bids.clone(),
-                asks: current_asks.clone(),
-                timestamp: Utc::now().timestamp_millis(),
-                sequence: *sequence,
-                last_price: None,
-                last_size: None,
-            }))
+
+            Ok(vec![
+                OrderbookUpdate {
+                    market_id: market_ticker.to_string(),
+                    platform: "kalshi".to_string(),
+                    bids: yes_bids.clone(),
+                    asks: yes_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: None,
+                    last_size: None,
+                },
+                OrderbookUpdate {
+                    market_id: no_market_id,
+                    platform: "kalshi".to_string(),
+                    bids: no_bids.clone(),
+                    asks: no_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: None,
+                    last_size: None,
+                },
+            ])
         }
         "trade" => {
             // Trade message: { "type": "trade", "msg": { "market_ticker": "XXX", "price": 50, "count": 100, ... } }
             let msg = value.get("msg").ok_or_else(|| anyhow!("Missing msg field in trade"))?;
             let price = msg.get("price").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 100.0;
             let size = msg.get("count").and_then(|v| v.as_i64()).unwrap_or(0) as f64;
-            
+
             *sequence += 1;
-            
-            Ok(Some(OrderbookUpdate {
-                market_id: market_ticker.to_string(),
-                platform: "kalshi".to_string(),
-                bids: current_bids.clone(),
-                asks: current_asks.clone(),
-                timestamp: Utc::now().timestamp_millis(),
-                sequence: *sequence,
-                last_price: Some(price),
-                last_size: Some(size),
-            }))
+
+            Ok(vec![
+                OrderbookUpdate {
+                    market_id: market_ticker.to_string(),
+                    platform: "kalshi".to_string(),
+                    bids: yes_bids.clone(),
+                    asks: yes_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: Some(price),
+                    last_size: Some(size),
+                },
+                OrderbookUpdate {
+                    market_id: no_market_id,
+                    platform: "kalshi".to_string(),
+                    bids: no_bids.clone(),
+                    asks: no_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: Some(1.0 - price),
+                    last_size: Some(size),
+                },
+            ])
         }
         "orderbook_snapshot" => {
-            // Full snapshot (requires auth for orderbook_delta channel)
+            // Full snapshot: { "type": "orderbook_snapshot", "msg": { "yes": [[price,qty],...], "no": [[price,qty],...] } }
             let msg = value.get("msg").ok_or_else(|| anyhow!("Missing msg field in orderbook_snapshot"))?;
-            let yes_levels = parse_kalshi_levels(msg.get("yes"));
-            let no_levels = parse_kalshi_levels(msg.get("no"));
-            
-            *current_bids = yes_levels;
-            *current_asks = no_levels;
+            let raw_yes_levels = parse_kalshi_levels(msg.get("yes"));
+            let raw_no_levels = parse_kalshi_levels(msg.get("no"));
+
+            // YES orderbook: YES bids from yes array, YES asks derived from NO (price = 1 - no_price)
+            *yes_bids = raw_yes_levels.clone();
+            *yes_asks = invert_kalshi_levels(&raw_no_levels);
+            yes_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+
+            // NO orderbook: NO bids from no array, NO asks derived from YES (price = 1 - yes_price)
+            *no_bids = raw_no_levels.clone();
+            *no_asks = invert_kalshi_levels(&raw_yes_levels);
+            no_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+
             *sequence += 1;
-            
-            Ok(Some(OrderbookUpdate {
-                market_id: market_ticker.to_string(),
-                platform: "kalshi".to_string(),
-                bids: current_bids.clone(),
-                asks: current_asks.clone(),
-                timestamp: Utc::now().timestamp_millis(),
-                sequence: *sequence,
-                last_price: None,
-                last_size: None,
-            }))
+
+            Ok(vec![
+                OrderbookUpdate {
+                    market_id: market_ticker.to_string(),
+                    platform: "kalshi".to_string(),
+                    bids: yes_bids.clone(),
+                    asks: yes_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: None,
+                    last_size: None,
+                },
+                OrderbookUpdate {
+                    market_id: no_market_id,
+                    platform: "kalshi".to_string(),
+                    bids: no_bids.clone(),
+                    asks: no_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: None,
+                    last_size: None,
+                },
+            ])
         }
         "orderbook_delta" => {
-            // Delta update (requires auth)
+            // Delta update: { "type": "orderbook_delta", "msg": { "side": "yes"|"no", "price": N, "delta": N } }
             let msg = value.get("msg").ok_or_else(|| anyhow!("Missing msg field in orderbook_delta"))?;
             let side = msg.get("side").and_then(|v| v.as_str()).unwrap_or("");
             let price = msg.get("price").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let delta = msg.get("delta").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            
-            // Update the appropriate side
+            let inverted_price = 100 - price;
+
             if side == "yes" {
-                if delta == 0 {
-                    current_bids.retain(|l| (l.price * 100.0) as i32 != price);
-                } else {
-                    let price_f64 = price as f64 / 100.0;
-                    let size_f64 = delta.abs() as f64;
-                    
-                    if let Some(level) = current_bids.iter_mut().find(|l| (l.price * 100.0) as i32 == price) {
-                        level.size = size_f64;
-                    } else {
-                        current_bids.push(OrderbookLevel {
-                            price: price_f64,
-                            size: size_f64,
-                            order_count: None,
-                        });
-                    }
-                }
+                // Update YES bids
+                apply_kalshi_delta(yes_bids, price, delta);
+                // Update NO asks (inverted YES)
+                apply_kalshi_delta(no_asks, inverted_price, delta);
             } else {
-                if delta == 0 {
-                    current_asks.retain(|l| (l.price * 100.0) as i32 != price);
-                } else {
-                    let price_f64 = price as f64 / 100.0;
-                    let size_f64 = delta.abs() as f64;
-                    
-                    if let Some(level) = current_asks.iter_mut().find(|l| (l.price * 100.0) as i32 == price) {
-                        level.size = size_f64;
-                    } else {
-                        current_asks.push(OrderbookLevel {
-                            price: price_f64,
-                            size: size_f64,
-                            order_count: None,
-                        });
-                    }
-                }
+                // Update NO bids
+                apply_kalshi_delta(no_bids, price, delta);
+                // Update YES asks (inverted NO)
+                apply_kalshi_delta(yes_asks, inverted_price, delta);
             }
-            
-            // Sort bids descending (best bid first), asks ascending (best ask first)
-            current_bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
-            current_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
-            
+
+            // Sort: bids descending, asks ascending
+            yes_bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+            yes_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+            no_bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+            no_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+
             *sequence += 1;
-            
-            Ok(Some(OrderbookUpdate {
-                market_id: market_ticker.to_string(),
-                platform: "kalshi".to_string(),
-                bids: current_bids.clone(),
-                asks: current_asks.clone(),
-                timestamp: Utc::now().timestamp_millis(),
-                sequence: *sequence,
-                last_price: None,
-                last_size: None,
-            }))
+
+            Ok(vec![
+                OrderbookUpdate {
+                    market_id: market_ticker.to_string(),
+                    platform: "kalshi".to_string(),
+                    bids: yes_bids.clone(),
+                    asks: yes_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: None,
+                    last_size: None,
+                },
+                OrderbookUpdate {
+                    market_id: no_market_id,
+                    platform: "kalshi".to_string(),
+                    bids: no_bids.clone(),
+                    asks: no_asks.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                    sequence: *sequence,
+                    last_price: None,
+                    last_size: None,
+                },
+            ])
         }
         "error" => {
             let msg = value.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown error");
             eprintln!("Kalshi WebSocket error: {}", msg);
-            Ok(None)
+            Ok(vec![])
         }
         "heartbeat" | "ping" => {
-            Ok(None)
+            Ok(vec![])
         }
         _ => {
             // Log unknown messages for debugging
             println!("Unknown Kalshi message type '{}': {}", msg_type, text);
-            Ok(None)
+            Ok(vec![])
+        }
+    }
+}
+
+/// Invert Kalshi price levels: price -> (1.0 - price)
+/// Used to derive asks from the opposite side's bids.
+/// E.g., a YES bid at 7c becomes a NO ask at 93c.
+fn invert_kalshi_levels(levels: &[OrderbookLevel]) -> Vec<OrderbookLevel> {
+    levels.iter()
+        .filter_map(|l| {
+            let inverted_price = 1.0 - l.price;
+            if inverted_price > 0.0 {
+                Some(OrderbookLevel {
+                    price: inverted_price,
+                    size: l.size,
+                    order_count: l.order_count,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Apply a Kalshi delta to a levels vec (handles add/update/remove)
+fn apply_kalshi_delta(levels: &mut Vec<OrderbookLevel>, price_cents: i32, delta: i32) {
+    if delta == 0 {
+        levels.retain(|l| (l.price * 100.0).round() as i32 != price_cents);
+    } else {
+        let price_f64 = price_cents as f64 / 100.0;
+        let size_f64 = delta.abs() as f64;
+
+        if let Some(level) = levels.iter_mut().find(|l| (l.price * 100.0).round() as i32 == price_cents) {
+            level.size = size_f64;
+        } else {
+            levels.push(OrderbookLevel {
+                price: price_f64,
+                size: size_f64,
+                order_count: None,
+            });
         }
     }
 }
 
 /// Parse Kalshi price levels
+/// Kalshi sends levels as arrays of [price_cents, quantity], e.g. [[1,63108],[2,12145],...]
 fn parse_kalshi_levels(value: Option<&JsonValue>) -> Vec<OrderbookLevel> {
     let mut levels = Vec::new();
-    
+
     if let Some(arr) = value.and_then(|v| v.as_array()) {
         for item in arr {
-            let price = item.get("price")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as f64 / 100.0; // Kalshi uses cents
-            
-            let count = item.get("count")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as f64;
-            
-            if price > 0.0 && count > 0.0 {
-                levels.push(OrderbookLevel {
-                    price,
-                    size: count,
-                    order_count: None,
-                });
+            // Kalshi snapshot levels are [price_in_cents, quantity] arrays
+            if let Some(pair) = item.as_array() {
+                if pair.len() >= 2 {
+                    let price = pair[0].as_i64().unwrap_or(0) as f64 / 100.0;
+                    let count = pair[1].as_i64().unwrap_or(0) as f64;
+
+                    if price > 0.0 && count > 0.0 {
+                        levels.push(OrderbookLevel {
+                            price,
+                            size: count,
+                            order_count: None,
+                        });
+                    }
+                }
+            } else {
+                // Fallback: try object format {"price": N, "count": N}
+                let price = item.get("price")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as f64 / 100.0;
+
+                let count = item.get("count")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as f64;
+
+                if price > 0.0 && count > 0.0 {
+                    levels.push(OrderbookLevel {
+                        price,
+                        size: count,
+                        order_count: None,
+                    });
+                }
             }
         }
     }
-    
+
     // Sort by price descending (for bids)
     levels.sort_by(|a, b| {
         b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal)
     });
-    
+
     levels
 }
 

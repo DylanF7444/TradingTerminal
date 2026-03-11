@@ -154,6 +154,8 @@ pub async fn run_coinbase_scraper(
     let mut last_storage_time = std::time::Instant::now();
     let storage_interval = Duration::from_millis(config.storage_interval_ms);
     let mut storage_timer = interval(storage_interval);
+    // Track last stored aggregate values per symbol for change detection
+    let mut last_stored_prices: HashMap<String, f64> = HashMap::new();
     
     // Connection maintenance interval (every 5 seconds)
     let mut connection_timer = interval(Duration::from_secs(5));
@@ -210,9 +212,9 @@ pub async fn run_coinbase_scraper(
                         if let Some(ref mut sender) = ws_sender {
                             let _ = sender.close().await;
                         }
-                        
+
                         // Flush remaining data
-                        flush_aggregated_data(&db, &config.node_id, &aggregated).await;
+                        flush_aggregated_data(&db, &config.node_id, &aggregated, &mut last_stored_prices).await;
                         break;
                     }
                 }
@@ -312,7 +314,7 @@ pub async fn run_coinbase_scraper(
             // Storage interval tick - write accumulated data to DB
             _ = storage_timer.tick() => {
                 if !aggregated.prices.is_empty() {
-                    flush_aggregated_data(&db, &config.node_id, &aggregated).await;
+                    flush_aggregated_data(&db, &config.node_id, &aggregated, &mut last_stored_prices).await;
                     aggregated = AggregatedData::default();
                 }
             }
@@ -368,28 +370,37 @@ pub async fn run_coinbase_scraper(
     println!("[Coinbase Scraper {}] Exiting", config.node_id);
 }
 
-/// Flush aggregated data to database
+/// Flush aggregated data to database (skips if no values changed)
 async fn flush_aggregated_data(
     db: &Arc<Mutex<Connection>>,
     node_id: &str,
     aggregated: &AggregatedData,
+    last_stored_prices: &mut HashMap<String, f64>,
 ) {
     let conn = db.lock().await;
     let timestamp = Utc::now().timestamp_millis();
-    
+    let mut stored_count = 0;
+
     for (symbol, prices) in &aggregated.prices {
         if prices.is_empty() {
             continue;
         }
-        
+
         // Calculate aggregate values - extract prices as f64 values
         let price_values: Vec<f64> = prices.iter().map(|(p, _, _)| *p).collect();
-        
+
         let avg_price = price_values.iter().sum::<f64>() / price_values.len() as f64;
         let min_price = price_values.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_price = price_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let count = prices.len();
-        
+
+        // Skip insertion if the average price hasn't changed
+        if let Some(prev_avg) = last_stored_prices.get(symbol) {
+            if (avg_price - prev_avg).abs() < f64::EPSILON {
+                continue;
+            }
+        }
+
         // Store aggregated price data
         let metric_type = format!("price:{}", symbol.to_lowercase());
         let metadata = serde_json::json!({
@@ -402,13 +413,18 @@ async fn flush_aggregated_data(
             "interval_start": prices.first().map(|(_, _, t)| *t).unwrap_or(timestamp),
             "interval_end": prices.last().map(|(_, _, t)| *t).unwrap_or(timestamp),
         });
-        
+
         if let Err(e) = insert_timeseries(&conn, node_id, &metric_type, avg_price, Some(metadata)) {
             eprintln!("[Coinbase Scraper {}] Failed to insert timeseries: {}", node_id, e);
+        } else {
+            last_stored_prices.insert(symbol.clone(), avg_price);
+            stored_count += 1;
         }
     }
-    
-    println!("[Coinbase Scraper {}] Flushed {} symbols to database", node_id, aggregated.prices.len());
+
+    if stored_count > 0 {
+        println!("[Coinbase Scraper {}] Flushed {}/{} symbols to database (skipped unchanged)", node_id, stored_count, aggregated.prices.len());
+    }
 }
 
 // ============================================================================
@@ -564,7 +580,7 @@ pub fn parse_websocket_config(
     
     let storage_interval_ms = config.get("storageIntervalMs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(60000); // Default: 1 minute
+        .unwrap_or(1000); // Default: 1 second
     
     let include_orderbook = config.get("includeOrderbook")
         .and_then(|v| v.as_bool())

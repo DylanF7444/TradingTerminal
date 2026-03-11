@@ -59,7 +59,7 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
     icon: Bitcoin,
     description: 'Real-time cryptocurrency price feeds via WebSocket',
     color: 'text-orange-400',
-    defaultConfig: { symbols: 'BTC-USD,ETH-USD', storage_interval_seconds: 60, provider: 'coinbase' }
+    defaultConfig: { symbols: 'BTC-USD,ETH-USD', storage_interval_seconds: 1, provider: 'coinbase' }
   },
   [InfoSourceType.FinancialPrices]: {
     label: 'Financial Prices',
@@ -196,7 +196,7 @@ export default function SourcePanel({
         tickers: config.tickers?.split(',').map((s: string) => s.trim()),
         keywords: config.keywords?.split(',').map((s: string) => s.trim()),
         // Convert storage_interval_seconds to storageIntervalMs for backend
-        storageIntervalMs: config.storage_interval_seconds ? config.storage_interval_seconds * 1000 : 60000,
+        storageIntervalMs: config.storage_interval_seconds ? config.storage_interval_seconds * 1000 : 1000,
       };
 
       const result = await addSource({
@@ -275,14 +275,14 @@ export default function SourcePanel({
                 </label>
                 <input
                   type="range"
-                  min="10"
+                  min="1"
                   max="300"
-                  step="10"
-                  value={config.storage_interval_seconds || 60}
+                  step="1"
+                  value={config.storage_interval_seconds || 1}
                   onChange={(e) => handleConfigChange('storage_interval_seconds', parseInt(e.target.value))}
                   className="w-full"
                 />
-                <span className="text-sm text-gray-500">{config.storage_interval_seconds || 60}s</span>
+                <span className="text-sm text-gray-500">{config.storage_interval_seconds || 1}s</span>
                 <p className="text-xs text-gray-600 mt-1">
                   Price updates are displayed in real-time in the raw stream tab. 
                   Database writes happen at this interval to reduce disk I/O.

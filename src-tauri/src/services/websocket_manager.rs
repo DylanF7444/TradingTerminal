@@ -475,7 +475,8 @@ async fn run_kalshi_consolidated(
     let mut ws_receiver: Option<futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>> = None;
     
     // Orderbook state per market (Kalshi sends deltas)
-    let mut orderbook_state: HashMap<String, (Vec<OrderbookLevel>, Vec<OrderbookLevel>)> = HashMap::new();
+    // Each entry: (yes_bids, yes_asks, no_bids, no_asks)
+    let mut orderbook_state: HashMap<String, (Vec<OrderbookLevel>, Vec<OrderbookLevel>, Vec<OrderbookLevel>, Vec<OrderbookLevel>)> = HashMap::new();
     let mut sequence: u64 = 0;
     let mut subscription_id: u64 = 1;
     
@@ -492,7 +493,7 @@ async fn run_kalshi_consolidated(
                         }
                         
                         // Initialize orderbook state for this market
-                        orderbook_state.entry(market_id.clone()).or_insert_with(|| (Vec::new(), Vec::new()));
+                        orderbook_state.entry(market_id.clone()).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
                         
                         // If connected, send subscription message for this market
                         if let Some(ref mut sender) = ws_sender {
@@ -614,16 +615,17 @@ async fn run_kalshi_consolidated(
                                 let _ = app_handle.emit("orderbook:raw", &raw_msg);
                                 
                                 // Parse message
-                                let (bids, asks) = orderbook_state.entry(ticker.clone()).or_insert_with(|| (Vec::new(), Vec::new()));
-                                
-                                match parse_kalshi_message(&text, &ticker, bids, asks, &mut sequence) {
-                                    Ok(Some(update)) => {
-                                        println!("[DEBUG] Emitting kalshi orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
-                                        if let Err(e) = app_handle.emit("orderbook:update", &update) {
-                                            eprintln!("[Kalshi Consolidated] Failed to emit update: {}", e);
+                                let (yes_bids, yes_asks, no_bids, no_asks) = orderbook_state.entry(ticker.clone()).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+
+                                match parse_kalshi_message(&text, &ticker, yes_bids, yes_asks, no_bids, no_asks, &mut sequence) {
+                                    Ok(updates) => {
+                                        for update in updates {
+                                            println!("[DEBUG] Emitting kalshi orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
+                                            if let Err(e) = app_handle.emit("orderbook:update", &update) {
+                                                eprintln!("[Kalshi Consolidated] Failed to emit update: {}", e);
+                                            }
                                         }
                                     }
-                                    Ok(None) => {}
                                     Err(e) => {
                                         eprintln!("[Kalshi Consolidated] Parse error: {}", e);
                                     }

@@ -471,7 +471,7 @@ async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc
                         };
                         let interval_ms = node.metadata.get("storage_interval_ms")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(60_000);
+                            .unwrap_or(1_000);
                         if mode != MarketStorageMode::Off {
                             persistent_monitor.set_storage_config(
                                 &market_info.node_id,

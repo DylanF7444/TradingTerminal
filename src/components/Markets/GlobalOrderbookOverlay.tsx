@@ -213,13 +213,16 @@ export const GlobalOrderbookOverlay: React.FC<GlobalOrderbookOverlayProps> = ({
   const { rawMessages, clearMessages } = useRawOrderbookMessages(100, marketId);
   const [activeTab, setActiveTab] = useState<ViewTab>('orderbook');
 
-  // For Polymarket: get both YES and NO orderbooks
+  // For Polymarket: get both YES and NO orderbooks via tokenIds
+  // For Kalshi: NO orderbook is always at marketId:no (emitted by backend)
   const yesOrderbook: Orderbook | undefined = allOrderbooks[marketId];
-  const noTokenId = tokenIds && tokenIds.length > 1
-    ? tokenIds.find(id => id !== marketId) ?? tokenIds[1]
-    : undefined;
+  const noTokenId = platform === 'kalshi'
+    ? `${marketId}:no`
+    : (tokenIds && tokenIds.length > 1
+        ? tokenIds.find(id => id !== marketId) ?? tokenIds[1]
+        : undefined);
   const noOrderbook: Orderbook | undefined = noTokenId ? allOrderbooks[noTokenId] : undefined;
-  const hasBothSides = platform === 'polymarket' && noTokenId !== undefined;
+  const hasBothSides = noTokenId !== undefined;
 
   // Use "orderbook" for backwards compat (refers to YES / primary token)
   const orderbook = yesOrderbook;

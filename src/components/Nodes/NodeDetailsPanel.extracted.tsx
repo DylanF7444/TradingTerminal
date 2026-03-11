@@ -488,12 +488,12 @@ function StorageIntervalSlider({
 }) {
   const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
   const [localMode, setLocalMode] = useState<string>(metadata.storage_mode || 'off');
-  const [localInterval, setLocalInterval] = useState<number>(metadata.storage_interval_seconds || 60);
+  const [localInterval, setLocalInterval] = useState<number>(metadata.storage_interval_seconds || 1);
 
   // Sync from metadata if it changes externally
   useEffect(() => {
     setLocalMode(metadata.storage_mode || 'off');
-    setLocalInterval(metadata.storage_interval_seconds || 60);
+    setLocalInterval(metadata.storage_interval_seconds || 1);
   }, [metadata.storage_mode, metadata.storage_interval_seconds]);
 
   const handleIntervalChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -577,9 +577,9 @@ function StorageIntervalSlider({
           <div className="flex items-center gap-2">
             <input
               type="range"
-              min="10"
+              min="1"
               max="300"
-              step="10"
+              step="1"
               value={localInterval}
               onChange={handleIntervalChange}
               className="flex-1 h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer"

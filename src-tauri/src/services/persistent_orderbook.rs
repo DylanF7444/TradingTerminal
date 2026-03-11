@@ -39,8 +39,8 @@ const MAX_RECENT_TRADES: usize = 20;
 /// Stale threshold in seconds - markets with no updates are flagged
 const STALE_THRESHOLD_SECS: i64 = 300; // 5 minutes
 
-/// Default storage interval (60 seconds)
-const DEFAULT_STORAGE_INTERVAL_MS: u64 = 60_000;
+/// Default storage interval (1 second)
+const DEFAULT_STORAGE_INTERVAL_MS: u64 = 1_000;
 
 /// What to store to the database
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -155,6 +155,8 @@ pub struct PersistentOrderbookMonitor {
     node_to_market: Arc<RwLock<HashMap<String, MarketMapping>>>,
     /// Per-node storage configuration (node_id -> config)
     storage_configs: Arc<RwLock<HashMap<String, MarketStorageConfig>>>,
+    /// Last stored values per node for change detection (node_id -> last stored value + metadata_str)
+    last_stored: Arc<RwLock<HashMap<String, (f64, String)>>>,
     /// Reference to the WebSocket manager
     ws_manager: Arc<WebSocketManager>,
     /// Database connection for persisting orderbook snapshots
@@ -177,6 +179,7 @@ impl PersistentOrderbookMonitor {
             cache: Arc::new(RwLock::new(HashMap::new())),
             node_to_market: Arc::new(RwLock::new(HashMap::new())),
             storage_configs: Arc::new(RwLock::new(HashMap::new())),
+            last_stored: Arc::new(RwLock::new(HashMap::new())),
             ws_manager,
             db,
             app_handle,
@@ -512,8 +515,10 @@ impl PersistentOrderbookMonitor {
             return;
         }
 
-        // Write to database
+        // Write to database, skipping entries where values haven't changed
+        let mut last_stored = self.last_stored.write().await;
         let conn = self.db.lock().await;
+        let mut stored_count = 0usize;
         for (node_id, mode, cached) in &to_write {
             let timestamp = Utc::now().timestamp();
 
@@ -544,11 +549,22 @@ impl PersistentOrderbookMonitor {
                     });
 
                     let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
+
+                    // Skip if value and metadata are identical to last stored
+                    if let Some((prev_mid, prev_meta)) = last_stored.get(node_id) {
+                        if (mid - prev_mid).abs() < f64::EPSILON && *prev_meta == metadata_str {
+                            continue;
+                        }
+                    }
+
                     if let Err(e) = conn.execute(
                         "INSERT INTO timeseries (timestamp, source_id, metric_type, value, metadata) VALUES (?1, ?2, ?3, ?4, ?5)",
                         rusqlite::params![timestamp, node_id, "orderbook:bbo", mid, metadata_str],
                     ) {
                         eprintln!("[PersistentOrderbook] DB write error for {}: {}", node_id, e);
+                    } else {
+                        last_stored.insert(node_id.clone(), (mid, metadata_str));
+                        stored_count += 1;
                     }
                 }
                 MarketStorageMode::FullOrderbook => {
@@ -570,21 +586,34 @@ impl PersistentOrderbookMonitor {
                     });
 
                     let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
+
+                    // Skip if value and metadata are identical to last stored
+                    if let Some((prev_mid, prev_meta)) = last_stored.get(node_id) {
+                        if (mid - prev_mid).abs() < f64::EPSILON && *prev_meta == metadata_str {
+                            continue;
+                        }
+                    }
+
                     if let Err(e) = conn.execute(
                         "INSERT INTO timeseries (timestamp, source_id, metric_type, value, metadata) VALUES (?1, ?2, ?3, ?4, ?5)",
                         rusqlite::params![timestamp, node_id, "orderbook:full", mid, metadata_str],
                     ) {
                         eprintln!("[PersistentOrderbook] DB write error for {}: {}", node_id, e);
+                    } else {
+                        last_stored.insert(node_id.clone(), (mid, metadata_str));
+                        stored_count += 1;
                     }
                 }
                 MarketStorageMode::Off => {} // Already filtered above
             }
         }
 
-        println!(
-            "[PersistentOrderbook] Flushed {} market snapshots to database",
-            to_write.len()
-        );
+        if stored_count > 0 {
+            println!(
+                "[PersistentOrderbook] Flushed {}/{} market snapshots to database (skipped unchanged)",
+                stored_count, to_write.len()
+            );
+        }
     }
 
     // ========================================================================

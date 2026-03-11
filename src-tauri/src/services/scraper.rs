@@ -47,6 +47,7 @@ use crate::models::node::InfoSourceType;
 use crate::db::sqlite::{insert_timeseries, Connection};
 use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Window, Emitter};
@@ -166,7 +167,7 @@ async fn spawn_websocket_scraper(
     let storage_interval_ms = config.get("storageIntervalMs")
         .and_then(|v| v.as_u64())
         .or_else(|| config.get("storage_interval_seconds").and_then(|v| v.as_u64()).map(|s| s * 1000))
-        .unwrap_or(60000); // Default: 1 minute
+        .unwrap_or(1000); // Default: 1 second
     
     let include_orderbook = config.get("includeOrderbook")
         .and_then(|v| v.as_bool())
@@ -256,14 +257,16 @@ async fn run_scraper(
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
     let mut retry_count = 0;
     let mut consecutive_errors = 0;
-    
+    // Track last stored values per metric_type for change detection
+    let mut last_values: HashMap<String, (f64, Option<JsonValue>)> = HashMap::new();
+
     println!("Scraper started for {}: interval={}s", node_id, config.interval_seconds);
-    
+
     loop {
         tokio::select! {
             // Regular interval tick
             _ = interval.tick() => {
-                match scrape_once(&node_id, &source_type, &config, &client, &db, &window).await {
+                match scrape_once(&node_id, &source_type, &config, &client, &db, &window, &mut last_values).await {
                     Ok(()) => {
                         retry_count = 0;
                         consecutive_errors = 0;
@@ -309,6 +312,7 @@ async fn scrape_once(
     client: &Client,
     db: &Arc<Mutex<Connection>>,
     window: &Window,
+    last_values: &mut HashMap<String, (f64, Option<JsonValue>)>,
 ) -> Result<(), anyhow::Error> {
     
     let start_time = std::time::Instant::now();
@@ -344,11 +348,22 @@ async fn scrape_once(
         }
     };
     
-    // Store in database
+    // Store in database (skip if data unchanged)
     {
         let conn = db.lock().await;
         for point in &data.points {
-            insert_timeseries(&conn, node_id, &point.metric_type, point.value, point.metadata.clone())?;
+            // Check if this metric's value and metadata are the same as last time
+            let changed = match last_values.get(&point.metric_type) {
+                Some((prev_value, prev_metadata)) => {
+                    (point.value - prev_value).abs() > f64::EPSILON
+                        || point.metadata != *prev_metadata
+                }
+                None => true, // First time seeing this metric
+            };
+            if changed {
+                insert_timeseries(&conn, node_id, &point.metric_type, point.value, point.metadata.clone())?;
+                last_values.insert(point.metric_type.clone(), (point.value, point.metadata.clone()));
+            }
         }
     }
     
