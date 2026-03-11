@@ -68,6 +68,7 @@ import { Clock } from './components/UI/Clock';
 import { NodeDetailsPanelExtracted as NodeDetailsPanel } from './components/Nodes/NodeDetailsPanel.extracted';
 import { RawStreamTab } from './components/Nodes/RawStreamTab';
 import { PanelErrorBoundary } from './components/UI/ErrorBoundary';
+import { UptimeDisplay } from './components/UI/UptimeDisplay';
 
 // UI components
 import { Modal } from './components/UI/Modal';
@@ -800,6 +801,7 @@ function Toolbar({
       </button>
       {connectionModeIndicator}
       <div className="flex-1" />
+      <UptimeDisplay />
       <button onClick={onOpenSettings} className="p-2 hover:bg-gray-800 rounded-lg text-gray-400" title="Settings">
         <SettingsIcon />
       </button>
