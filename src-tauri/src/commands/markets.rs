@@ -1138,11 +1138,12 @@ fn parse_kalshi_market(
 ) -> Option<MarketSearchResult> {
     let ticker = market["ticker"].as_str().unwrap_or("").to_string();
     let title = market["title"].as_str().unwrap_or("").to_string();
-    let subtitle = market["subtitle"].as_str().unwrap_or("").to_string();
+    let yes_sub_title = market["yes_sub_title"].as_str().unwrap_or("").to_string();
+    let no_sub_title = market["no_sub_title"].as_str().unwrap_or("").to_string();
 
     // Client-side filtering by query
     if !query_lower.is_empty() {
-        let search_text = format!("{} {} {} {}", event_title, title, subtitle, ticker).to_lowercase();
+        let search_text = format!("{} {} {} {} {}", event_title, title, yes_sub_title, no_sub_title, ticker).to_lowercase();
         if !search_text.contains(query_lower) {
             return None;
         }
@@ -1166,7 +1167,10 @@ fn parse_kalshi_market(
         .unwrap_or("unknown")
         .to_string();
 
-    let display_title = if title.is_empty() {
+    // Combine title with yes_sub_title to show the specific outcome (e.g., candidate name)
+    let display_title = if !yes_sub_title.is_empty() && !title.contains(&yes_sub_title) {
+        format!("{} ({})", title, yes_sub_title)
+    } else if title.is_empty() {
         event_title.to_string()
     } else {
         title.clone()
@@ -1175,7 +1179,7 @@ fn parse_kalshi_market(
     Some(MarketSearchResult {
         id: ticker.clone(),
         title: display_title,
-        description: subtitle,
+        description: yes_sub_title,
         image_url: event_image.clone(),
         yes_price,
         no_price,
@@ -1789,7 +1793,16 @@ fn parse_kalshi_event(event: &JsonValue, query_lower: &str) -> Option<EventSearc
                         .as_str()
                         .unwrap_or(event_title)
                         .to_string();
-                    let subtitle = m["subtitle"].as_str().unwrap_or("").to_string();
+                    let yes_sub_title = m["yes_sub_title"].as_str().unwrap_or("").to_string();
+                    let no_sub_title = m["no_sub_title"].as_str().unwrap_or("").to_string();
+                    // Combine title with yes_sub_title to show the specific outcome (e.g., candidate name)
+                    let display_title = if !yes_sub_title.is_empty() && !title.contains(&yes_sub_title) {
+                        format!("{} ({})", title, yes_sub_title)
+                    } else if !no_sub_title.is_empty() && !title.contains(&no_sub_title) {
+                        format!("{} ({})", title, no_sub_title)
+                    } else {
+                        title
+                    };
                     let yes_price = m["yes_ask"]
                         .as_f64()
                         .or_else(|| m["last_price"].as_f64())
@@ -1808,8 +1821,8 @@ fn parse_kalshi_event(event: &JsonValue, query_lower: &str) -> Option<EventSearc
 
                     Some(EventMarketItem {
                         id: ticker.clone(),
-                        title,
-                        description: subtitle,
+                        title: display_title,
+                        description: yes_sub_title,
                         yes_price,
                         no_price,
                         volume,
