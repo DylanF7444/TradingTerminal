@@ -346,9 +346,31 @@ export const selectHealthyMarkets = (state: MarketsSlice) => {
   return state.markets.filter(m => {
     const status = state.marketStatus[m.id];
     if (!status?.connected) return false;
-    
+
     // Check heartbeat within last 30 seconds
     const lastHeartbeat = new Date(status.lastHeartbeat).getTime();
     return (now - lastHeartbeat) < 30000;
   });
+};
+
+// Selector: get all markets sharing the same event group ID
+export const selectMarketsByEventGroup = (state: MarketsSlice, eventGroupId: string) => {
+  return state.markets.filter(m => {
+    const metadata = m.metadata as Record<string, any>;
+    return metadata?.event_group_id === eventGroupId;
+  });
+};
+
+// Selector: group all markets by their event_group_id
+export const selectMarketGroups = (state: MarketsSlice): Record<string, Node[]> => {
+  const groups: Record<string, Node[]> = {};
+  for (const market of state.markets) {
+    const metadata = market.metadata as Record<string, any>;
+    const groupId = metadata?.event_group_id;
+    if (groupId) {
+      if (!groups[groupId]) groups[groupId] = [];
+      groups[groupId].push(market);
+    }
+  }
+  return groups;
 };

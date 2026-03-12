@@ -6,7 +6,11 @@
 // (Polymarket, Kalshi) to the strategy graph. Displays a list of
 // existing market connections with status indicators, and a modal
 // flow for adding new markets (platform selection, credential entry,
-// market search/browsing).
+// event search/browsing with multi-market selection).
+//
+// Users search for events (groups of markets), select one or more
+// markets from an event, and all selected markets are added as nodes.
+// Multi-market selections share an event_group_id in metadata.
 //
 // Stored API keys are retrieved from the backend SQLite database and
 // pre-populated when available. Credentials are cleared from frontend
@@ -14,35 +18,34 @@
 //
 // Key props: onAddMarket, existingMarkets, className.
 //
-// Integrates with the Tauri backend via add_market_cmd for credential
-// validation, WebSocket establishment, and Market node creation.
-//
 // ============================================================================
 
 import { useState, useCallback, useEffect } from 'react';
-import { 
-  TrendingUp, 
-  Wallet, 
-  Link, 
-  Link2, 
-  Plus, 
-  ExternalLink, 
-  AlertCircle, 
-  CheckCircle2, 
-  Loader2, 
-  Eye, 
+import {
+  TrendingUp,
+  Wallet,
+  Link,
+  Link2,
+  Plus,
+  ExternalLink,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+  Eye,
   EyeOff,
   RefreshCw,
   Unplug,
   Shield,
   Key,
   Search,
-  Type
+  Type,
+  X
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
 import MarketBrowser from './MarketBrowser';
+import type { SelectedEventMarket } from '../../types/markets';
 
 // ============================================================================
 // API KEY TYPES
@@ -146,53 +149,47 @@ interface MarketPanelProps {
   className?: string;
 }
 
-export default function MarketPanel({ 
-  onAddMarket, 
+export default function MarketPanel({
+  onAddMarket,
   existingMarkets = [],
-  className = '' 
+  className = ''
 }: MarketPanelProps) {
   // Modal and selection state
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedPlatform, setSelectedPlatform] = useState<MarketType | null>(null);
   const [step, setStep] = useState<'select' | 'configure'>('select');
-  
+
   // Form state (sensitive - cleared aggressively)
   const [credentials, setCredentials] = useState<Record<string, string>>({});
-  const [marketId, setMarketId] = useState('');
-  const [selectedMarketTitle, setSelectedMarketTitle] = useState('');
-  const [marketTokenIds, setMarketTokenIds] = useState<string[]>([]);
   const [marketInputMode, setMarketInputMode] = useState<'search' | 'manual'>('search');
   const [environment, setEnvironment] = useState<'demo' | 'production'>('demo');
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
-  
-  // Extended market details from search results (static info)
-  const [marketDetails, setMarketDetails] = useState<{
-    title?: string;
-    description?: string;
-    image_url?: string;
-    category?: string;
-    end_date?: string;
-    status?: string;
-    slug?: string;
-    token_ids?: string[];
-    condition_id?: string;
-    created_at?: string;
+
+  // Event-based market selection (from search)
+  const [selectedEvent, setSelectedEvent] = useState<{
+    eventId: string;
+    eventTitle: string;
+    markets: SelectedEventMarket[];
   } | null>(null);
-  
+
+  // Manual entry fallback (single market)
+  const [manualMarketId, setManualMarketId] = useState('');
+
   // Stored API key state
   const [hasStoredKey, setHasStoredKey] = useState(false);
   const [useStoredKey, setUseStoredKey] = useState(true);
   const [isLoadingKey, setIsLoadingKey] = useState(false);
-  
+
   // UI state
   const [localError, setLocalError] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
-  
+  const [connectProgress, setConnectProgress] = useState<{ current: number; total: number } | null>(null);
+
   // Backend command hook
-  const { 
-    execute: addMarket, 
-    loading: isConnecting, 
-    error: apiError 
+  const {
+    execute: addMarket,
+    loading: isConnecting,
+    error: apiError
   } = useTauriCommand<Node, {
     marketType: MarketType;
     apiCredentials: Record<string, any>;
@@ -214,9 +211,8 @@ export default function MarketPanel({
   // Cleanup sensitive data on unmount or modal close
   const clearSensitiveData = useCallback(() => {
     setCredentials({});
-    setMarketId('');
-    setSelectedMarketTitle('');
-    setMarketTokenIds([]);
+    setSelectedEvent(null);
+    setManualMarketId('');
     setMarketInputMode('search');
     setLocalError(null);
     setSelectedPlatform(null);
@@ -224,7 +220,7 @@ export default function MarketPanel({
     setShowPasswords({});
     setHasStoredKey(false);
     setUseStoredKey(true);
-    setMarketDetails(null);
+    setConnectProgress(null);
   }, []);
 
   useEffect(() => {
@@ -238,32 +234,32 @@ export default function MarketPanel({
     setSelectedPlatform(platform);
     setStep('configure');
     setIsLoadingKey(true);
-    
+
     // Pre-populate with empty strings for required fields
     const emptyCreds: Record<string, string> = {};
     PLATFORM_CONFIGS[platform].fields.forEach(f => {
       if (f.key !== 'environment') emptyCreds[f.key] = '';
     });
     setCredentials(emptyCreds);
-    
+
     // Check for stored API key
     try {
       const platformName = platform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
-      const keyResponse = await invoke<ApiKeyResponse>('get_api_key_cmd', { 
-        platform: platformName 
+      const keyResponse = await invoke<ApiKeyResponse>('get_api_key_cmd', {
+        platform: platformName
       });
-      
+
       if (keyResponse.has_key) {
         setHasStoredKey(true);
         setUseStoredKey(true);
-        
+
         // Pre-populate credentials from stored key
         const storedCreds: Record<string, string> = {};
         if (keyResponse.api_key) storedCreds.api_key = keyResponse.api_key;
         if (keyResponse.api_secret) storedCreds.api_secret = keyResponse.api_secret;
         if (keyResponse.private_key) storedCreds.private_key = keyResponse.private_key;
         setCredentials(storedCreds);
-        
+
         if (keyResponse.environment) {
           setEnvironment(keyResponse.environment as 'demo' | 'production');
         }
@@ -296,13 +292,10 @@ export default function MarketPanel({
     if (!selectedPlatform) return;
     setIsTesting(true);
     setLocalError(null);
-    
+
     try {
-      // Note: Backend would need a test_connection command
-      // For now, we just validate format client-side
       const valid = validateCredentials(selectedPlatform, credentials);
       if (valid) {
-        // In real implementation: await invoke('test_market_connection', ...)
         await new Promise(r => setTimeout(r, 1000)); // Simulate
       }
     } catch (e) {
@@ -312,33 +305,37 @@ export default function MarketPanel({
     }
   };
 
+  // Check if we have a valid market selection
+  const hasMarketSelection = (): boolean => {
+    if (marketInputMode === 'search') {
+      return !!selectedEvent && selectedEvent.markets.length > 0;
+    }
+    return !!manualMarketId.trim();
+  };
+
   // Validate credentials format client-side
   const validateCredentials = (platform: MarketType, creds: Record<string, string>): boolean => {
     // If using stored key, skip credential validation
     if (hasStoredKey && useStoredKey) {
-      if (!marketId.trim()) {
-        setLocalError('Market ID is required');
+      if (!hasMarketSelection()) {
+        setLocalError('Please select at least one market');
         return false;
       }
       return true;
     }
-    
+
     const config = PLATFORM_CONFIGS[platform];
     for (const field of config.fields) {
-      // Skip environment field - it's validated separately from the credentials object
       if (field.key === 'environment') {
-        // For Kalshi, environment is always set via the separate state variable
         continue;
       }
-      // Polymarket doesn't require API keys for market data (read-only)
-      // Only validate required fields
       if (field.required && !creds[field.key]) {
         setLocalError(`${field.label} is required`);
         return false;
       }
     }
-    if (!marketId.trim()) {
-      setLocalError('Market ID is required');
+    if (!hasMarketSelection()) {
+      setLocalError('Please select at least one market');
       return false;
     }
     return true;
@@ -358,25 +355,59 @@ export default function MarketPanel({
         environment: selectedPlatform === MarketType.Kalshi ? environment : undefined
       };
 
-      const result = await addMarket({
-        marketType: selectedPlatform,
-        apiCredentials: credPayload,
-        marketConfig: { 
-          market_id: marketId.trim(),
-          question: selectedMarketTitle || undefined,
-          token_ids: marketTokenIds.length > 0 ? marketTokenIds : undefined,
-        },
-        marketDetails: marketDetails || undefined
-      });
+      if (marketInputMode === 'manual') {
+        // Manual entry: single market, no event group
+        const result = await addMarket({
+          marketType: selectedPlatform,
+          apiCredentials: credPayload,
+          marketConfig: {
+            market_id: manualMarketId.trim(),
+          },
+        });
 
-      if (result) {
-        onAddMarket?.(result);
+        if (result) {
+          onAddMarket?.(result);
+          setIsModalOpen(false);
+        }
+      } else if (selectedEvent) {
+        // Event-based: add each selected market
+        const markets = selectedEvent.markets;
+
+        // Generate shared group ID for multi-market events
+        const eventGroupId = markets.length > 1
+          ? crypto.randomUUID()
+          : undefined;
+
+        setConnectProgress({ current: 0, total: markets.length });
+
+        for (let i = 0; i < markets.length; i++) {
+          const market = markets[i];
+          setConnectProgress({ current: i + 1, total: markets.length });
+
+          const result = await addMarket({
+            marketType: selectedPlatform,
+            apiCredentials: credPayload,
+            marketConfig: {
+              market_id: market.id,
+              question: market.title,
+              token_ids: market.tokenIds.length > 0 ? market.tokenIds : undefined,
+              event_group_id: eventGroupId,
+              event_title: selectedEvent.eventTitle,
+            },
+            marketDetails: market.details || undefined,
+          });
+
+          if (result) {
+            onAddMarket?.(result);
+          }
+        }
+
+        setConnectProgress(null);
         setIsModalOpen(false);
-        // Data cleared by useEffect on modal close
       }
     } catch (err) {
-      console.error('Failed to connect market:', err);
-      // Error displayed via apiError from hook
+      console.error('Failed to connect market(s):', err);
+      setConnectProgress(null);
     }
   };
 
@@ -385,10 +416,9 @@ export default function MarketPanel({
     if (!confirm('Disconnect this market? Open positions will remain but no new trades can be placed.')) {
       return;
     }
-    
+
     try {
       await invoke('remove_market_cmd', { nodeId });
-      // Parent should refresh existingMarkets prop
     } catch (err) {
       console.error('Failed to remove market:', err);
       alert('Failed to disconnect. Please try again.');
@@ -403,6 +433,8 @@ export default function MarketPanel({
       console.error('Failed to refresh:', err);
     }
   };
+
+  const isCurrentlyConnecting = isConnecting || connectProgress !== null;
 
   return (
     <div className={`bg-gray-900 rounded-lg border border-gray-800 overflow-hidden ${className}`}>
@@ -429,24 +461,25 @@ export default function MarketPanel({
             {existingMarkets.map((market) => {
               // Type guard: Check if this is a Market node
               if (!('Market' in market.node_type)) return null;
-              
+
               const platform = market.node_type.Market;
               const config = PLATFORM_CONFIGS[platform];
               if (!config) return null;
-              
+
               const Icon = config.icon;
-              
+
               // Safely access metadata properties with type assertions
               const metadata = market.metadata as Record<string, any>;
-              // Use quality.successRate to determine connection status (same as Node component)
               const quality = metadata?.quality;
               const isConnected = quality?.successRate !== undefined && quality.successRate > 0.5;
               const latency = quality?.avgLatency;
               const balance = metadata?.balance || 0;
+              const displayName = metadata?.question || metadata?.market_id || config.name;
+              const eventTitle = metadata?.event_title;
 
               return (
-                <div 
-                  key={market.id} 
+                <div
+                  key={market.id}
                   className="px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors group"
                 >
                   <div className="flex items-center gap-3">
@@ -455,23 +488,29 @@ export default function MarketPanel({
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium text-gray-200 truncate">
-                        {metadata?.market_id || config.name}
+                        {displayName}
                       </div>
                       <div className="text-xs text-gray-500 flex items-center gap-2">
                         <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
                         {isConnected ? 'Connected' : 'Connecting...'}
+                        {eventTitle && (
+                          <>
+                            <span className="text-gray-600">&middot;</span>
+                            <span className="text-blue-400 truncate max-w-[120px]">{eventTitle}</span>
+                          </>
+                        )}
                         {latency !== undefined && (
                           <>
-                            <span className="text-gray-600">•</span>
+                            <span className="text-gray-600">&middot;</span>
                             <span className="text-blue-400">{latency.toFixed(0)}ms</span>
                           </>
                         )}
-                        <span className="text-gray-600">•</span>
+                        <span className="text-gray-600">&middot;</span>
                         <span className="text-emerald-400">${balance.toFixed(2)}</span>
                       </div>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={() => handleRefresh(market.id)}
@@ -518,7 +557,7 @@ export default function MarketPanel({
                 </h2>
                 {step === 'configure' && (
                   <p className="text-sm text-gray-500 mt-0.5">
-                    Enter your API credentials to establish connection
+                    Search for events and select markets to connect
                   </p>
                 )}
               </div>
@@ -557,7 +596,7 @@ export default function MarketPanel({
                       </p>
                       <div className="mt-4 flex items-center gap-2 text-xs text-gray-600">
                         <ExternalLink className="w-3 h-3" />
-                        <span>Get API keys →</span>
+                        <span>Get API keys &rarr;</span>
                       </div>
                     </button>
                   ))}
@@ -570,7 +609,7 @@ export default function MarketPanel({
                     onClick={() => setStep('select')}
                     className="text-sm text-gray-500 hover:text-gray-300 flex items-center gap-1"
                   >
-                    ← Back to platforms
+                    &larr; Back to platforms
                   </button>
 
                   {/* Stored Key Indicator */}
@@ -627,7 +666,7 @@ export default function MarketPanel({
                           type="button"
                           onClick={() => {
                             setMarketInputMode('manual');
-                            setMarketDetails(null);
+                            setSelectedEvent(null);
                           }}
                           className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
                             marketInputMode === 'manual'
@@ -645,31 +684,37 @@ export default function MarketPanel({
                       <div className="space-y-2">
                         <MarketBrowser
                           platform={selectedPlatform}
-                          onSelectMarket={(id, title, tokenIds, details) => {
-                            setMarketId(id);
-                            setSelectedMarketTitle(title);
-                            setMarketTokenIds(tokenIds || []);
-                            setMarketDetails(details || null);
+                          onSelectMarkets={(eventId, eventTitle, markets) => {
+                            setSelectedEvent({ eventId, eventTitle, markets });
                             setLocalError(null);
                           }}
                         />
-                        {selectedMarketTitle && (
-                          <div className="flex items-center gap-2 p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                            <div className="min-w-0 flex-1">
-                              <p className="text-sm text-emerald-300 truncate">{selectedMarketTitle}</p>
-                              <p className="text-xs text-gray-500 font-mono truncate">{marketId}</p>
+                        {selectedEvent && (
+                          <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-emerald-300 truncate">{selectedEvent.eventTitle}</p>
+                                <p className="text-xs text-gray-500">
+                                  {selectedEvent.markets.length} market{selectedEvent.markets.length !== 1 ? 's' : ''} selected
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => setSelectedEvent(null)}
+                                className="text-gray-500 hover:text-gray-300 flex-shrink-0"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
                             </div>
-                            <button
-                              onClick={() => {
-                                setMarketId('');
-                                setSelectedMarketTitle('');
-                                setMarketDetails(null);
-                              }}
-                              className="text-gray-500 hover:text-gray-300 flex-shrink-0"
-                            >
-                              <Link2 className="w-3.5 h-3.5" />
-                            </button>
+                            {selectedEvent.markets.length > 1 && (
+                              <div className="mt-2 space-y-0.5 pl-6">
+                                {selectedEvent.markets.map(m => (
+                                  <p key={m.id} className="text-xs text-gray-400 truncate">
+                                    &bull; {m.title}
+                                  </p>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -677,11 +722,10 @@ export default function MarketPanel({
                       <div>
                         <input
                           type="text"
-                          value={marketId}
+                          value={manualMarketId}
                           onChange={(e) => {
-                            setMarketId(e.target.value);
-                            setSelectedMarketTitle('');
-                            setMarketDetails(null);
+                            setManualMarketId(e.target.value);
+                            setLocalError(null);
                           }}
                           placeholder={selectedPlatform === MarketType.Polymarket ? "0x123... or slug-name" : "Event-contract-ticker"}
                           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 transition-colors"
@@ -713,7 +757,7 @@ export default function MarketPanel({
                             {field.label}
                             {field.required && <span className="text-red-400 ml-1">*</span>}
                           </label>
-                          
+
                           {field.type === 'select' ? (
                             <select
                               value={environment}
@@ -743,7 +787,7 @@ export default function MarketPanel({
                               )}
                             </div>
                           )}
-                          
+
                           {field.helpText && (
                             <p className="mt-1.5 text-xs text-gray-500">{field.helpText}</p>
                           )}
@@ -768,7 +812,7 @@ export default function MarketPanel({
               <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
                 <button
                   onClick={handleTestConnection}
-                  disabled={isTesting || isConnecting}
+                  disabled={isTesting || isCurrentlyConnecting}
                   className="text-sm text-gray-400 hover:text-gray-200 disabled:opacity-50 flex items-center gap-2"
                 >
                   {isTesting ? (
@@ -778,7 +822,7 @@ export default function MarketPanel({
                   )}
                   Test Connection
                 </button>
-                
+
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => setIsModalOpen(false)}
@@ -788,10 +832,15 @@ export default function MarketPanel({
                   </button>
                   <button
                     onClick={handleConnect}
-                    disabled={isConnecting}
+                    disabled={isCurrentlyConnecting}
                     className="flex items-center gap-2 px-6 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors text-sm font-medium"
                   >
-                    {isConnecting ? (
+                    {connectProgress ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Adding {connectProgress.current}/{connectProgress.total}...
+                      </>
+                    ) : isConnecting ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Connecting...
@@ -799,7 +848,7 @@ export default function MarketPanel({
                     ) : (
                       <>
                         <Link className="w-4 h-4" />
-                        Connect
+                        Connect{selectedEvent && selectedEvent.markets.length > 1 ? ` ${selectedEvent.markets.length} markets` : ''}
                       </>
                     )}
                   </button>

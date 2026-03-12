@@ -50,8 +50,12 @@ pub use markets::{
     refresh_market_connection,
     get_market_status,
     search_markets,
+    search_events,
     MarketSearchResult,
     MarketSearchResponse,
+    EventMarketItem,
+    EventSearchResult,
+    EventSearchResponse,
     init_state as init_market_state,
     MarketState,
 };

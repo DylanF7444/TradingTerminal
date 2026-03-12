@@ -1212,6 +1212,106 @@ export interface OutcomeSelection {
 }
 
 // =============================================================================
+// EVENT SEARCH TYPES (grouped markets by event)
+// =============================================================================
+
+/**
+ * A single market within an event search result.
+ * Mirrors Rust EventMarketItem in src-tauri/src/commands/markets.rs
+ */
+export interface EventMarketItem {
+  /** Market identifier (CLOB token ID for Polymarket, ticker for Kalshi) */
+  id: string;
+  /** Human-readable market title */
+  title: string;
+  /** Short description or subtitle */
+  description: string;
+  /** Current YES price (probability 0.0 - 1.0) */
+  yes_price: number | null;
+  /** Current NO price */
+  no_price: number | null;
+  /** Trading volume */
+  volume: number | null;
+  /** Liquidity / open interest */
+  liquidity: number | null;
+  /** Market status */
+  status: string;
+  /** End date / close time */
+  end_date: string | null;
+  /** URL-friendly slug or ticker */
+  slug: string;
+  /** CLOB token IDs for Polymarket */
+  token_ids: string[];
+  /** Condition ID for Polymarket */
+  condition_id: string | null;
+}
+
+/**
+ * An event search result containing nested markets.
+ * Mirrors Rust EventSearchResult in src-tauri/src/commands/markets.rs
+ */
+export interface EventSearchResult {
+  /** Event identifier */
+  id: string;
+  /** Event title */
+  title: string;
+  /** Event description */
+  description: string;
+  /** Event image URL */
+  image_url: string | null;
+  /** Event category */
+  category: string | null;
+  /** Platform name */
+  platform: string;
+  /** Event slug */
+  slug: string;
+  /** Markets within this event */
+  markets: EventMarketItem[];
+  /** Number of markets in this event */
+  market_count: number;
+  /** Creation date */
+  created_at: string | null;
+}
+
+/**
+ * Paginated event search response.
+ * Mirrors Rust EventSearchResponse in src-tauri/src/commands/markets.rs
+ */
+export interface EventSearchResponse {
+  /** Event results for this page */
+  results: EventSearchResult[];
+  /** Whether more results may be available */
+  has_more: boolean;
+  /** Opaque cursor for next page */
+  next_cursor: string | null;
+  /** Page size used */
+  page_size: number;
+}
+
+/**
+ * A market selected by the user from an event.
+ * Used by MarketBrowser -> MarketPanel to pass selected markets.
+ */
+export interface SelectedEventMarket {
+  /** Market ID */
+  id: string;
+  /** Market title */
+  title: string;
+  /** CLOB token IDs for Polymarket */
+  tokenIds: string[];
+  /** Static details from search result */
+  details: {
+    description?: string;
+    image_url?: string;
+    category?: string;
+    end_date?: string;
+    status?: string;
+    slug?: string;
+    condition_id?: string;
+  };
+}
+
+// =============================================================================
 // CONSTANTS & ENUMERATIONS
 // =============================================================================
 

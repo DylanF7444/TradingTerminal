@@ -1,96 +1,49 @@
 // ============================================================================
-// MARKET BROWSER / SEARCH COMPONENT
+// EVENT BROWSER / SEARCH COMPONENT
 // ============================================================================
 //
 // Module: components/Markets/MarketBrowser.tsx
-// Purpose: Search and browse available prediction markets on Polymarket/Kalshi
+// Purpose: Search and browse prediction market events on Polymarket/Kalshi
 //
 // OVERVIEW:
-// Provides a search interface for discovering markets on supported platforms.
-// Users can search by keyword, browse results, and select a market to populate
-// the Market ID field in the MarketPanel connect flow.
+// Provides a search interface for discovering events (groups of markets) on
+// supported platforms. Users search by keyword, browse event results, expand
+// events to see nested markets, and select one or more markets to add.
+//
+// For single-market events, clicking the event directly selects the market.
+// For multi-market events, the user expands the event card and selects
+// individual markets via checkboxes.
 //
 // Features:
-// - Debounced search input (300ms delay)
-// - Platform-specific search (Polymarket Gamma API, Kalshi public API)
-// - Result cards showing title, price, volume, category
-// - Click-to-select fills Market ID in parent component
-// - Toggle between "Search" and "Manual Entry" modes
-// - Loading and error states
+// - Debounced search input (350ms delay)
+// - Platform-specific event search (Polymarket /events API, Kalshi /events API)
+// - Expandable event cards with nested market selection
+// - Single-market events auto-select on click
+// - Multi-market events with checkbox selection and "Select All"
+// - Loading, error, and pagination states
 //
-// ARCHITECTURE:
-// MarketBrowser
-//   ├── SearchInput (debounced text field)
-//   ├── ResultsList (scrollable market cards)
-//   │   └── MarketCard (individual result with price/volume)
-//   └── EmptyState / ErrorState
-//
-// Backend Command: search_markets_cmd (Rust, src-tauri/src/commands/markets.rs)
-//   - Polymarket: queries gamma-api.polymarket.com/markets
+// Backend Command: search_events_cmd (Rust, src-tauri/src/commands/markets.rs)
+//   - Polymarket: queries gamma-api.polymarket.com/events
 //   - Kalshi: queries api.elections.kalshi.com/trade-api/v2/events
-//
-// PROPS:
-// - platform: MarketType - which platform to search
-// - onSelectMarket: (id: string, title: string) => void - callback when market selected
-// - className?: string - additional styling
 //
 // ============================================================================
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Search, Loader2, TrendingUp, BarChart3, Clock, Tag, AlertCircle, X, ChevronDown } from 'lucide-react';
+import { Search, Loader2, TrendingUp, BarChart3, Tag, AlertCircle, X, ChevronDown, ChevronRight, Check, Layers } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType } from '../../types/nodes';
+import type { EventSearchResult, EventSearchResponse, EventMarketItem, SelectedEventMarket } from '../../types/markets';
 
 // ============================================================================
 // TYPES
 // ============================================================================
 
-/** Search result from the backend search_markets_cmd */
-export interface MarketSearchResult {
-  id: string;
-  title: string;
-  description: string;
-  image_url: string | null;
-  yes_price: number | null;
-  no_price: number | null;
-  volume_24h: number | null;
-  liquidity: number | null;
-  category: string | null;
-  status: string;
-  end_date: string | null;
-  created_at: string | null;
-  platform: string;
-  slug: string;
-  /** CLOB token IDs for Polymarket (needed for WebSocket orderbook subscription) */
-  token_ids?: string[];
-  /** Condition ID for Polymarket REST API queries */
-  condition_id?: string | null;
-}
-
-/** Paginated response from the backend search_markets_cmd */
-interface MarketSearchResponse {
-  results: MarketSearchResult[];
-  has_more: boolean;
-  next_cursor: string | null;
-  page_size: number;
-}
-
 interface MarketBrowserProps {
   platform: MarketType;
-  onSelectMarket: (
-    id: string, 
-    title: string, 
-    tokenIds?: string[],
-    details?: {
-      description?: string;
-      image_url?: string;
-      category?: string;
-      end_date?: string;
-      status?: string;
-      slug?: string;
-      condition_id?: string;
-      created_at?: string;
-    }
+  onSelectMarkets: (
+    eventId: string,
+    eventTitle: string,
+    markets: SelectedEventMarket[]
   ) => void;
   className?: string;
 }
@@ -101,20 +54,24 @@ interface MarketBrowserProps {
 
 export default function MarketBrowser({
   platform,
-  onSelectMarket,
+  onSelectMarkets,
   className = '',
 }: MarketBrowserProps) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<MarketSearchResult[]>([]);
+  const [results, setResults] = useState<EventSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Event expansion and market selection state
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [selectedMarkets, setSelectedMarkets] = useState<Record<string, Set<string>>>({});
+  const [confirmedEventId, setConfirmedEventId] = useState<string | null>(null);
 
   const platformName = platform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
 
@@ -139,7 +96,7 @@ export default function MarketBrowser({
       setHasSearched(true);
 
       try {
-        const response = await invoke<MarketSearchResponse>('search_markets_cmd', {
+        const response = await invoke<EventSearchResponse>('search_events_cmd', {
           platform: platformName,
           query: searchQuery.trim(),
           cursor: cursor,
@@ -149,12 +106,15 @@ export default function MarketBrowser({
           setResults((prev) => [...prev, ...response.results]);
         } else {
           setResults(response.results);
+          setExpandedEventId(null);
+          setSelectedMarkets({});
+          setConfirmedEventId(null);
         }
 
         setHasMore(response.has_more);
         setNextCursor(response.next_cursor);
       } catch (err) {
-        console.error('Market search failed:', err);
+        console.error('Event search failed:', err);
         setError(typeof err === 'string' ? err : 'Search failed. Please try again.');
         if (!append) {
           setResults([]);
@@ -206,60 +166,101 @@ export default function MarketBrowser({
     };
   }, []);
 
-  // Handle market selection
-  const handleSelect = (result: MarketSearchResult) => {
-    setSelectedId(result.id);
-    // Use result.id for both platforms:
-    // - Polymarket: id is now the first CLOB token ID (needed for orderbook WS)
-    // - Kalshi: id is the ticker
-    onSelectMarket(
-      result.id, 
-      result.title, 
-      result.token_ids,
-      {
-        description: result.description || undefined,
-        image_url: result.image_url || undefined,
-        category: result.category || undefined,
-        end_date: result.end_date || undefined,
-        status: result.status || undefined,
-        slug: result.slug || undefined,
-        condition_id: result.condition_id || undefined,
-        created_at: result.created_at || undefined,
-      }
-    );
+  // Build SelectedEventMarket from EventMarketItem
+  const buildSelectedMarket = (market: EventMarketItem, event: EventSearchResult): SelectedEventMarket => ({
+    id: market.id,
+    title: market.title,
+    tokenIds: market.token_ids || [],
+    details: {
+      description: market.description || undefined,
+      image_url: event.image_url || undefined,
+      category: event.category || undefined,
+      end_date: market.end_date || undefined,
+      status: market.status || undefined,
+      slug: market.slug || undefined,
+      condition_id: market.condition_id || undefined,
+    },
+  });
+
+  // Handle event card click
+  const handleEventClick = (event: EventSearchResult) => {
+    if (event.market_count === 1) {
+      // Single-market event: auto-select and confirm
+      const market = event.markets[0];
+      setConfirmedEventId(event.id);
+      setExpandedEventId(null);
+      onSelectMarkets(event.id, event.title, [buildSelectedMarket(market, event)]);
+    } else {
+      // Multi-market event: toggle expansion
+      setExpandedEventId((prev) => (prev === event.id ? null : event.id));
+    }
   };
 
-  // Format price as percentage
+  // Toggle individual market selection within an event
+  const toggleMarketSelection = (eventId: string, marketId: string) => {
+    setSelectedMarkets((prev) => {
+      const eventSet = new Set(prev[eventId] || []);
+      if (eventSet.has(marketId)) {
+        eventSet.delete(marketId);
+      } else {
+        eventSet.add(marketId);
+      }
+      return { ...prev, [eventId]: eventSet };
+    });
+  };
+
+  // Select all markets in an event
+  const selectAllInEvent = (event: EventSearchResult) => {
+    setSelectedMarkets((prev) => ({
+      ...prev,
+      [event.id]: new Set(event.markets.map((m) => m.id)),
+    }));
+  };
+
+  // Deselect all markets in an event
+  const deselectAllInEvent = (eventId: string) => {
+    setSelectedMarkets((prev) => ({
+      ...prev,
+      [eventId]: new Set<string>(),
+    }));
+  };
+
+  // Confirm selection of markets from an event
+  const handleConfirmSelection = (event: EventSearchResult) => {
+    const selected = selectedMarkets[event.id];
+    if (!selected || selected.size === 0) return;
+
+    const chosenMarkets: SelectedEventMarket[] = event.markets
+      .filter((m) => selected.has(m.id))
+      .map((m) => buildSelectedMarket(m, event));
+
+    setConfirmedEventId(event.id);
+    onSelectMarkets(event.id, event.title, chosenMarkets);
+  };
+
+  // Format price as cents
   const formatPrice = (price: number | null): string => {
-    if (price === null || price === undefined) return '—';
-    return `${(price * 100).toFixed(1)}¢`;
+    if (price === null || price === undefined) return '\u2014';
+    return `${(price * 100).toFixed(1)}\u00A2`;
   };
 
   // Format volume
   const formatVolume = (vol: number | null): string => {
-    if (vol === null || vol === undefined) return '—';
+    if (vol === null || vol === undefined) return '\u2014';
     if (vol >= 1_000_000) return `$${(vol / 1_000_000).toFixed(1)}M`;
     if (vol >= 1_000) return `$${(vol / 1_000).toFixed(1)}K`;
     return `$${vol.toFixed(0)}`;
   };
 
-  // Format end date
-  const formatEndDate = (dateStr: string | null): string => {
-    if (!dateStr) return '';
-    try {
-      const date = new Date(dateStr);
-      const now = new Date();
-      const diffMs = date.getTime() - now.getTime();
-      const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-      if (diffDays < 0) return 'Ended';
-      if (diffDays === 0) return 'Today';
-      if (diffDays === 1) return 'Tomorrow';
-      if (diffDays < 30) return `${diffDays}d`;
-      if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo`;
-      return `${Math.floor(diffDays / 365)}y`;
-    } catch {
-      return '';
-    }
+  // Get selected count for an event
+  const getSelectedCount = (eventId: string): number => {
+    return selectedMarkets[eventId]?.size || 0;
+  };
+
+  // Check if all markets in event are selected
+  const isAllSelected = (event: EventSearchResult): boolean => {
+    const selected = selectedMarkets[event.id];
+    return !!selected && selected.size === event.markets.length;
   };
 
   return (
@@ -271,11 +272,11 @@ export default function MarketBrowser({
           type="text"
           value={query}
           onChange={(e) => handleQueryChange(e.target.value)}
-          placeholder={`Search ${platformName} markets...`}
+          placeholder={`Search ${platformName} events...`}
           className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-10 pr-10 py-2.5 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-emerald-500 transition-colors text-sm"
           autoFocus
         />
-        {query && (
+        {query && !isSearching && (
           <button
             onClick={() => {
               setQuery('');
@@ -284,6 +285,9 @@ export default function MarketBrowser({
               setHasMore(false);
               setNextCursor(null);
               setError(null);
+              setExpandedEventId(null);
+              setSelectedMarkets({});
+              setConfirmedEventId(null);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
           >
@@ -296,7 +300,7 @@ export default function MarketBrowser({
       </div>
 
       {/* Results */}
-      <div ref={scrollRef} className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
+      <div ref={scrollRef} className="max-h-80 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
         {error ? (
           <div className="px-4 py-6 text-center">
             <AlertCircle className="w-6 h-6 text-red-400 mx-auto mb-2" />
@@ -310,93 +314,195 @@ export default function MarketBrowser({
           </div>
         ) : results.length > 0 ? (
           <div className="divide-y divide-gray-800">
-            {results.map((result) => (
-              <button
-                key={`${result.platform}-${result.id}`}
-                onClick={() => handleSelect(result)}
-                className={`w-full text-left px-4 py-3 hover:bg-gray-800/70 transition-colors ${
-                  selectedId === result.id
-                    ? 'bg-emerald-500/10 border-l-2 border-emerald-500'
-                    : ''
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  {/* Market image or fallback icon */}
-                  {result.image_url ? (
-                    <img
-                      src={result.image_url}
-                      alt=""
-                      className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                  ) : (
-                    <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
-                      <TrendingUp className="w-5 h-5 text-gray-600" />
-                    </div>
-                  )}
+            {results.map((event) => {
+              const isExpanded = expandedEventId === event.id;
+              const isConfirmed = confirmedEventId === event.id;
+              const selectedCount = getSelectedCount(event.id);
+              const isSingleMarket = event.market_count === 1;
 
-                  <div className="flex-1 min-w-0">
-                    {/* Title */}
-                    <p className="text-sm font-medium text-gray-200 truncate leading-tight">
-                      {result.title}
-                    </p>
+              return (
+                <div key={`${event.platform}-${event.id}`}>
+                  {/* Event Header Card */}
+                  <button
+                    onClick={() => handleEventClick(event)}
+                    className={`w-full text-left px-4 py-3 hover:bg-gray-800/70 transition-colors ${
+                      isConfirmed
+                        ? 'bg-emerald-500/10 border-l-2 border-emerald-500'
+                        : isExpanded
+                          ? 'bg-gray-800/50'
+                          : ''
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      {/* Event image or fallback */}
+                      {event.image_url ? (
+                        <img
+                          src={event.image_url}
+                          alt=""
+                          className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
+                          <TrendingUp className="w-5 h-5 text-gray-600" />
+                        </div>
+                      )}
 
-                    {/* Description (if short enough) */}
-                    {result.description && (
-                      <p className="text-xs text-gray-500 truncate mt-0.5">
-                        {result.description}
-                      </p>
-                    )}
+                      <div className="flex-1 min-w-0">
+                        {/* Title */}
+                        <p className="text-sm font-medium text-gray-200 truncate leading-tight">
+                          {event.title}
+                        </p>
 
-                    {/* Metrics row */}
-                    <div className="flex items-center gap-3 mt-1.5 text-xs">
-                      {/* YES price */}
-                      {result.yes_price !== null && (
-                        <span className="flex items-center gap-1 text-emerald-400">
-                          <span className="font-semibold">
-                            {formatPrice(result.yes_price)}
+                        {/* Metrics row */}
+                        <div className="flex items-center gap-3 mt-1.5 text-xs">
+                          {/* Market count badge */}
+                          <span className="flex items-center gap-1 text-blue-400">
+                            <Layers className="w-3 h-3" />
+                            {event.market_count} market{event.market_count !== 1 ? 's' : ''}
                           </span>
-                          <span className="text-gray-600">YES</span>
-                        </span>
-                      )}
 
-                      {/* Volume */}
-                      {result.volume_24h !== null && (
-                        <span className="flex items-center gap-1 text-gray-400">
-                          <BarChart3 className="w-3 h-3" />
-                          {formatVolume(result.volume_24h)}
-                        </span>
-                      )}
+                          {/* Category */}
+                          {event.category && (
+                            <span className="flex items-center gap-1 text-gray-500">
+                              <Tag className="w-3 h-3" />
+                              {event.category}
+                            </span>
+                          )}
 
-                      {/* Category */}
-                      {result.category && (
-                        <span className="flex items-center gap-1 text-gray-500">
-                          <Tag className="w-3 h-3" />
-                          {result.category}
-                        </span>
-                      )}
+                          {/* Single market: show YES price inline */}
+                          {isSingleMarket && event.markets[0]?.yes_price !== null && (
+                            <span className="flex items-center gap-1 text-emerald-400">
+                              <span className="font-semibold">
+                                {formatPrice(event.markets[0].yes_price)}
+                              </span>
+                              <span className="text-gray-600">YES</span>
+                            </span>
+                          )}
+                        </div>
+                      </div>
 
-                      {/* End date */}
-                      {result.end_date && (
-                        <span className="flex items-center gap-1 text-gray-500">
-                          <Clock className="w-3 h-3" />
-                          {formatEndDate(result.end_date)}
+                      {/* Right side: expand indicator or confirmed badge */}
+                      {isConfirmed ? (
+                        <span className="text-emerald-400 text-xs font-medium flex-shrink-0 mt-1">
+                          Selected
                         </span>
+                      ) : isSingleMarket ? null : (
+                        <div className="flex items-center gap-2 flex-shrink-0 mt-1">
+                          {selectedCount > 0 && (
+                            <span className="text-xs text-emerald-400 font-medium">
+                              {selectedCount}
+                            </span>
+                          )}
+                          {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-gray-500" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-gray-500" />
+                          )}
+                        </div>
                       )}
                     </div>
-                  </div>
+                  </button>
 
-                  {/* Selection indicator */}
-                  {selectedId === result.id && (
-                    <span className="text-emerald-400 text-xs font-medium flex-shrink-0 mt-1">
-                      Selected
-                    </span>
+                  {/* Expanded Market List */}
+                  {isExpanded && !isSingleMarket && (
+                    <div className="bg-gray-950/50 border-t border-gray-800">
+                      {/* Select All / Deselect All */}
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-gray-800/50">
+                        <span className="text-xs text-gray-500">
+                          {selectedCount} of {event.market_count} selected
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (isAllSelected(event)) {
+                              deselectAllInEvent(event.id);
+                            } else {
+                              selectAllInEvent(event);
+                            }
+                          }}
+                          className="text-xs text-blue-400 hover:text-blue-300"
+                        >
+                          {isAllSelected(event) ? 'Deselect all' : 'Select all'}
+                        </button>
+                      </div>
+
+                      {/* Market Rows */}
+                      <div className="max-h-48 overflow-y-auto">
+                        {event.markets.map((market) => {
+                          const isMarketSelected = selectedMarkets[event.id]?.has(market.id) || false;
+
+                          return (
+                            <button
+                              key={market.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleMarketSelection(event.id, market.id);
+                              }}
+                              className={`w-full text-left px-4 py-2 flex items-center gap-3 hover:bg-gray-800/50 transition-colors ${
+                                isMarketSelected ? 'bg-emerald-500/5' : ''
+                              }`}
+                            >
+                              {/* Checkbox */}
+                              <div
+                                className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
+                                  isMarketSelected
+                                    ? 'border-emerald-500 bg-emerald-500'
+                                    : 'border-gray-600'
+                                }`}
+                              >
+                                {isMarketSelected && (
+                                  <Check className="w-3 h-3 text-white" />
+                                )}
+                              </div>
+
+                              {/* Market info */}
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-gray-300 truncate">
+                                  {market.title}
+                                </p>
+                              </div>
+
+                              {/* YES price */}
+                              {market.yes_price !== null && (
+                                <span className="text-xs text-emerald-400 font-mono flex-shrink-0">
+                                  {formatPrice(market.yes_price)}
+                                </span>
+                              )}
+
+                              {/* Volume */}
+                              {market.volume !== null && (
+                                <span className="text-xs text-gray-500 flex-shrink-0 flex items-center gap-1">
+                                  <BarChart3 className="w-3 h-3" />
+                                  {formatVolume(market.volume)}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Confirm Selection Button */}
+                      {selectedCount > 0 && (
+                        <div className="px-4 py-2 border-t border-gray-800/50">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleConfirmSelection(event);
+                            }}
+                            className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition-colors"
+                          >
+                            Add {selectedCount} market{selectedCount !== 1 ? 's' : ''}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-              </button>
-            ))}
+              );
+            })}
 
             {/* Load More button */}
             {hasMore && (
@@ -413,7 +519,7 @@ export default function MarketBrowser({
                 ) : (
                   <>
                     <ChevronDown className="w-4 h-4" />
-                    Load more markets
+                    Load more events
                   </>
                 )}
               </button>
@@ -422,12 +528,12 @@ export default function MarketBrowser({
         ) : hasSearched && !isSearching ? (
           <div className="px-4 py-8 text-center text-gray-500 text-sm">
             <Search className="w-6 h-6 mx-auto mb-2 opacity-50" />
-            No markets found for "{query}"
+            No events found for "{query}"
           </div>
         ) : !hasSearched ? (
           <div className="px-4 py-8 text-center text-gray-500 text-sm">
             <Search className="w-6 h-6 mx-auto mb-2 opacity-50" />
-            Type to search {platformName} markets
+            Type to search {platformName} events
           </div>
         ) : null}
       </div>
@@ -435,7 +541,7 @@ export default function MarketBrowser({
       {/* Result count */}
       {results.length > 0 && (
         <p className="text-xs text-gray-600 text-right">
-          {results.length} market{results.length !== 1 ? 's' : ''} shown{hasMore ? ' — scroll for more' : ''}
+          {results.length} event{results.length !== 1 ? 's' : ''} shown{hasMore ? ' \u2014 scroll for more' : ''}
         </p>
       )}
     </div>

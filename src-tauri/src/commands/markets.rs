@@ -933,6 +933,83 @@ pub struct MarketSearchResponse {
     pub page_size: u32,
 }
 
+// ============================================================================
+// EVENT SEARCH (grouped markets by event)
+// ============================================================================
+
+/// A single market within an event search result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventMarketItem {
+    /// Market identifier (CLOB token ID for Polymarket, ticker for Kalshi)
+    pub id: String,
+    /// Human-readable market title (groupItemTitle for Polymarket, title for Kalshi)
+    pub title: String,
+    /// Short description or subtitle
+    pub description: String,
+    /// Current YES price (probability 0.0 - 1.0)
+    pub yes_price: Option<f64>,
+    /// Current NO price
+    pub no_price: Option<f64>,
+    /// Trading volume
+    #[serde(default)]
+    pub volume: Option<f64>,
+    /// Liquidity / open interest
+    #[serde(default)]
+    pub liquidity: Option<f64>,
+    /// Market status
+    pub status: String,
+    /// End date / close time
+    #[serde(default)]
+    pub end_date: Option<String>,
+    /// URL-friendly slug or ticker
+    pub slug: String,
+    /// CLOB token IDs for Polymarket
+    #[serde(default)]
+    pub token_ids: Vec<String>,
+    /// Condition ID for Polymarket
+    #[serde(default)]
+    pub condition_id: Option<String>,
+}
+
+/// An event search result containing nested markets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSearchResult {
+    /// Event identifier
+    pub id: String,
+    /// Event title
+    pub title: String,
+    /// Event description
+    pub description: String,
+    /// Event image URL
+    pub image_url: Option<String>,
+    /// Event category
+    pub category: Option<String>,
+    /// Platform name
+    pub platform: String,
+    /// Event slug
+    pub slug: String,
+    /// Markets within this event
+    pub markets: Vec<EventMarketItem>,
+    /// Number of markets in this event
+    pub market_count: usize,
+    /// Creation date
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Paginated event search response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSearchResponse {
+    /// Event results for this page
+    pub results: Vec<EventSearchResult>,
+    /// Whether more results may be available
+    pub has_more: bool,
+    /// Opaque cursor for next page
+    pub next_cursor: Option<String>,
+    /// Page size used
+    pub page_size: u32,
+}
+
 /// Parse a Polymarket cursor string into an API offset
 fn parse_polymarket_cursor(cursor: &Option<String>) -> Result<u32, String> {
     match cursor {
@@ -1344,5 +1421,425 @@ async fn search_kalshi(
         has_more,
         next_cursor,
         page_size: KALSHI_PAGE_SIZE,
+    })
+}
+
+// ============================================================================
+// EVENT SEARCH IMPLEMENTATION
+// ============================================================================
+
+/// Search for events on Polymarket or Kalshi, returning grouped results
+/// with nested markets per event.
+pub async fn search_events(
+    platform: String,
+    query: String,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<EventSearchResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("PredictionMarketTerminal/1.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    match platform.as_str() {
+        "Polymarket" => {
+            let page_size = limit.unwrap_or(POLYMARKET_PAGE_SIZE).min(100);
+            let api_offset = parse_polymarket_cursor(&cursor)?;
+            search_polymarket_events(&client, &query, page_size, api_offset).await
+        }
+        "Kalshi" => {
+            let page_size = limit.unwrap_or(KALSHI_PAGE_SIZE).min(100);
+            let api_cursor = parse_kalshi_cursor(&cursor)?;
+            search_kalshi_events(&client, &query, page_size, api_cursor).await
+        }
+        _ => Err(format!("Unknown platform: {}", platform)),
+    }
+}
+
+/// Search Polymarket events via the Gamma API /events endpoint
+async fn search_polymarket_events(
+    client: &reqwest::Client,
+    query: &str,
+    page_size: u32,
+    initial_api_offset: u32,
+) -> Result<EventSearchResponse, String> {
+    let query_lower = query.to_lowercase();
+    let mut collected: Vec<EventSearchResult> = Vec::new();
+    let mut api_offset = initial_api_offset;
+    let mut api_exhausted = false;
+    let mut fetches = 0u32;
+    let batch_limit = POLYMARKET_API_BATCH_SIZE.min(100);
+
+    while collected.len() < page_size as usize && !api_exhausted {
+        if fetches >= MAX_API_FETCHES_PER_REQUEST {
+            break;
+        }
+
+        let url = format!(
+            "https://gamma-api.polymarket.com/events?closed=false&limit={}&offset={}",
+            batch_limit, api_offset
+        );
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Polymarket events request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Polymarket API returned {}: {}", status, body));
+        }
+
+        let data: Vec<JsonValue> = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Polymarket events response: {}", e))?;
+
+        let batch_size = data.len() as u32;
+        if batch_size < batch_limit {
+            api_exhausted = true;
+        }
+
+        api_offset += batch_size;
+        fetches += 1;
+
+        for event_json in &data {
+            if collected.len() >= page_size as usize {
+                break;
+            }
+            if let Some(event_result) = parse_polymarket_event(event_json, &query_lower) {
+                collected.push(event_result);
+            }
+        }
+    }
+
+    let has_more = !api_exhausted;
+    let next_cursor = if has_more {
+        Some(format!("polymarket:{}", api_offset))
+    } else {
+        None
+    };
+
+    Ok(EventSearchResponse {
+        results: collected,
+        has_more,
+        next_cursor,
+        page_size: POLYMARKET_PAGE_SIZE,
+    })
+}
+
+/// Parse a single Polymarket event JSON into an EventSearchResult
+fn parse_polymarket_event(event: &JsonValue, query_lower: &str) -> Option<EventSearchResult> {
+    let event_id = event["id"].as_str().or_else(|| {
+        event["id"].as_u64().map(|_| "") // handle numeric IDs
+    })?;
+    // Handle both string and numeric IDs
+    let event_id_str = if let Some(s) = event["id"].as_str() {
+        s.to_string()
+    } else if let Some(n) = event["id"].as_u64() {
+        n.to_string()
+    } else {
+        return None;
+    };
+
+    let title = event["title"].as_str().unwrap_or("").to_string();
+    let description = event["description"].as_str().unwrap_or("").to_string();
+    let slug = event["slug"].as_str().unwrap_or("").to_string();
+    let image = event["image"].as_str().map(|s| s.to_string());
+    let category = event["category"].as_str().map(|s| s.to_string());
+    let created_at = event["createdAt"].as_str().map(|s| s.to_string());
+
+    // Client-side text filtering on event-level fields
+    if !query_lower.is_empty() {
+        let search_text = format!(
+            "{} {} {} {}",
+            title,
+            description,
+            slug,
+            category.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
+        if !search_text.contains(query_lower) {
+            return None;
+        }
+    }
+
+    // Parse nested markets array
+    let markets_json = event["markets"].as_array()?;
+    let markets: Vec<EventMarketItem> = markets_json
+        .iter()
+        .filter_map(|m| parse_polymarket_event_market(m))
+        .collect();
+
+    if markets.is_empty() {
+        return None;
+    }
+
+    let market_count = markets.len();
+
+    Some(EventSearchResult {
+        id: event_id_str,
+        title,
+        description: if description.len() > 300 {
+            format!("{}...", &description[..300])
+        } else {
+            description
+        },
+        image_url: image,
+        category,
+        platform: "Polymarket".to_string(),
+        slug,
+        markets,
+        market_count,
+        created_at,
+    })
+}
+
+/// Parse a single market within a Polymarket event into an EventMarketItem
+fn parse_polymarket_event_market(market: &JsonValue) -> Option<EventMarketItem> {
+    let question = market["question"].as_str().unwrap_or("").to_string();
+    let group_title = market["groupItemTitle"].as_str().unwrap_or("").to_string();
+    let title = if !group_title.is_empty() {
+        group_title
+    } else {
+        question
+    };
+
+    let clob_token_ids: Vec<String> = market["clobTokenIds"]
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .or_else(|| {
+            market["clobTokenIds"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+
+    let condition_id = market["conditionId"].as_str().map(|s| s.to_string());
+    let slug = market["slug"].as_str().unwrap_or("").to_string();
+
+    let primary_id = clob_token_ids
+        .first()
+        .cloned()
+        .or_else(|| condition_id.clone())
+        .unwrap_or_else(|| slug.clone());
+
+    let outcome_prices: Vec<f64> = market["outcomePrices"]
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .map(|prices| {
+            prices
+                .iter()
+                .filter_map(|p| p.parse::<f64>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let active = market["active"].as_bool().unwrap_or(false);
+    let closed = market["closed"].as_bool().unwrap_or(true);
+    let status = if closed {
+        "closed"
+    } else if active {
+        "open"
+    } else {
+        "inactive"
+    };
+
+    Some(EventMarketItem {
+        id: primary_id,
+        title,
+        description: market["description"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        yes_price: outcome_prices.first().copied(),
+        no_price: outcome_prices.get(1).copied(),
+        volume: market["volume"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| market["volume"].as_f64()),
+        liquidity: market["liquidity"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| market["liquidity"].as_f64()),
+        status: status.to_string(),
+        end_date: market["endDate"].as_str().map(|s| s.to_string()),
+        slug,
+        token_ids: clob_token_ids,
+        condition_id,
+    })
+}
+
+/// Search Kalshi events, preserving event grouping instead of flattening
+async fn search_kalshi_events(
+    client: &reqwest::Client,
+    query: &str,
+    page_size: u32,
+    initial_cursor: Option<String>,
+) -> Result<EventSearchResponse, String> {
+    let query_lower = query.to_lowercase();
+    let mut collected: Vec<EventSearchResult> = Vec::new();
+    let mut cursor = initial_cursor;
+    let mut api_exhausted = false;
+    let mut fetches = 0u32;
+
+    while collected.len() < page_size as usize && !api_exhausted {
+        if fetches >= MAX_API_FETCHES_PER_REQUEST {
+            break;
+        }
+
+        let mut url = format!(
+            "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true&limit={}",
+            KALSHI_API_BATCH_SIZE
+        );
+        if let Some(ref c) = cursor {
+            url.push_str(&format!("&cursor={}", c));
+        }
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Kalshi events request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Kalshi API returned {}: {}", status, body));
+        }
+
+        let data: JsonValue = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Kalshi response: {}", e))?;
+
+        let next_cursor_value = data["cursor"]
+            .as_str()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        if next_cursor_value.is_none() {
+            api_exhausted = true;
+        }
+        cursor = next_cursor_value;
+        fetches += 1;
+
+        if let Some(events) = data["events"].as_array() {
+            for event in events {
+                if collected.len() >= page_size as usize {
+                    break;
+                }
+                if let Some(result) = parse_kalshi_event(event, &query_lower) {
+                    collected.push(result);
+                }
+            }
+        }
+    }
+
+    let has_more = !api_exhausted;
+    let next_cursor = if has_more {
+        cursor.map(|c| format!("kalshi:{}", c))
+    } else {
+        None
+    };
+
+    Ok(EventSearchResponse {
+        results: collected,
+        has_more,
+        next_cursor,
+        page_size: KALSHI_PAGE_SIZE,
+    })
+}
+
+/// Parse a single Kalshi event JSON into an EventSearchResult
+fn parse_kalshi_event(event: &JsonValue, query_lower: &str) -> Option<EventSearchResult> {
+    let event_title = event["title"].as_str().unwrap_or("");
+    let event_ticker = event["event_ticker"].as_str().unwrap_or("");
+    let category = event["category"].as_str().map(|s| s.to_string());
+    let image_url = event["image_url"].as_str().map(|s| s.to_string());
+
+    // Client-side text filter on event-level fields
+    if !query_lower.is_empty() {
+        let search_text = format!(
+            "{} {} {}",
+            event_title,
+            event_ticker,
+            category.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
+        if !search_text.contains(query_lower) {
+            return None;
+        }
+    }
+
+    let markets: Vec<EventMarketItem> = event["markets"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let ticker = m["ticker"].as_str()?.to_string();
+                    let title = m["title"]
+                        .as_str()
+                        .unwrap_or(event_title)
+                        .to_string();
+                    let subtitle = m["subtitle"].as_str().unwrap_or("").to_string();
+                    let yes_price = m["yes_ask"]
+                        .as_f64()
+                        .or_else(|| m["last_price"].as_f64())
+                        .map(|p| p / 100.0);
+                    let no_price = m["no_ask"].as_f64().map(|p| p / 100.0);
+                    let volume = m["volume"]
+                        .as_f64()
+                        .or_else(|| m["volume_24h"].as_f64());
+                    let open_interest = m["open_interest"].as_f64();
+                    let close_time =
+                        m["close_time"].as_str().map(|s| s.to_string());
+                    let status = m["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    Some(EventMarketItem {
+                        id: ticker.clone(),
+                        title,
+                        description: subtitle,
+                        yes_price,
+                        no_price,
+                        volume,
+                        liquidity: open_interest,
+                        status,
+                        end_date: close_time,
+                        slug: ticker,
+                        token_ids: vec![],
+                        condition_id: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if markets.is_empty() {
+        return None;
+    }
+    let market_count = markets.len();
+
+    Some(EventSearchResult {
+        id: event_ticker.to_string(),
+        title: event_title.to_string(),
+        description: String::new(),
+        image_url,
+        category,
+        platform: "Kalshi".to_string(),
+        slug: event_ticker.to_string(),
+        markets,
+        market_count,
+        created_at: None,
     })
 }

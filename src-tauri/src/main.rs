@@ -223,6 +223,7 @@ fn main() {
             get_orderbook_cmd,
             refresh_market_connection_cmd,
             search_markets_cmd,
+            search_events_cmd,
             
             // Trading commands
             place_order_cmd,
@@ -1135,7 +1136,16 @@ async fn add_market_cmd(
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    
+
+    // Extract event group metadata for market grouping
+    let event_group_id = market_config.get("event_group_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let event_title = market_config.get("event_title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     // Create node in database
     let node = tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
@@ -1151,6 +1161,8 @@ async fn add_market_cmd(
                 "market_id": market_id,
                 "question": question,
                 "token_ids": token_ids,
+                "event_group_id": event_group_id,
+                "event_title": event_title,
                 "status": "connected",
                 "connected_at": chrono::Utc::now().to_rfc3339(),
             }),
@@ -1313,6 +1325,18 @@ async fn search_markets_cmd(
 ) -> Result<commands::MarketSearchResponse, String> {
     info!("Searching {} markets for: {} (limit={:?}, cursor={:?})", platform, query, limit, cursor);
     markets::search_markets(platform, query, limit, cursor).await
+}
+
+/// Search for events (grouped markets) on Polymarket or Kalshi
+#[tauri::command]
+async fn search_events_cmd(
+    platform: String,
+    query: String,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<commands::EventSearchResponse, String> {
+    info!("Searching {} events for: {} (limit={:?}, cursor={:?})", platform, query, limit, cursor);
+    markets::search_events(platform, query, limit, cursor).await
 }
 
 // -------------------------------------------------------------------------
