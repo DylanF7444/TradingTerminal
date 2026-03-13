@@ -484,28 +484,168 @@ async fn scrape_crypto(client: &Client, config: &ScraperConfig) -> Result<Scrape
     })
 }
 
-/// Scrape news from RSS or NewsAPI
+// ============================================================================
+// NEWS RSS SCRAPING
+// ============================================================================
+
+struct NewsSourceDef {
+    id: &'static str,
+    name: &'static str,
+    feed_url: &'static str,
+}
+
+const NEWS_SOURCES: &[NewsSourceDef] = &[
+    NewsSourceDef { id: "abc_news",       name: "ABC News",          feed_url: "https://abcnews.go.com/abcnews/topstories" },
+    NewsSourceDef { id: "al_jazeera",     name: "Al Jazeera",        feed_url: "https://www.aljazeera.com/xml/rss/all.xml" },
+    NewsSourceDef { id: "ap_news",        name: "AP News",           feed_url: "https://rsshub.app/apnews/topics/apf-topnews" },
+    NewsSourceDef { id: "bbc",            name: "BBC",               feed_url: "https://feeds.bbci.co.uk/news/rss.xml" },
+    NewsSourceDef { id: "cnn",            name: "CNN",               feed_url: "http://rss.cnn.com/rss/cnn_topstories.rss" },
+    NewsSourceDef { id: "yahoo_finance",  name: "Yahoo Finance",     feed_url: "https://finance.yahoo.com/news/rssindex" },
+];
+
+/// Strip HTML tags from RSS description text
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+/// Fetch and parse a single RSS feed, returning a DataPoint with headlines
+async fn fetch_and_parse_feed(
+    client: &Client,
+    source: &NewsSourceDef,
+    keywords: &[String],
+) -> Result<(DataPoint, serde_json::Value), anyhow::Error> {
+    let response = client.get(source.feed_url)
+        .header("Accept", "application/rss+xml, application/xml, text/xml, */*")
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("{} returned HTTP {}", source.name, response.status()));
+    }
+
+    let body = response.bytes().await?;
+
+    let feed = feed_rs::parser::parse(&body[..])
+        .map_err(|e| anyhow::anyhow!("Feed parse error for {}: {}", source.name, e))?;
+
+    let mut headlines: Vec<serde_json::Value> = Vec::new();
+
+    for entry in feed.entries.iter().take(20) {
+        let title = entry.title.as_ref().map(|t| t.content.clone()).unwrap_or_default();
+        let link = entry.links.first().map(|l| l.href.clone()).unwrap_or_default();
+        let description = entry.summary.as_ref()
+            .map(|s| s.content.clone())
+            .or_else(|| entry.content.as_ref().and_then(|c| c.body.clone()))
+            .unwrap_or_default();
+        let published = entry.published
+            .or(entry.updated)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+
+        // Apply keyword filter if specified
+        if !keywords.is_empty() {
+            let text_lower = format!("{} {}", title, description).to_lowercase();
+            if !keywords.iter().any(|kw| text_lower.contains(kw)) {
+                continue;
+            }
+        }
+
+        headlines.push(serde_json::json!({
+            "title": title,
+            "link": link,
+            "description": strip_html_tags(&description),
+            "published": published,
+        }));
+    }
+
+    let article_count = headlines.len() as f64;
+
+    let source_meta = serde_json::json!({
+        "source_name": source.name,
+        "feed_url": source.feed_url,
+        "article_count": article_count,
+        "feed_title": feed.title.map(|t| t.content),
+    });
+
+    let point = DataPoint {
+        metric_type: format!("headlines:{}", source.id),
+        value: article_count,
+        metadata: Some(serde_json::json!({
+            "source": source.id,
+            "source_name": source.name,
+            "headlines": headlines,
+        })),
+    };
+
+    Ok((point, source_meta))
+}
+
+/// Scrape news headlines from RSS feeds
 async fn scrape_news(client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
-    // Example using NewsAPI (simplified)
+    let selected_sources: Vec<String> = serde_json::from_value(
+        config.params.get("sources").cloned().unwrap_or(serde_json::json!([]))
+    ).unwrap_or_default();
+
     let keywords: Vec<String> = serde_json::from_value(
         config.params.get("keywords").cloned().unwrap_or(serde_json::json!([]))
-    )?;
-    
-    // In real implementation: parse RSS feeds or call NewsAPI
-    // For demo, return mock data
-    
-    let points = vec![
-        DataPoint {
-            metric_type: "article_count".to_string(),
-            value: 5.0,
-            metadata: Some(serde_json::json!({
-                "keywords": keywords,
-                "source": "mock"
-            })),
+    ).unwrap_or_default();
+    let keywords_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+
+    let sources_to_scrape: Vec<&NewsSourceDef> = if selected_sources.is_empty() {
+        NEWS_SOURCES.iter().collect()
+    } else {
+        NEWS_SOURCES.iter()
+            .filter(|s| selected_sources.contains(&s.id.to_string()))
+            .collect()
+    };
+
+    if sources_to_scrape.is_empty() {
+        return Err(anyhow::anyhow!("No valid news sources selected"));
+    }
+
+    let mut points = Vec::new();
+    let mut all_metadata = serde_json::Map::new();
+
+    for source in &sources_to_scrape {
+        match fetch_and_parse_feed(client, source, &keywords_lower).await {
+            Ok((point, source_meta)) => {
+                points.push(point);
+                all_metadata.insert(source.id.to_string(), source_meta);
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch news feed from {}: {}", source.name, e);
+                all_metadata.insert(
+                    source.id.to_string(),
+                    serde_json::json!({"error": e.to_string()}),
+                );
+            }
         }
-    ];
-    
-    Ok(ScrapedData { points, metadata: serde_json::json!({}) })
+    }
+
+    if points.is_empty() {
+        return Err(anyhow::anyhow!("All news feeds failed to fetch"));
+    }
+
+    Ok(ScrapedData {
+        points,
+        metadata: serde_json::Value::Object(all_metadata),
+    })
 }
 
 /// Scrape weather data

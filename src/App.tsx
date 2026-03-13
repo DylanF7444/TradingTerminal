@@ -49,7 +49,7 @@ import { transformNodeFromBackend } from './utils/nodeTransform';
 import { createDemoNodes } from './utils/demoData';
 
 // Extracted hooks
-import { useInfoSourceEvents, useNodeQualityMetrics, useMarketOrderbookEvents, useAutoMarketSubscriptions } from './hooks/useInfoSourceEvents';
+import { useInfoSourceEvents, useNodeQualityMetrics, useMarketOrderbookEvents, useAutoMarketSubscriptions, useDataSourceEvents } from './hooks/useInfoSourceEvents';
 import { usePersistentOrderbooks } from './hooks/usePersistentOrderbooks';
 
 // Layout components
@@ -147,6 +147,7 @@ function App(): ReactNode {
   useNodeQualityMetrics();
   useMarketOrderbookEvents();
   useAutoMarketSubscriptions();
+  useDataSourceEvents();
   usePersistentOrderbooks();
 
   // -------------------------------------------------------------------------

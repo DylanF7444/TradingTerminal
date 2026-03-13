@@ -78,9 +78,9 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
   [InfoSourceType.NewsSource]: {
     label: 'News Feed',
     icon: Newspaper,
-    description: 'Real-time news and headline analysis',
+    description: 'Real-time news headlines from major outlets',
     color: 'text-red-400',
-    defaultConfig: { keywords: 'bitcoin,federal reserve', sources: 'reuters,bloomberg', sentiment_analysis: true }
+    defaultConfig: { sources: [], keywords: '', update_interval_seconds: 300 }
   },
   [InfoSourceType.SocialMedia]: {
     label: 'Social Media',
@@ -194,7 +194,7 @@ export default function SourcePanel({
         ...config,
         symbols: config.symbols?.split(',').map((s: string) => s.trim()),
         tickers: config.tickers?.split(',').map((s: string) => s.trim()),
-        keywords: config.keywords?.split(',').map((s: string) => s.trim()),
+        keywords: config.keywords?.trim() ? config.keywords.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
         // Convert storage_interval_seconds to storageIntervalMs for backend
         storageIntervalMs: config.storage_interval_seconds ? config.storage_interval_seconds * 1000 : 1000,
       };
@@ -311,7 +311,38 @@ export default function SourcePanel({
         return (
           <div className="space-y-4">
             <div>
-              <label className={labelClass}>Keywords (comma-separated)</label>
+              <label className={labelClass}>News Sources</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { value: 'abc_news', label: 'ABC News' },
+                  { value: 'al_jazeera', label: 'Al Jazeera' },
+                  { value: 'ap_news', label: 'Associated Press' },
+                  { value: 'bbc', label: 'BBC' },
+                  { value: 'cnn', label: 'CNN' },
+                  { value: 'yahoo_finance', label: 'Yahoo Finance' },
+                ].map((source) => (
+                  <label key={source.value} className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={(config.sources || []).includes(source.value)}
+                      onChange={(e) => {
+                        const current = config.sources || [];
+                        if (e.target.checked) {
+                          handleConfigChange('sources', [...current, source.value]);
+                        } else {
+                          handleConfigChange('sources', current.filter((s: string) => s !== source.value));
+                        }
+                      }}
+                      className="rounded bg-gray-800 border-gray-700 text-blue-500"
+                    />
+                    {source.label}
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">Leave all unchecked to monitor all sources</p>
+            </div>
+            <div>
+              <label className={labelClass}>Keywords (optional, comma-separated)</label>
               <input
                 type="text"
                 value={config.keywords || ''}
@@ -319,16 +350,20 @@ export default function SourcePanel({
                 placeholder="bitcoin, federal reserve, inflation"
                 className={commonInputClass}
               />
+              <p className="text-xs text-gray-500 mt-1">Filter headlines by keyword. Leave empty for all headlines.</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div>
+              <label className={labelClass}>Update Interval</label>
               <input
-                type="checkbox"
-                id="sentiment"
-                checked={config.sentiment_analysis}
-                onChange={(e) => handleConfigChange('sentiment_analysis', e.target.checked)}
-                className="rounded bg-gray-800 border-gray-700 text-blue-500"
+                type="range"
+                min="60"
+                max="1800"
+                step="60"
+                value={config.update_interval_seconds || 300}
+                onChange={(e) => handleConfigChange('update_interval_seconds', parseInt(e.target.value))}
+                className="w-full"
               />
-              <label htmlFor="sentiment" className="text-sm text-gray-300">Enable sentiment analysis</label>
+              <span className="text-sm text-gray-400">{config.update_interval_seconds || 300}s ({Math.round((config.update_interval_seconds || 300) / 60)} min)</span>
             </div>
           </div>
         );

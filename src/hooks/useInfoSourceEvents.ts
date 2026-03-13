@@ -481,3 +481,135 @@ export function useAutoMarketSubscriptions(): void {
     return () => clearInterval(interval);
   }, []);
 }
+
+// ============================================================================
+// DATA SOURCE UPDATE LISTENER (HTTP-POLLED SCRAPERS)
+// ============================================================================
+
+/**
+ * Hook that subscribes to the 'data-source:update' Tauri event emitted by
+ * HTTP-polled scrapers (news, weather, etc.).
+ *
+ * For NewsSource events, this hook:
+ * 1. Aggregates headlines from all feed DataPoints
+ * 2. Appends to the raw data stream for display in the node panel
+ * 3. Updates node metadata with headline data and quality metrics
+ * 4. Propagates data to connected Market nodes
+ *
+ * Should be called exactly once, in the root App component.
+ */
+export function useDataSourceEvents(): void {
+  const appendRawDataEntry = useStore((state: StoreState) => state.appendRawDataEntry);
+  const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const setup = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+
+        unlisten = await listen('data-source:update', (event) => {
+          const payload = event.payload as {
+            nodeId: string;
+            sourceType: string;
+            data: {
+              points: Array<{
+                metric_type: string;
+                value: number;
+                metadata?: Record<string, unknown>;
+              }>;
+              metadata: Record<string, unknown>;
+            };
+            timestamp: number;
+          };
+
+          if (payload.sourceType === 'NewsSource') {
+            // Aggregate all headlines from all source DataPoints
+            const allHeadlines: Array<Record<string, unknown>> = [];
+            const sourceNames: string[] = [];
+            for (const point of payload.data.points) {
+              const meta = point.metadata as Record<string, unknown> | undefined;
+              const headlines = (meta?.headlines as Array<Record<string, unknown>>) || [];
+              allHeadlines.push(...headlines);
+              if (meta?.source_name) sourceNames.push(meta.source_name as string);
+            }
+
+            // 1. Append to raw stream
+            appendRawDataEntry(payload.nodeId, {
+              data: {
+                type: 'news_update',
+                totalArticles: allHeadlines.length,
+                sources: sourceNames,
+                headlines: allHeadlines.slice(0, 10),
+              },
+              source: 'rss_scraper',
+              status: 'success',
+            });
+
+            // 2. Update node metadata
+            const { nodes, connections } = useStore.getState();
+            const node = nodes[payload.nodeId];
+            if (!node) return;
+
+            const currentMetadata = (node.metadata as Record<string, any>) || {};
+            updateNodeMetadata(payload.nodeId, {
+              ...currentMetadata,
+              lastData: {
+                timestamp: payload.timestamp,
+                value: allHeadlines.length,
+                headlines: allHeadlines,
+                sources: sourceNames,
+              },
+              quality: {
+                ...(currentMetadata.quality || {}),
+                successRate: 1.0,
+                lastError: undefined,
+              },
+            });
+
+            // 3. Propagate to connected Market nodes
+            const outgoing = connections.filter((c) => c.source === payload.nodeId);
+            for (const conn of outgoing) {
+              const target = nodes[conn.target];
+              if (!target?.node_type || !('Market' in target.node_type)) continue;
+
+              const targetMeta = (target.metadata as Record<string, any>) || {};
+              const incomingData = { ...(targetMeta.incomingData || {}) };
+              incomingData[payload.nodeId] = {
+                sourceName: 'News Feed',
+                sourceType: 'NewsSource',
+                headlines: allHeadlines.slice(0, 5),
+                articleCount: allHeadlines.length,
+                sources: sourceNames,
+                timestamp: payload.timestamp,
+                strength: conn.strength || 1.0,
+              };
+
+              updateNodeMetadata(conn.target, {
+                ...targetMeta,
+                incomingData,
+                lastData: {
+                  timestamp: payload.timestamp,
+                  value: allHeadlines.length,
+                  sourceId: payload.nodeId,
+                },
+              });
+            }
+
+            console.log(`[DataSource] News update for ${payload.nodeId}: ${allHeadlines.length} headlines from ${sourceNames.join(', ')}`);
+          }
+        });
+
+        console.log('[Global] data-source:update listener registered');
+      } catch (error) {
+        console.warn('[Global] Failed to setup data-source:update listener:', error);
+      }
+    };
+
+    setup();
+    return () => {
+      unlisten?.();
+    };
+  }, [appendRawDataEntry, updateNodeMetadata]);
+}

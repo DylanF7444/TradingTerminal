@@ -280,58 +280,51 @@ export const SOURCE_TYPE_DEFINITIONS: Record<InfoSourceType, SourceTypeDefinitio
     },
     configSchema: [
       {
-        field: 'keywords',
-        type: 'text',
-        label: 'Keywords',
-        placeholder: 'bitcoin, fed rate, inflation, election',
-        required: true,
-        validation: (val: string) => {
-          if (!val || val.split(',').length < 1) return 'Enter at least one keyword';
-          return null;
-        },
-        helpText: 'Keywords to monitor (comma-separated). Supports AND/OR/NOT operators'
-      },
-      {
         field: 'sources',
         type: 'multiselect',
         label: 'News Sources',
         options: [
-          { value: 'reuters', label: 'Reuters' },
-          { value: 'bloomberg', label: 'Bloomberg' },
-          { value: 'coindesk', label: 'CoinDesk' },
-          { value: 'cryptonews', label: 'CryptoNews' },
-          { value: 'ap', label: 'Associated Press' }
+          { value: 'abc_news', label: 'ABC News' },
+          { value: 'al_jazeera', label: 'Al Jazeera' },
+          { value: 'ap_news', label: 'Associated Press' },
+          { value: 'bbc', label: 'BBC' },
+          { value: 'cnn', label: 'CNN' },
+          { value: 'yahoo_finance', label: 'Yahoo Finance' }
         ],
         helpText: 'Leave empty to monitor all available sources'
+      },
+      {
+        field: 'keywords',
+        type: 'text',
+        label: 'Keywords',
+        placeholder: 'bitcoin, fed rate, inflation, election',
+        required: false,
+        helpText: 'Filter headlines by keyword (comma-separated). Leave empty for all headlines'
+      },
+      {
+        field: 'update_interval_seconds',
+        type: 'range',
+        label: 'Update Interval (seconds)',
+        min: 60,
+        max: 1800,
+        step: 60,
+        helpText: 'How often to fetch new headlines (default: 300s / 5 min)'
       },
       {
         field: 'sentiment_analysis',
         type: 'checkbox',
         label: 'Enable Sentiment Analysis',
         helpText: 'Use ML model to score article sentiment (uses more CPU)'
-      },
-      {
-        field: 'min_impact_score',
-        type: 'range',
-        label: 'Minimum Impact Filter',
-        min: 0,
-        max: 100,
-        step: 10,
-        helpText: 'Filter out low-impact news (0 = all news, 100 = major headlines only)',
-        advanced: true
       }
     ],
     defaults: {
-      keywords: 'bitcoin, crypto',
+      keywords: '',
       sources: [],
-      sentiment_analysis: true,
-      min_impact_score: 30
+      sentiment_analysis: false,
+      update_interval_seconds: 300
     },
-    validator: (config) => {
+    validator: (_config) => {
       const errors: Record<string, string> = {};
-      if (!config.keywords || config.keywords.trim().length < 2) {
-        errors.keywords = 'Keywords required';
-      }
       return { valid: Object.keys(errors).length === 0, errors };
     }
   },
