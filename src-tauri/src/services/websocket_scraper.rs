@@ -610,14 +610,14 @@ pub fn parse_websocket_config(
 // (precious metals via OANDA forex pairs like OANDA:XAU_USD).
 //
 // Free tier: up to 50 symbols, real-time forex/crypto, API key required.
-// WebSocket URL: wss://ws.finnhub.io?token=API_KEY
+// WebSocket URL: wss://ws.finnhub.io/?token=API_KEY
 //
 // Subscribe:   {"type":"subscribe","symbol":"AAPL"}
 // Unsubscribe: {"type":"unsubscribe","symbol":"AAPL"}
 // Response:    {"data":[{"p":220.89,"s":"AAPL","t":1577090737396,"v":100}],"type":"trade"}
 // ============================================================================
 
-const FINNHUB_WS_URL: &str = "wss://ws.finnhub.io";
+const FINNHUB_WS_URL: &str = "wss://ws.finnhub.io/";
 
 /// Finnhub subscribe/unsubscribe message
 #[derive(Debug, Serialize)]
@@ -837,16 +837,17 @@ pub async fn run_finnhub_scraper(
 // BINANCE WEBSOCKET IMPLEMENTATION
 // ============================================================================
 //
-// Binance provides free real-time trade data with no API key required.
+// Binance.US provides free real-time trade data with no API key required.
 // Useful for commodity-adjacent assets like PAXG (tokenized gold).
+// Uses Binance.US endpoint (binance.com is geo-blocked in the US with HTTP 451).
 //
-// WebSocket URL: wss://stream.binance.com:9443/ws
+// WebSocket URL: wss://stream.binance.us:9443/ws
 // Subscribe:   {"method":"SUBSCRIBE","params":["btcusdt@trade"],"id":1}
 // Unsubscribe: {"method":"UNSUBSCRIBE","params":["btcusdt@trade"],"id":2}
 // Response:    {"e":"trade","s":"BTCUSDT","p":"42000.50","q":"0.001","T":1672515782136,...}
 // ============================================================================
 
-const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
+const BINANCE_WS_URL: &str = "wss://stream.binance.us:9443/ws";
 
 /// Run a Binance WebSocket scraper for CommodityPrices nodes (PAXG gold, etc.)
 pub async fn run_binance_scraper(
