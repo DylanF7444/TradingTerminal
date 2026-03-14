@@ -64,16 +64,16 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
   [InfoSourceType.FinancialPrices]: {
     label: 'Financial Prices',
     icon: TrendingUp,
-    description: 'Stock, forex, and ETF market data',
+    description: 'Real-time stock and forex prices via Finnhub WebSocket',
     color: 'text-blue-400',
-    defaultConfig: { tickers: 'SPY,AAPL', provider: 'yahoo' }
+    defaultConfig: { symbols: 'AAPL,MSFT,GOOGL', provider: 'finnhub', storage_interval_seconds: 1 }
   },
   [InfoSourceType.CommodityPrices]: {
     label: 'Commodity Prices',
     icon: Activity,
-    description: 'Gold, oil, agriculture futures',
+    description: 'Real-time gold, silver, and commodity prices via WebSocket',
     color: 'text-yellow-400',
-    defaultConfig: { commodities: 'GOLD,OIL', unit: 'USD' }
+    defaultConfig: { symbols: 'OANDA:XAU_USD,OANDA:XAG_USD', provider: 'finnhub', storage_interval_seconds: 1 }
   },
   [InfoSourceType.NewsSource]: {
     label: 'News Feed',
@@ -92,9 +92,9 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
   [InfoSourceType.Weather]: {
     label: 'Weather Data',
     icon: Cloud,
-    description: 'Temperature, precipitation, forecasts',
+    description: 'Real-time weather conditions and 7-day forecasts via Open-Meteo',
     color: 'text-cyan-400',
-    defaultConfig: { location: 'New York, NY', metrics: ['temperature', 'precipitation'] }
+    defaultConfig: { location: 'New York', temperature_unit: 'fahrenheit', wind_speed_unit: 'mph', metrics: ['temperature', 'humidity', 'wind_speed', 'precipitation', 'pressure', 'uv_index'], update_interval_seconds: 600 }
   },
   [InfoSourceType.Livestream]: {
     label: 'Livestream',
@@ -172,7 +172,7 @@ export default function SourcePanel({
       setLocalError('Please enter at least one cryptocurrency symbol');
       return;
     }
-    
+
     // Validate Coinbase symbol format (must be BTC-USD, not BTC)
     if (selectedType === InfoSourceType.CryptoPrices && config.provider === 'coinbase') {
       const symbols = config.symbols?.split(',').map((s: string) => s.trim()) || [];
@@ -181,6 +181,26 @@ export default function SourcePanel({
         setLocalError(`Coinbase symbols must include currency pair (e.g., BTC-USD). Invalid: ${invalidSymbols.join(', ')}`);
         return;
       }
+    }
+
+    if (selectedType === InfoSourceType.FinancialPrices && !config.symbols) {
+      setLocalError('Please enter at least one symbol');
+      return;
+    }
+
+    if (selectedType === InfoSourceType.FinancialPrices && config.provider === 'finnhub' && !config.api_key) {
+      setLocalError('Finnhub API key is required. Get a free key at finnhub.io');
+      return;
+    }
+
+    if (selectedType === InfoSourceType.CommodityPrices && !config.symbols) {
+      setLocalError('Please enter at least one commodity symbol');
+      return;
+    }
+
+    if (selectedType === InfoSourceType.CommodityPrices && config.provider === 'finnhub' && !config.api_key) {
+      setLocalError('Finnhub API key is required for commodity prices. Get a free key at finnhub.io');
+      return;
     }
     
     if (selectedType === InfoSourceType.Livestream && !config.url) {
@@ -388,9 +408,83 @@ export default function SourcePanel({
                 type="text"
                 value={config.location || ''}
                 onChange={(e) => handleConfigChange('location', e.target.value)}
-                placeholder="City, Country or Lat, Lon"
+                placeholder="New York, London, Tokyo..."
                 className={commonInputClass}
               />
+              <p className="text-xs text-gray-500 mt-1">City name — geocoded automatically via Open-Meteo (free, no API key)</p>
+            </div>
+
+            <div>
+              <label className={labelClass}>Metrics to Track</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { value: 'temperature', label: 'Temperature' },
+                  { value: 'humidity', label: 'Humidity' },
+                  { value: 'wind_speed', label: 'Wind Speed' },
+                  { value: 'precipitation', label: 'Precipitation' },
+                  { value: 'pressure', label: 'Pressure' },
+                  { value: 'uv_index', label: 'UV Index' },
+                ].map((metric) => (
+                  <label key={metric.value} className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={(config.metrics || []).includes(metric.value)}
+                      onChange={(e) => {
+                        const current = config.metrics || [];
+                        if (e.target.checked) {
+                          handleConfigChange('metrics', [...current, metric.value]);
+                        } else {
+                          handleConfigChange('metrics', current.filter((m: string) => m !== metric.value));
+                        }
+                      }}
+                      className="rounded bg-gray-800 border-gray-700 text-cyan-500"
+                    />
+                    {metric.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={labelClass}>Temperature Unit</label>
+                <select
+                  value={config.temperature_unit || 'fahrenheit'}
+                  onChange={(e) => handleConfigChange('temperature_unit', e.target.value)}
+                  className={commonInputClass}
+                >
+                  <option value="fahrenheit">Fahrenheit</option>
+                  <option value="celsius">Celsius</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelClass}>Wind Speed Unit</label>
+                <select
+                  value={config.wind_speed_unit || 'mph'}
+                  onChange={(e) => handleConfigChange('wind_speed_unit', e.target.value)}
+                  className={commonInputClass}
+                >
+                  <option value="mph">mph</option>
+                  <option value="kmh">km/h</option>
+                  <option value="ms">m/s</option>
+                  <option value="kn">knots</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className={labelClass}>Update Interval</label>
+              <input
+                type="range"
+                min="300"
+                max="3600"
+                step="300"
+                value={config.update_interval_seconds || 600}
+                onChange={(e) => handleConfigChange('update_interval_seconds', parseInt(e.target.value))}
+                className="w-full"
+              />
+              <span className="text-sm text-gray-400">{config.update_interval_seconds || 600}s ({Math.round((config.update_interval_seconds || 600) / 60)} min)</span>
+              <p className="text-xs text-gray-500 mt-1">Includes current conditions + 7-day forecast on each update</p>
             </div>
           </div>
         );
@@ -559,6 +653,211 @@ export default function SourcePanel({
           </div>
         );
       }
+
+      case InfoSourceType.FinancialPrices:
+        return (
+          <div className="space-y-4">
+            <div>
+              <label className={labelClass}>Provider</label>
+              <select
+                value={config.provider || 'finnhub'}
+                onChange={(e) => handleConfigChange('provider', e.target.value)}
+                className={commonInputClass}
+              >
+                <option value="finnhub">Finnhub (WebSocket - Real-time)</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Real-time trade data via Finnhub WebSocket. Free API key required from finnhub.io
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>API Key</label>
+              <input
+                type="password"
+                value={config.api_key || ''}
+                onChange={(e) => handleConfigChange('api_key', e.target.value)}
+                placeholder="Your Finnhub API key (free at finnhub.io)"
+                className={commonInputClass}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Get a free API key at <span className="text-blue-400">finnhub.io</span> — supports up to 50 symbols
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>Asset Type</label>
+              <select
+                value={config.asset_type || 'stocks'}
+                onChange={(e) => {
+                  const assetType = e.target.value;
+                  handleConfigChange('asset_type', assetType);
+                  const presets: Record<string, string> = {
+                    stocks: 'AAPL,MSFT,GOOGL,AMZN,TSLA',
+                    etfs: 'SPY,QQQ,IWM,DIA,VTI',
+                    forex: 'OANDA:EUR_USD,OANDA:GBP_USD,OANDA:USD_JPY,OANDA:AUD_USD',
+                    indices: 'BINANCE:BTCUSDT',
+                  };
+                  if (presets[assetType]) {
+                    handleConfigChange('symbols', presets[assetType]);
+                  }
+                }}
+                className={commonInputClass}
+              >
+                <option value="stocks">US Stocks</option>
+                <option value="etfs">ETFs</option>
+                <option value="forex">Forex Pairs</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>
+                Symbols (comma-separated)
+                <span className="text-xs text-gray-500 ml-1">
+                  {config.asset_type === 'forex' ? '(use OANDA:EUR_USD format)' : '(e.g., AAPL, MSFT)'}
+                </span>
+              </label>
+              <input
+                type="text"
+                value={config.symbols || ''}
+                onChange={(e) => handleConfigChange('symbols', e.target.value)}
+                placeholder={config.asset_type === 'forex' ? "OANDA:EUR_USD, OANDA:GBP_USD" : "AAPL, MSFT, GOOGL"}
+                className={commonInputClass}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Stocks: AAPL, MSFT | Forex: OANDA:EUR_USD | Max 50 symbols on free tier
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>
+                Database Storage Interval (seconds)
+                <span className="text-xs text-gray-500 ml-1">(raw stream updates in real-time)</span>
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="300"
+                step="1"
+                value={config.storage_interval_seconds || 1}
+                onChange={(e) => handleConfigChange('storage_interval_seconds', parseInt(e.target.value))}
+                className="w-full"
+              />
+              <span className="text-sm text-gray-500">{config.storage_interval_seconds || 1}s</span>
+            </div>
+          </div>
+        );
+
+      case InfoSourceType.CommodityPrices:
+        return (
+          <div className="space-y-4">
+            <div>
+              <label className={labelClass}>Provider</label>
+              <select
+                value={config.provider || 'finnhub'}
+                onChange={(e) => {
+                  const provider = e.target.value;
+                  handleConfigChange('provider', provider);
+                  const presets: Record<string, string> = {
+                    finnhub: 'OANDA:XAU_USD,OANDA:XAG_USD',
+                    binance: 'PAXGUSDT',
+                  };
+                  if (presets[provider]) {
+                    handleConfigChange('symbols', presets[provider]);
+                  }
+                }}
+                className={commonInputClass}
+              >
+                <option value="finnhub">Finnhub (Gold/Silver via Forex - Real-time)</option>
+                <option value="binance">Binance (PAXG Gold Token - No API key)</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                {config.provider === 'binance'
+                  ? 'PAXG is a tokenized gold asset (1 PAXG = 1 troy ounce). No API key needed.'
+                  : 'Precious metals via OANDA forex pairs. Free API key required from finnhub.io'}
+              </p>
+            </div>
+            {config.provider !== 'binance' && (
+              <div>
+                <label className={labelClass}>API Key</label>
+                <input
+                  type="password"
+                  value={config.api_key || ''}
+                  onChange={(e) => handleConfigChange('api_key', e.target.value)}
+                  placeholder="Your Finnhub API key (free at finnhub.io)"
+                  className={commonInputClass}
+                />
+              </div>
+            )}
+            <div>
+              <label className={labelClass}>Commodity Preset</label>
+              <select
+                value={config.commodity_preset || 'precious_metals'}
+                onChange={(e) => {
+                  const preset = e.target.value;
+                  handleConfigChange('commodity_preset', preset);
+                  if (config.provider === 'binance') {
+                    handleConfigChange('symbols', 'PAXGUSDT');
+                  } else {
+                    const presets: Record<string, string> = {
+                      precious_metals: 'OANDA:XAU_USD,OANDA:XAG_USD',
+                      gold_only: 'OANDA:XAU_USD',
+                      silver_only: 'OANDA:XAG_USD',
+                      metals_and_forex: 'OANDA:XAU_USD,OANDA:XAG_USD,OANDA:EUR_USD,OANDA:GBP_USD',
+                    };
+                    if (presets[preset]) {
+                      handleConfigChange('symbols', presets[preset]);
+                    }
+                  }
+                }}
+                className={commonInputClass}
+              >
+                {config.provider === 'binance' ? (
+                  <option value="paxg">PAXG (Tokenized Gold)</option>
+                ) : (
+                  <>
+                    <option value="precious_metals">Gold + Silver (XAU + XAG)</option>
+                    <option value="gold_only">Gold Only (XAU/USD)</option>
+                    <option value="silver_only">Silver Only (XAG/USD)</option>
+                    <option value="metals_and_forex">Metals + Major Forex</option>
+                  </>
+                )}
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>
+                Symbols (comma-separated)
+                <span className="text-xs text-gray-500 ml-1">
+                  {config.provider === 'binance' ? '(Binance pair format)' : '(OANDA forex pair format)'}
+                </span>
+              </label>
+              <input
+                type="text"
+                value={config.symbols || ''}
+                onChange={(e) => handleConfigChange('symbols', e.target.value)}
+                placeholder={config.provider === 'binance' ? "PAXGUSDT" : "OANDA:XAU_USD, OANDA:XAG_USD"}
+                className={commonInputClass}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                {config.provider === 'binance'
+                  ? 'Binance symbols: PAXGUSDT (gold)'
+                  : 'Gold: OANDA:XAU_USD | Silver: OANDA:XAG_USD | Platinum: OANDA:XPT_USD'}
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>
+                Database Storage Interval (seconds)
+                <span className="text-xs text-gray-500 ml-1">(raw stream updates in real-time)</span>
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="300"
+                step="1"
+                value={config.storage_interval_seconds || 1}
+                onChange={(e) => handleConfigChange('storage_interval_seconds', parseInt(e.target.value))}
+                className="w-full"
+              />
+              <span className="text-sm text-gray-500">{config.storage_interval_seconds || 1}s</span>
+            </div>
+          </div>
+        );
 
       default:
         return (

@@ -572,24 +572,24 @@ pub fn parse_websocket_config(
         .and_then(|v| v.as_str())
         .unwrap_or("coinbase")
         .to_string();
-    
+
     let symbols: Vec<String> = config.get("symbols")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    
+
     let storage_interval_ms = config.get("storageIntervalMs")
         .and_then(|v| v.as_u64())
         .unwrap_or(1000); // Default: 1 second
-    
+
     let include_orderbook = config.get("includeOrderbook")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    
+
     let orderbook_depth = config.get("orderbookDepth")
         .and_then(|v| v.as_u64())
         .unwrap_or(10) as usize;
-    
+
     Ok(WebSocketScraperConfig {
         node_id: node_id.to_string(),
         source_type: source_type.clone(),
@@ -600,4 +600,447 @@ pub fn parse_websocket_config(
         orderbook_depth,
         network_metrics: Arc::new(NetworkMetrics::new()),
     })
+}
+
+// ============================================================================
+// FINNHUB WEBSOCKET IMPLEMENTATION
+// ============================================================================
+//
+// Finnhub provides real-time trade data for stocks, forex, and commodities
+// (precious metals via OANDA forex pairs like OANDA:XAU_USD).
+//
+// Free tier: up to 50 symbols, real-time forex/crypto, API key required.
+// WebSocket URL: wss://ws.finnhub.io?token=API_KEY
+//
+// Subscribe:   {"type":"subscribe","symbol":"AAPL"}
+// Unsubscribe: {"type":"unsubscribe","symbol":"AAPL"}
+// Response:    {"data":[{"p":220.89,"s":"AAPL","t":1577090737396,"v":100}],"type":"trade"}
+// ============================================================================
+
+const FINNHUB_WS_URL: &str = "wss://ws.finnhub.io";
+
+/// Finnhub subscribe/unsubscribe message
+#[derive(Debug, Serialize)]
+struct FinnhubSubscribe {
+    #[serde(rename = "type")]
+    msg_type: String,
+    symbol: String,
+}
+
+/// Run a Finnhub WebSocket scraper for FinancialPrices or CommodityPrices nodes
+pub async fn run_finnhub_scraper(
+    config: WebSocketScraperConfig,
+    api_key: String,
+    db: Arc<Mutex<Connection>>,
+    window: Window,
+    mut command_rx: mpsc::Receiver<ScraperCommand>,
+) {
+    let mut retry_count = 0u32;
+    let max_retries = 10u32;
+
+    let mut ws_sender: Option<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>> = None;
+    let mut ws_receiver: Option<futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>> = None;
+
+    let mut subscribed_symbols: Vec<String> = config.symbols.clone();
+    let mut aggregated = AggregatedData::default();
+    let storage_interval = Duration::from_millis(config.storage_interval_ms);
+    let mut storage_timer = interval(storage_interval);
+    let mut last_stored_prices: HashMap<String, f64> = HashMap::new();
+    let mut connection_timer = interval(Duration::from_secs(5));
+
+    let source_label = match config.source_type {
+        InfoSourceType::FinancialPrices => "FinancialPrices",
+        InfoSourceType::CommodityPrices => "CommodityPrices",
+        _ => "Finnhub",
+    };
+
+    loop {
+        tokio::select! {
+            cmd = command_rx.recv() => {
+                match cmd {
+                    Some(ScraperCommand::AddSymbols(symbols)) => {
+                        for symbol in &symbols {
+                            if !subscribed_symbols.contains(symbol) {
+                                subscribed_symbols.push(symbol.clone());
+                            }
+                        }
+                        if let Some(ref mut sender) = ws_sender {
+                            for symbol in &symbols {
+                                let sub_msg = FinnhubSubscribe {
+                                    msg_type: "subscribe".to_string(),
+                                    symbol: symbol.clone(),
+                                };
+                                if let Ok(json) = serde_json::to_string(&sub_msg) {
+                                    let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                    config.network_metrics.record_sent(json.len() as u64);
+                                }
+                            }
+                        }
+                    }
+                    Some(ScraperCommand::RemoveSymbols(symbols)) => {
+                        subscribed_symbols.retain(|s| !symbols.contains(s));
+                        if let Some(ref mut sender) = ws_sender {
+                            for symbol in &symbols {
+                                let unsub_msg = FinnhubSubscribe {
+                                    msg_type: "unsubscribe".to_string(),
+                                    symbol: symbol.clone(),
+                                };
+                                if let Ok(json) = serde_json::to_string(&unsub_msg) {
+                                    let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                    config.network_metrics.record_sent(json.len() as u64);
+                                }
+                            }
+                        }
+                    }
+                    Some(ScraperCommand::SetStorageInterval(ms)) => {
+                        storage_timer = interval(Duration::from_millis(ms));
+                    }
+                    Some(ScraperCommand::Shutdown) | None => {
+                        if let Some(ref mut sender) = ws_sender {
+                            let _ = sender.close().await;
+                        }
+                        flush_aggregated_data(&db, &config.node_id, &aggregated, &mut last_stored_prices).await;
+                        break;
+                    }
+                }
+            }
+
+            msg = async {
+                if let Some(ref mut receiver) = ws_receiver {
+                    receiver.next().await
+                } else {
+                    futures_util::future::pending::<Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>>().await
+                }
+            } => {
+                if let Some(ref mut receiver) = ws_receiver {
+                    match receiver.next().await {
+                        Some(Ok(WsMessage::Text(text))) => {
+                            config.network_metrics.record_received(text.len() as u64);
+
+                            if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+                                let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                                match msg_type {
+                                    "trade" => {
+                                        // Finnhub trade: {"data":[{"p":price,"s":"SYMBOL","t":timestamp_ms,"v":volume}],"type":"trade"}
+                                        if let Some(trades) = value.get("data").and_then(|d| d.as_array()) {
+                                            for trade in trades {
+                                                let price = trade.get("p").and_then(|p| p.as_f64()).unwrap_or(0.0);
+                                                let symbol = trade.get("s").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                                                let ts = trade.get("t").and_then(|t| t.as_i64()).unwrap_or_else(|| Utc::now().timestamp_millis());
+                                                let volume = trade.get("v").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                                                if symbol.is_empty() || price == 0.0 {
+                                                    continue;
+                                                }
+
+                                                // Emit to frontend immediately
+                                                let price_update = serde_json::json!({
+                                                    "nodeId": config.node_id,
+                                                    "symbol": symbol,
+                                                    "price": price,
+                                                    "volume": volume,
+                                                    "timestamp": ts,
+                                                    "source": "finnhub",
+                                                });
+                                                let _ = window.emit("infosource:update", &price_update);
+
+                                                // Accumulate for storage
+                                                let entry = aggregated.prices.entry(symbol).or_insert_with(Vec::new);
+                                                entry.push((price, volume, ts));
+                                            }
+                                        }
+                                    }
+                                    "ping" => {
+                                        // Finnhub sends ping messages; respond with pong
+                                        if let Some(ref mut sender) = ws_sender {
+                                            let pong = serde_json::json!({"type": "pong"});
+                                            if let Ok(json) = serde_json::to_string(&pong) {
+                                                let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                                config.network_metrics.record_sent(json.len() as u64);
+                                            }
+                                        }
+                                    }
+                                    "error" => {
+                                        eprintln!("[{} Scraper {}] Finnhub error: {}", source_label, config.node_id, text);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Some(Ok(WsMessage::Ping(data))) => {
+                            if let Some(ref mut sender) = ws_sender {
+                                let _ = sender.send(WsMessage::Pong(data.clone())).await;
+                                config.network_metrics.record_sent(data.len() as u64);
+                            }
+                        }
+                        Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => {
+                            println!("[{} Scraper {}] Finnhub connection lost, will reconnect", source_label, config.node_id);
+                            ws_sender = None;
+                            ws_receiver = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            _ = storage_timer.tick() => {
+                if !aggregated.prices.is_empty() {
+                    flush_aggregated_data(&db, &config.node_id, &aggregated, &mut last_stored_prices).await;
+                    aggregated = AggregatedData::default();
+                }
+            }
+
+            _ = connection_timer.tick() => {
+                if ws_sender.is_none() && ws_receiver.is_none() && !subscribed_symbols.is_empty() {
+                    let url = format!("{}?token={}", FINNHUB_WS_URL, api_key);
+                    match connect_async(&url).await {
+                        Ok((ws_stream, _)) => {
+                            println!("[{} Scraper {}] Connected to Finnhub WebSocket", source_label, config.node_id);
+                            let (sender, receiver) = ws_stream.split();
+                            ws_sender = Some(sender);
+                            ws_receiver = Some(receiver);
+
+                            // Subscribe to each symbol individually (Finnhub requires one message per symbol)
+                            if let Some(ref mut sender) = ws_sender {
+                                for symbol in &subscribed_symbols {
+                                    let sub_msg = FinnhubSubscribe {
+                                        msg_type: "subscribe".to_string(),
+                                        symbol: symbol.clone(),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&sub_msg) {
+                                        let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                        config.network_metrics.record_sent(json.len() as u64);
+                                    }
+                                }
+                            }
+
+                            retry_count = 0;
+                        }
+                        Err(e) => {
+                            eprintln!("[{} Scraper {}] Finnhub connection failed: {}", source_label, config.node_id, e);
+                            retry_count += 1;
+                            if retry_count >= max_retries {
+                                eprintln!("[{} Scraper {}] Max retries reached", source_label, config.node_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("[{} Scraper {}] Exiting", source_label, config.node_id);
+}
+
+// ============================================================================
+// BINANCE WEBSOCKET IMPLEMENTATION
+// ============================================================================
+//
+// Binance provides free real-time trade data with no API key required.
+// Useful for commodity-adjacent assets like PAXG (tokenized gold).
+//
+// WebSocket URL: wss://stream.binance.com:9443/ws
+// Subscribe:   {"method":"SUBSCRIBE","params":["btcusdt@trade"],"id":1}
+// Unsubscribe: {"method":"UNSUBSCRIBE","params":["btcusdt@trade"],"id":2}
+// Response:    {"e":"trade","s":"BTCUSDT","p":"42000.50","q":"0.001","T":1672515782136,...}
+// ============================================================================
+
+const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
+
+/// Run a Binance WebSocket scraper for CommodityPrices nodes (PAXG gold, etc.)
+pub async fn run_binance_scraper(
+    config: WebSocketScraperConfig,
+    db: Arc<Mutex<Connection>>,
+    window: Window,
+    mut command_rx: mpsc::Receiver<ScraperCommand>,
+) {
+    let mut retry_count = 0u32;
+    let max_retries = 10u32;
+    let mut sub_id_counter = 1u64;
+
+    let mut ws_sender: Option<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>> = None;
+    let mut ws_receiver: Option<futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>> = None;
+
+    let mut subscribed_symbols: Vec<String> = config.symbols.clone();
+    let mut aggregated = AggregatedData::default();
+    let storage_interval = Duration::from_millis(config.storage_interval_ms);
+    let mut storage_timer = interval(storage_interval);
+    let mut last_stored_prices: HashMap<String, f64> = HashMap::new();
+    let mut connection_timer = interval(Duration::from_secs(5));
+
+    // Map from display symbol (e.g., "PAXG/USDT") to Binance stream name (e.g., "paxgusdt")
+    let to_stream_name = |symbol: &str| -> String {
+        symbol.to_lowercase().replace('/', "").replace('-', "")
+    };
+
+    loop {
+        tokio::select! {
+            cmd = command_rx.recv() => {
+                match cmd {
+                    Some(ScraperCommand::AddSymbols(symbols)) => {
+                        for symbol in &symbols {
+                            if !subscribed_symbols.contains(symbol) {
+                                subscribed_symbols.push(symbol.clone());
+                            }
+                        }
+                        if let Some(ref mut sender) = ws_sender {
+                            let params: Vec<String> = symbols.iter()
+                                .map(|s| format!("{}@trade", to_stream_name(s)))
+                                .collect();
+                            sub_id_counter += 1;
+                            let sub_msg = serde_json::json!({
+                                "method": "SUBSCRIBE",
+                                "params": params,
+                                "id": sub_id_counter
+                            });
+                            if let Ok(json) = serde_json::to_string(&sub_msg) {
+                                let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                config.network_metrics.record_sent(json.len() as u64);
+                            }
+                        }
+                    }
+                    Some(ScraperCommand::RemoveSymbols(symbols)) => {
+                        subscribed_symbols.retain(|s| !symbols.contains(s));
+                        if let Some(ref mut sender) = ws_sender {
+                            let params: Vec<String> = symbols.iter()
+                                .map(|s| format!("{}@trade", to_stream_name(s)))
+                                .collect();
+                            sub_id_counter += 1;
+                            let unsub_msg = serde_json::json!({
+                                "method": "UNSUBSCRIBE",
+                                "params": params,
+                                "id": sub_id_counter
+                            });
+                            if let Ok(json) = serde_json::to_string(&unsub_msg) {
+                                let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                config.network_metrics.record_sent(json.len() as u64);
+                            }
+                        }
+                    }
+                    Some(ScraperCommand::SetStorageInterval(ms)) => {
+                        storage_timer = interval(Duration::from_millis(ms));
+                    }
+                    Some(ScraperCommand::Shutdown) | None => {
+                        if let Some(ref mut sender) = ws_sender {
+                            let _ = sender.close().await;
+                        }
+                        flush_aggregated_data(&db, &config.node_id, &aggregated, &mut last_stored_prices).await;
+                        break;
+                    }
+                }
+            }
+
+            msg = async {
+                if let Some(ref mut receiver) = ws_receiver {
+                    receiver.next().await
+                } else {
+                    futures_util::future::pending::<Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>>().await
+                }
+            } => {
+                if let Some(ref mut receiver) = ws_receiver {
+                    match receiver.next().await {
+                        Some(Ok(WsMessage::Text(text))) => {
+                            config.network_metrics.record_received(text.len() as u64);
+
+                            if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+                                let event_type = value.get("e").and_then(|e| e.as_str()).unwrap_or("");
+
+                                if event_type == "trade" {
+                                    // Binance trade: {"e":"trade","s":"PAXGUSDT","p":"2350.50","q":"0.1","T":...}
+                                    let symbol = value.get("s").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                                    let price = value.get("p").and_then(|p| p.as_str())
+                                        .and_then(|p| p.parse::<f64>().ok())
+                                        .unwrap_or(0.0);
+                                    let quantity = value.get("q").and_then(|q| q.as_str())
+                                        .and_then(|q| q.parse::<f64>().ok())
+                                        .unwrap_or(0.0);
+                                    let ts = value.get("T").and_then(|t| t.as_i64())
+                                        .unwrap_or_else(|| Utc::now().timestamp_millis());
+
+                                    if !symbol.is_empty() && price > 0.0 {
+                                        // Emit to frontend
+                                        let price_update = serde_json::json!({
+                                            "nodeId": config.node_id,
+                                            "symbol": symbol,
+                                            "price": price,
+                                            "volume": quantity,
+                                            "timestamp": ts,
+                                            "source": "binance",
+                                        });
+                                        let _ = window.emit("infosource:update", &price_update);
+
+                                        // Accumulate for storage
+                                        let entry = aggregated.prices.entry(symbol).or_insert_with(Vec::new);
+                                        entry.push((price, quantity, ts));
+                                    }
+                                }
+                                // Ignore subscription confirmations and other messages
+                            }
+                        }
+                        Some(Ok(WsMessage::Ping(data))) => {
+                            if let Some(ref mut sender) = ws_sender {
+                                let _ = sender.send(WsMessage::Pong(data.clone())).await;
+                                config.network_metrics.record_sent(data.len() as u64);
+                            }
+                        }
+                        Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => {
+                            println!("[CommodityPrices Scraper {}] Binance connection lost, will reconnect", config.node_id);
+                            ws_sender = None;
+                            ws_receiver = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            _ = storage_timer.tick() => {
+                if !aggregated.prices.is_empty() {
+                    flush_aggregated_data(&db, &config.node_id, &aggregated, &mut last_stored_prices).await;
+                    aggregated = AggregatedData::default();
+                }
+            }
+
+            _ = connection_timer.tick() => {
+                if ws_sender.is_none() && ws_receiver.is_none() && !subscribed_symbols.is_empty() {
+                    match connect_async(BINANCE_WS_URL).await {
+                        Ok((ws_stream, _)) => {
+                            println!("[CommodityPrices Scraper {}] Connected to Binance WebSocket", config.node_id);
+                            let (sender, receiver) = ws_stream.split();
+                            ws_sender = Some(sender);
+                            ws_receiver = Some(receiver);
+
+                            // Subscribe to all symbols
+                            if let Some(ref mut sender) = ws_sender {
+                                let params: Vec<String> = subscribed_symbols.iter()
+                                    .map(|s| format!("{}@trade", to_stream_name(s)))
+                                    .collect();
+                                sub_id_counter += 1;
+                                let sub_msg = serde_json::json!({
+                                    "method": "SUBSCRIBE",
+                                    "params": params,
+                                    "id": sub_id_counter
+                                });
+                                if let Ok(json) = serde_json::to_string(&sub_msg) {
+                                    let _ = sender.send(WsMessage::Text(json.clone())).await;
+                                    config.network_metrics.record_sent(json.len() as u64);
+                                }
+                            }
+
+                            retry_count = 0;
+                        }
+                        Err(e) => {
+                            eprintln!("[CommodityPrices Scraper {}] Binance connection failed: {}", config.node_id, e);
+                            retry_count += 1;
+                            if retry_count >= max_retries {
+                                eprintln!("[CommodityPrices Scraper {}] Max retries reached", config.node_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("[CommodityPrices Scraper {}] Exiting", config.node_id);
 }

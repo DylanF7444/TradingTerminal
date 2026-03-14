@@ -80,6 +80,9 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
     let _ = conn.execute("ALTER TABLE nodes ADD COLUMN size_width REAL", []);
     let _ = conn.execute("ALTER TABLE nodes ADD COLUMN size_height REAL", []);
 
+    // Add retention_seconds column for auto-deletion (migration)
+    let _ = conn.execute("ALTER TABLE nodes ADD COLUMN retention_seconds INTEGER DEFAULT NULL", []);
+
     // Connections table - stores edges between nodes
     conn.execute(
         "CREATE TABLE IF NOT EXISTS connections (
@@ -1136,6 +1139,62 @@ fn deserialize_node(row: &Row) -> Node {
         connections: vec![], // Loaded separately
         metadata,
     }
+}
+
+// ============================================================================
+// DATA RETENTION OPERATIONS
+// ============================================================================
+
+/// Set the retention period (in seconds) for a node's stored data.
+/// Pass None to disable auto-deletion (keep data forever).
+pub fn set_node_retention(conn: &Connection, node_id: &str, retention_seconds: Option<i64>) -> SqliteResult<()> {
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "UPDATE nodes SET retention_seconds = ?1, updated_at = ?2 WHERE id = ?3",
+        params![retention_seconds, now, node_id],
+    )?;
+    Ok(())
+}
+
+/// Get the retention period (in seconds) for a node, or None if unlimited.
+pub fn get_node_retention(conn: &Connection, node_id: &str) -> SqliteResult<Option<i64>> {
+    conn.query_row(
+        "SELECT retention_seconds FROM nodes WHERE id = ?1",
+        params![node_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+}
+
+/// Prune expired timeseries and websocket data for all nodes with a retention period.
+/// Returns the total number of rows deleted across all nodes.
+pub fn prune_expired_data(conn: &Connection) -> SqliteResult<usize> {
+    let now = Utc::now().timestamp();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, retention_seconds FROM nodes WHERE retention_seconds IS NOT NULL AND archived = 0"
+    )?;
+
+    let nodes: Vec<(String, i64)> = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?.filter_map(|r| r.ok()).collect();
+
+    let mut total_deleted = 0usize;
+
+    for (node_id, retention_seconds) in &nodes {
+        let cutoff = now - retention_seconds;
+
+        total_deleted += conn.execute(
+            "DELETE FROM timeseries WHERE source_id = ?1 AND timestamp < ?2",
+            params![node_id, cutoff],
+        )?;
+
+        total_deleted += conn.execute(
+            "DELETE FROM websocket_messages WHERE node_id = ?1 AND timestamp < ?2",
+            params![node_id, cutoff],
+        )?;
+    }
+
+    Ok(total_deleted)
 }
 
 // ============================================================================

@@ -46,6 +46,7 @@ import { removeNode as removeNodeFromDb, updateNodeSize, removeConnection as rem
 
 // Extracted utilities
 import { transformNodeFromBackend } from './utils/nodeTransform';
+import { getNodeDisplayName } from './utils/nodeHelpers';
 import { createDemoNodes } from './utils/demoData';
 
 // Extracted hooks
@@ -58,10 +59,12 @@ import SourcePanel from './components/InfoSources/SourcePanel';
 import MarketPanel from './components/Markets/MarketPanel';
 import AnalyzerPanel from './components/Analyzers/AnalyzerPanel';
 import GlobalOrderbookOverlay from './components/Markets/GlobalOrderbookOverlay';
+import { ChartOverlay } from './components/Nodes/ChartOverlay';
 import PerformanceMetrics from './components/Metrics/PerformanceMetrics';
 import ApiKeySettings from './components/Settings/ApiKeySettings';
 import { RemoteAccessPanel } from './components/Remote/RemoteAccessPanel';
 import { NodeDataPanel } from './components/Nodes/NodeDataPanel';
+import { WeatherPanel } from './components/Nodes/WeatherPanel';
 
 // Extracted components
 import { Clock } from './components/UI/Clock';
@@ -239,6 +242,11 @@ function App(): ReactNode {
     marketQuestion?: string;
     tokenIds?: string[];
   } | null>(null);
+  const [chartOverlay, setChartOverlay] = useState<{
+    nodeId: string;
+    nodeName: string;
+    metrics: string[];
+  } | null>(null);
   const [detailPanelTab, setDetailPanelTab] = useState<'details' | 'raw-stream' | 'stored-data'>('details');
   const [connectionMode, setConnectionMode] = useState(false);
   const [windowSize, setWindowSize] = useState(() => ({
@@ -361,6 +369,14 @@ function App(): ReactNode {
   );
 
   const handleCloseOrderbook = useCallback(() => setOrderbookOverlay(null), []);
+
+  const handleOpenChartOverlay = useCallback(
+    (nodeId: string, nodeName: string, metrics: string[]) => {
+      setChartOverlay({ nodeId, nodeName, metrics });
+    },
+    [],
+  );
+  const handleCloseChartOverlay = useCallback(() => setChartOverlay(null), []);
 
   const handleCreateConnection = useCallback((sourceId: string, targetId: string) => {
     const { addConnection, connections: conns } = useStore.getState();
@@ -492,10 +508,20 @@ function App(): ReactNode {
           ) : detailPanelTab === 'raw-stream' ? (
             <RawStreamTab nodeId={selectedNode.id} />
           ) : (
-            <NodeDataPanel
-              nodeId={selectedNode.id}
-              nodeType={selectedNode.node_type && 'InfoSource' in selectedNode.node_type ? 'InfoSource' : 'Market'}
-            />
+            selectedNode.node_type && 'InfoSource' in selectedNode.node_type && selectedNode.node_type.InfoSource === 'Weather' ? (
+              <WeatherPanel
+                nodeId={selectedNode.id}
+                nodeName={getNodeDisplayName(selectedNode)}
+                onOpenChartOverlay={handleOpenChartOverlay}
+              />
+            ) : (
+              <NodeDataPanel
+                nodeId={selectedNode.id}
+                nodeName={getNodeDisplayName(selectedNode)}
+                nodeType={selectedNode.node_type && 'InfoSource' in selectedNode.node_type ? 'InfoSource' : 'Market'}
+                onOpenChartOverlay={handleOpenChartOverlay}
+              />
+            )
           )}
         </PanelErrorBoundary>
       </div>
@@ -618,6 +644,14 @@ function App(): ReactNode {
           marketQuestion={orderbookOverlay.marketQuestion}
           tokenIds={orderbookOverlay.tokenIds}
           onClose={handleCloseOrderbook}
+        />
+      )}
+      {chartOverlay && (
+        <ChartOverlay
+          nodeId={chartOverlay.nodeId}
+          nodeName={chartOverlay.nodeName}
+          metrics={chartOverlay.metrics}
+          onClose={handleCloseChartOverlay}
         />
       )}
     </div>

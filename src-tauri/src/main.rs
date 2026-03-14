@@ -249,6 +249,10 @@ fn main() {
             get_node_storage_usage_cmd,
             get_aggregate_storage_stats_cmd,
             set_market_storage_interval_cmd,
+
+            // Data retention commands
+            set_node_retention_period_cmd,
+            get_node_retention_cmd,
             
             // System commands
             get_system_info_cmd,
@@ -554,6 +558,28 @@ async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             monitor_for_flush.flush_to_database().await;
+        }
+    });
+
+    // ====================================================================
+    // PERIODIC DATA RETENTION PRUNER
+    // ====================================================================
+    // Every 60 seconds, delete expired timeseries and websocket data
+    // for nodes that have a retention period configured.
+    // ====================================================================
+    let pruner_db = state.db.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let conn = pruner_db.lock().await;
+            match sqlite::prune_expired_data(&conn) {
+                Ok(deleted) => {
+                    if deleted > 0 {
+                        println!("[Pruner] Deleted {} expired data points", deleted);
+                    }
+                }
+                Err(e) => eprintln!("[Pruner] Error pruning expired data: {}", e),
+            }
         }
     });
     
@@ -1891,6 +1917,41 @@ async fn set_market_storage_interval_cmd(
     monitor.set_storage_config(&node_id, mode, interval_ms).await;
 
     Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Data Retention Commands
+// -------------------------------------------------------------------------
+
+/// Set the auto-deletion retention period for a node's stored data
+///
+/// Frontend: await invoke('set_node_retention_period_cmd', { nodeId, retentionSeconds: 86400 })
+#[tauri::command]
+async fn set_node_retention_period_cmd(
+    node_id: String,
+    retention_seconds: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::set_node_retention(&conn, &node_id, retention_seconds)
+            .map_err(|e| format!("Database error: {}", e))
+    })
+}
+
+/// Get the auto-deletion retention period for a node
+///
+/// Frontend: await invoke('get_node_retention_cmd', { nodeId })
+#[tauri::command]
+async fn get_node_retention_cmd(
+    node_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<i64>, String> {
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_node_retention(&conn, &node_id)
+            .map_err(|e| format!("Database error: {}", e))
+    })
 }
 
 // -------------------------------------------------------------------------

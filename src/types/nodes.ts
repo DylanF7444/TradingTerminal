@@ -329,6 +329,9 @@ export interface InfoSourceMetadata {
     raw?: any; // Original API response
   };
   
+  /** Auto-deletion period in seconds (null = keep forever) */
+  retentionPeriodSeconds?: number | null;
+
   /** Data quality metrics */
   quality?: {
     /** Success rate of last 100 fetches (0-1) */
@@ -388,7 +391,10 @@ export interface MarketMetadata {
   
   /** Linked position IDs (populated at runtime) */
   openPositionIds?: string[];
-  
+
+  /** Auto-deletion period in seconds (null = keep forever) */
+  retentionPeriodSeconds?: number | null;
+
   /** Current market state (synced from marketsSlice) */
   marketState?: {
     status: 'open' | 'closed' | 'suspended';

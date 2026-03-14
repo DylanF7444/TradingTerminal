@@ -689,6 +689,100 @@ export function useDataSourceEvents(): void {
             console.log(
               `[DataSource] Social update for ${payload.nodeId}: ${allPosts.length} posts from ${platformNames.join(', ')}`
             );
+          } else if (payload.sourceType === 'Weather') {
+            // Parse weather DataPoints into current conditions
+            const conditions: Record<string, { value: number; unit: string; extra?: Record<string, unknown> }> = {};
+            for (const point of payload.data.points) {
+              const meta = point.metadata as Record<string, unknown> | undefined;
+              conditions[point.metric_type] = {
+                value: point.value,
+                unit: (meta?.unit as string) || '',
+                extra: meta,
+              };
+            }
+
+            const weatherMeta = payload.data.metadata as Record<string, unknown>;
+            const locationName = (weatherMeta?.location as string) || 'Unknown';
+            const weatherDesc = (weatherMeta?.weather_description as string) || '';
+            const weatherCode = (weatherMeta?.weather_code as number) ?? 0;
+            const forecast = weatherMeta?.daily_forecast;
+
+            // 1. Append to raw stream
+            appendRawDataEntry(payload.nodeId, {
+              data: {
+                type: 'weather_update',
+                location: locationName,
+                country: weatherMeta?.country,
+                description: weatherDesc,
+                weather_code: weatherCode,
+                conditions,
+                forecast,
+              },
+              source: 'open_meteo',
+              status: 'success',
+            });
+
+            // 2. Update node metadata
+            const { nodes, connections } = useStore.getState();
+            const node = nodes[payload.nodeId];
+            if (!node) return;
+
+            const currentMetadata = (node.metadata as Record<string, any>) || {};
+            updateNodeMetadata(payload.nodeId, {
+              ...currentMetadata,
+              lastData: {
+                timestamp: payload.timestamp,
+                location: locationName,
+                country: weatherMeta?.country,
+                latitude: weatherMeta?.latitude,
+                longitude: weatherMeta?.longitude,
+                timezone: weatherMeta?.timezone,
+                weatherDescription: weatherDesc,
+                weatherCode,
+                conditions,
+                forecast,
+                temperatureUnit: weatherMeta?.temperature_unit,
+                windSpeedUnit: weatherMeta?.wind_speed_unit,
+              },
+              quality: {
+                ...(currentMetadata.quality || {}),
+                successRate: 1.0,
+                lastError: undefined,
+              },
+            });
+
+            // 3. Propagate to connected Market nodes
+            const outgoing = connections.filter((c) => c.source === payload.nodeId);
+            for (const conn of outgoing) {
+              const target = nodes[conn.target];
+              if (!target?.node_type || !('Market' in target.node_type)) continue;
+
+              const targetMeta = (target.metadata as Record<string, any>) || {};
+              const incomingData = { ...(targetMeta.incomingData || {}) };
+              incomingData[payload.nodeId] = {
+                sourceName: `Weather - ${locationName}`,
+                sourceType: 'Weather',
+                conditions,
+                weatherDescription: weatherDesc,
+                location: locationName,
+                timestamp: payload.timestamp,
+                strength: conn.strength || 1.0,
+              };
+
+              updateNodeMetadata(conn.target, {
+                ...targetMeta,
+                incomingData,
+                lastData: {
+                  timestamp: payload.timestamp,
+                  value: conditions.temperature?.value ?? 0,
+                  sourceId: payload.nodeId,
+                },
+              });
+            }
+
+            console.log(
+              `[DataSource] Weather update for ${payload.nodeId}: ${weatherDesc} at ${locationName}`
+            );
           }
         });
 

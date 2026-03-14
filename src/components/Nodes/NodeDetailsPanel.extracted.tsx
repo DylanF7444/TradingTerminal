@@ -265,6 +265,11 @@ export function NodeDetailsPanelExtracted({
       {/* Storage Usage - shown for ALL node types */}
       <StorageUsageIndicator nodeId={node.id} />
 
+      {/* Data Retention - shown for InfoSource and Market nodes */}
+      {(isInfoSource(node) || isMarket(node)) && (
+        <DataRetentionSelector node={node} metadata={metadata} />
+      )}
+
       {/* Incoming Data from InfoSources (for Market nodes) */}
       {isMarket(node) && metadata.incomingData && Object.keys(metadata.incomingData).length > 0 && (
         <div className="bg-gray-800/50 rounded-lg p-3">
@@ -334,6 +339,14 @@ export function NodeDetailsPanelExtracted({
 
         {/* Storage Interval Adjustment for Coinbase CryptoPrices */}
         {isInfoSource(node) && nodeSubtype === 'CryptoPrices' && metadata.provider === 'coinbase' && (
+          <StorageIntervalSlider node={node} metadata={metadata} nodeCategory="infosource" />
+        )}
+        {/* Storage Interval Adjustment for Finnhub FinancialPrices */}
+        {isInfoSource(node) && nodeSubtype === 'FinancialPrices' && metadata.provider === 'finnhub' && (
+          <StorageIntervalSlider node={node} metadata={metadata} nodeCategory="infosource" />
+        )}
+        {/* Storage Interval Adjustment for CommodityPrices (Finnhub or Binance) */}
+        {isInfoSource(node) && nodeSubtype === 'CommodityPrices' && (metadata.provider === 'finnhub' || metadata.provider === 'binance') && (
           <StorageIntervalSlider node={node} metadata={metadata} nodeCategory="infosource" />
         )}
       </div>
@@ -657,6 +670,74 @@ function StorageUsageIndicator({ nodeId }: { nodeId: string }) {
           <ConfigRow label="WS Messages" value={usage.websocket_message_rows.toLocaleString()} />
         )}
       </div>
+    </div>
+  );
+}
+
+/** Dropdown to set auto-deletion retention period for node data. */
+function DataRetentionSelector({
+  node,
+  metadata,
+}: {
+  node: Node;
+  metadata: Record<string, any>;
+}) {
+  const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
+  const currentRetention = metadata.retentionPeriodSeconds as number | null | undefined;
+
+  const RETENTION_OPTIONS: { label: string; value: number | null }[] = [
+    { label: 'Keep Forever', value: null },
+    { label: '1 Hour', value: 3600 },
+    { label: '6 Hours', value: 21600 },
+    { label: '24 Hours', value: 86400 },
+    { label: '3 Days', value: 259200 },
+    { label: '7 Days', value: 604800 },
+    { label: '30 Days', value: 2592000 },
+  ];
+
+  const handleChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const raw = e.target.value;
+    const newRetention = raw === '' ? null : parseInt(raw);
+
+    try {
+      await invoke('set_node_retention_period_cmd', {
+        nodeId: node.id,
+        retentionSeconds: newRetention,
+      });
+      updateNodeMetadata(node.id, {
+        ...metadata,
+        retentionPeriodSeconds: newRetention,
+      });
+    } catch (err) {
+      console.error('Failed to update retention period:', err);
+    }
+  };
+
+  const formatRetention = (seconds: number): string => {
+    if (seconds < 3600) return `${Math.round(seconds / 60)} minutes`;
+    if (seconds < 86400) return `${Math.round(seconds / 3600)} hours`;
+    return `${Math.round(seconds / 86400)} days`;
+  };
+
+  return (
+    <div className="bg-gray-800/50 rounded-lg p-3">
+      <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">Data Retention</h3>
+      <select
+        value={currentRetention ?? ''}
+        onChange={handleChange}
+        className="w-full bg-gray-700 text-gray-200 text-xs rounded px-2 py-1.5 border border-gray-600 focus:border-blue-500 focus:outline-none"
+      >
+        {RETENTION_OPTIONS.map((opt) => (
+          <option key={opt.value ?? 'forever'} value={opt.value ?? ''}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+      <p className="text-xs text-gray-600 mt-1">
+        {currentRetention
+          ? `Data older than ${formatRetention(currentRetention)} will be automatically deleted.`
+          : 'All stored data will be kept indefinitely.'}
+      </p>
     </div>
   );
 }

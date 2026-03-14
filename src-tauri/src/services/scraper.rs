@@ -97,16 +97,27 @@ pub async fn spawn_scraper(
     println!("[SCRAPER] Config: {}", config);
     
     // Check if this is a WebSocket-capable source
-    if source_type == InfoSourceType::CryptoPrices {
-        let provider = config.get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("coingecko");
-        
-        println!("[SCRAPER] Detected provider: {}", provider);
-        
-        if provider == "coinbase" {
-            // Use WebSocket scraper for Coinbase
-            return spawn_websocket_scraper(node_id, source_type, config, db, window, network_metrics).await;
+    let provider = config.get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("coingecko");
+
+    println!("[SCRAPER] Detected provider: {}", provider);
+
+    if source_type == InfoSourceType::CryptoPrices && provider == "coinbase" {
+        return spawn_websocket_scraper(node_id, source_type, config, db, window, network_metrics).await;
+    }
+
+    // FinancialPrices with finnhub provider -> WebSocket
+    if source_type == InfoSourceType::FinancialPrices && provider == "finnhub" {
+        return spawn_finnhub_scraper(node_id, source_type, config, db, window, network_metrics).await;
+    }
+
+    // CommodityPrices -> WebSocket (finnhub for metals via forex, binance for PAXG)
+    if source_type == InfoSourceType::CommodityPrices && (provider == "finnhub" || provider == "binance") {
+        if provider == "binance" {
+            return spawn_binance_scraper(node_id, source_type, config, db, window, network_metrics).await;
+        } else {
+            return spawn_finnhub_scraper(node_id, source_type, config, db, window, network_metrics).await;
         }
     }
     
@@ -207,14 +218,148 @@ async fn spawn_websocket_scraper(
     
     // Spawn WebSocket scraper
     let join_handle = tokio::spawn(run_coinbase_scraper(ws_config, db, window, command_rx));
-    
+
     println!("WebSocket scraper spawned for node {}: coinbase", node_id);
-    
+
     // Wait for both tasks (shutdown wrapper and actual scraper)
     Ok(ScraperHandle {
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
         command_tx: Some(command_tx), // WebSocket scrapers support dynamic commands
+    })
+}
+
+/// Spawn a Finnhub WebSocket scraper for FinancialPrices or CommodityPrices nodes
+async fn spawn_finnhub_scraper(
+    node_id: String,
+    source_type: InfoSourceType,
+    config: JsonValue,
+    db: Arc<Mutex<Connection>>,
+    window: Window,
+    network_metrics: Arc<crate::services::websocket_manager::NetworkMetrics>,
+) -> Result<ScraperHandle, anyhow::Error> {
+    use super::websocket_scraper::{
+        WebSocketScraperConfig, run_finnhub_scraper, ScraperCommand,
+    };
+
+    println!("[SCRAPER] Entered spawn_finnhub_scraper for node {}", node_id);
+
+    let symbols: Vec<String> = config.get("symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    println!("[SCRAPER] Finnhub symbols: {:?}", symbols);
+
+    let storage_interval_ms = config.get("storageIntervalMs")
+        .and_then(|v| v.as_u64())
+        .or_else(|| config.get("storage_interval_seconds").and_then(|v| v.as_u64()).map(|s| s * 1000))
+        .unwrap_or(1000);
+
+    // Get API key from config or stored api_keys table
+    let api_key = config.get("api_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // Try to load from DB
+            let conn = db.blocking_lock();
+            crate::db::sqlite::get_api_key(&conn, "finnhub")
+                .ok()
+                .flatten()
+                .map(|stored| stored.api_key)
+                .unwrap_or_default()
+        });
+
+    if api_key.is_empty() {
+        return Err(anyhow::anyhow!("Finnhub API key is required. Get a free key at finnhub.io and add it in Settings."));
+    }
+
+    let ws_config = WebSocketScraperConfig {
+        node_id: node_id.clone(),
+        source_type,
+        provider: "finnhub".to_string(),
+        symbols,
+        storage_interval_ms,
+        include_orderbook: false,
+        orderbook_depth: 0,
+        network_metrics,
+    };
+
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+    let (command_tx, command_rx) = mpsc::channel(100);
+    let command_tx_clone = command_tx.clone();
+
+    let _shutdown_handle = tokio::spawn(async move {
+        let _ = shutdown_rx.recv().await;
+        let _ = command_tx_clone.send(ScraperCommand::Shutdown).await;
+    });
+
+    let join_handle = tokio::spawn(run_finnhub_scraper(ws_config, api_key, db, window, command_rx));
+
+    println!("Finnhub WebSocket scraper spawned for node {}", node_id);
+
+    Ok(ScraperHandle {
+        join_handle: std::sync::Arc::new(join_handle),
+        shutdown_tx,
+        command_tx: Some(command_tx),
+    })
+}
+
+/// Spawn a Binance WebSocket scraper for CommodityPrices nodes (PAXG gold, etc.)
+async fn spawn_binance_scraper(
+    node_id: String,
+    source_type: InfoSourceType,
+    config: JsonValue,
+    db: Arc<Mutex<Connection>>,
+    window: Window,
+    network_metrics: Arc<crate::services::websocket_manager::NetworkMetrics>,
+) -> Result<ScraperHandle, anyhow::Error> {
+    use super::websocket_scraper::{
+        WebSocketScraperConfig, run_binance_scraper, ScraperCommand,
+    };
+
+    println!("[SCRAPER] Entered spawn_binance_scraper for node {}", node_id);
+
+    let symbols: Vec<String> = config.get("symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    println!("[SCRAPER] Binance symbols: {:?}", symbols);
+
+    let storage_interval_ms = config.get("storageIntervalMs")
+        .and_then(|v| v.as_u64())
+        .or_else(|| config.get("storage_interval_seconds").and_then(|v| v.as_u64()).map(|s| s * 1000))
+        .unwrap_or(1000);
+
+    let ws_config = WebSocketScraperConfig {
+        node_id: node_id.clone(),
+        source_type,
+        provider: "binance".to_string(),
+        symbols,
+        storage_interval_ms,
+        include_orderbook: false,
+        orderbook_depth: 0,
+        network_metrics,
+    };
+
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+    let (command_tx, command_rx) = mpsc::channel(100);
+    let command_tx_clone = command_tx.clone();
+
+    let _shutdown_handle = tokio::spawn(async move {
+        let _ = shutdown_rx.recv().await;
+        let _ = command_tx_clone.send(ScraperCommand::Shutdown).await;
+    });
+
+    let join_handle = tokio::spawn(run_binance_scraper(ws_config, db, window, command_rx));
+
+    println!("Binance WebSocket scraper spawned for node {}", node_id);
+
+    Ok(ScraperHandle {
+        join_handle: std::sync::Arc::new(join_handle),
+        shutdown_tx,
+        command_tx: Some(command_tx),
     })
 }
 
@@ -648,27 +793,181 @@ async fn scrape_news(client: &Client, config: &ScraperConfig) -> Result<ScrapedD
     })
 }
 
-/// Scrape weather data
+/// Scrape weather data from Open-Meteo API (free, no API key required)
 async fn scrape_weather(client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
     let location: String = serde_json::from_value(
         config.params.get("location").cloned().unwrap_or(serde_json::json!("New York"))
     )?;
-    
-    // OpenWeatherMap API (simplified)
-    // In real implementation: geocode location, fetch current weather
-    
-    let points = vec![
-        DataPoint {
+
+    let temperature_unit: String = serde_json::from_value(
+        config.params.get("temperature_unit").cloned().unwrap_or(serde_json::json!("fahrenheit"))
+    )?;
+
+    let wind_speed_unit: String = serde_json::from_value(
+        config.params.get("wind_speed_unit").cloned().unwrap_or(serde_json::json!("mph"))
+    )?;
+
+    // Step 1: Geocode location to lat/lon using Open-Meteo geocoding API
+    let geo_url = format!(
+        "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
+        urlencoding::encode(&location)
+    );
+
+    let geo_response = client.get(&geo_url)
+        .send()
+        .await?
+        .json::<JsonValue>()
+        .await?;
+
+    let geo_results = geo_response.get("results")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| anyhow::anyhow!("No location found for '{}'", location))?;
+
+    let first = geo_results.first()
+        .ok_or_else(|| anyhow::anyhow!("No location found for '{}'", location))?;
+
+    let lat = first.get("latitude").and_then(|v| v.as_f64())
+        .ok_or_else(|| anyhow::anyhow!("Missing latitude in geocoding response"))?;
+    let lon = first.get("longitude").and_then(|v| v.as_f64())
+        .ok_or_else(|| anyhow::anyhow!("Missing longitude in geocoding response"))?;
+    let resolved_name = first.get("name").and_then(|v| v.as_str()).unwrap_or(&location);
+    let country = first.get("country").and_then(|v| v.as_str()).unwrap_or("");
+    let timezone = first.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC");
+
+    // Step 2: Fetch current weather + 7-day forecast from Open-Meteo
+    let weather_url = format!(
+        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+        &current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,\
+        wind_speed_10m,wind_direction_10m,surface_pressure,uv_index\
+        &daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,\
+        precipitation_probability_max,wind_speed_10m_max,uv_index_max\
+        &temperature_unit={}&wind_speed_unit={}&timezone={}&forecast_days=7",
+        lat, lon, temperature_unit, wind_speed_unit, urlencoding::encode(timezone)
+    );
+
+    let weather_response = client.get(&weather_url)
+        .send()
+        .await?
+        .json::<JsonValue>()
+        .await?;
+
+    let current = weather_response.get("current")
+        .ok_or_else(|| anyhow::anyhow!("No current weather data in response"))?;
+
+    let mut points = Vec::new();
+    let temp_unit_label = if temperature_unit == "fahrenheit" { "°F" } else { "°C" };
+    let wind_unit_label = if wind_speed_unit == "mph" { "mph" } else { "km/h" };
+
+    // Extract current conditions as DataPoints
+    if let Some(temp) = current.get("temperature_2m").and_then(|v| v.as_f64()) {
+        points.push(DataPoint {
             metric_type: "temperature".to_string(),
-            value: 22.5, // Celsius
+            value: temp,
             metadata: Some(serde_json::json!({
-                "location": location,
-                "unit": "celsius"
+                "location": resolved_name, "country": country, "unit": temp_unit_label,
+                "lat": lat, "lon": lon
             })),
-        }
-    ];
-    
-    Ok(ScrapedData { points, metadata: serde_json::json!({}) })
+        });
+    }
+    if let Some(val) = current.get("apparent_temperature").and_then(|v| v.as_f64()) {
+        points.push(DataPoint {
+            metric_type: "feels_like".to_string(),
+            value: val,
+            metadata: Some(serde_json::json!({ "unit": temp_unit_label })),
+        });
+    }
+    if let Some(val) = current.get("relative_humidity_2m").and_then(|v| v.as_f64()) {
+        points.push(DataPoint {
+            metric_type: "humidity".to_string(),
+            value: val,
+            metadata: Some(serde_json::json!({ "unit": "%" })),
+        });
+    }
+    if let Some(val) = current.get("wind_speed_10m").and_then(|v| v.as_f64()) {
+        let direction = current.get("wind_direction_10m").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        points.push(DataPoint {
+            metric_type: "wind_speed".to_string(),
+            value: val,
+            metadata: Some(serde_json::json!({ "unit": wind_unit_label, "direction": direction })),
+        });
+    }
+    if let Some(val) = current.get("precipitation").and_then(|v| v.as_f64()) {
+        points.push(DataPoint {
+            metric_type: "precipitation".to_string(),
+            value: val,
+            metadata: Some(serde_json::json!({ "unit": "mm" })),
+        });
+    }
+    if let Some(val) = current.get("surface_pressure").and_then(|v| v.as_f64()) {
+        points.push(DataPoint {
+            metric_type: "pressure".to_string(),
+            value: val,
+            metadata: Some(serde_json::json!({ "unit": "hPa" })),
+        });
+    }
+    if let Some(val) = current.get("uv_index").and_then(|v| v.as_f64()) {
+        points.push(DataPoint {
+            metric_type: "uv_index".to_string(),
+            value: val,
+            metadata: Some(serde_json::json!({ "unit": "index" })),
+        });
+    }
+
+    let weather_code = current.get("weather_code").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    if points.is_empty() {
+        return Err(anyhow::anyhow!("No weather data returned for '{}'", location));
+    }
+
+    // Build metadata with forecast data for the frontend panel
+    let daily = weather_response.get("daily").cloned().unwrap_or(serde_json::json!({}));
+
+    Ok(ScrapedData {
+        points,
+        metadata: serde_json::json!({
+            "location": resolved_name,
+            "country": country,
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": timezone,
+            "weather_code": weather_code,
+            "weather_description": weather_code_to_description(weather_code),
+            "temperature_unit": temp_unit_label,
+            "wind_speed_unit": wind_unit_label,
+            "daily_forecast": daily
+        }),
+    })
+}
+
+/// Convert WMO weather code to human-readable description
+fn weather_code_to_description(code: i64) -> &'static str {
+    match code {
+        0 => "Clear sky",
+        1 => "Mainly clear",
+        2 => "Partly cloudy",
+        3 => "Overcast",
+        45 | 48 => "Foggy",
+        51 => "Light drizzle",
+        53 => "Moderate drizzle",
+        55 => "Dense drizzle",
+        56 | 57 => "Freezing drizzle",
+        61 => "Slight rain",
+        63 => "Moderate rain",
+        65 => "Heavy rain",
+        66 | 67 => "Freezing rain",
+        71 => "Slight snow",
+        73 => "Moderate snow",
+        75 => "Heavy snow",
+        77 => "Snow grains",
+        80 => "Slight rain showers",
+        81 => "Moderate rain showers",
+        82 => "Violent rain showers",
+        85 => "Slight snow showers",
+        86 => "Heavy snow showers",
+        95 => "Thunderstorm",
+        96 | 99 => "Thunderstorm with hail",
+        _ => "Unknown",
+    }
 }
 
 // ============================================================================
@@ -1376,7 +1675,7 @@ fn parse_config(source_type: &InfoSourceType, config: &JsonValue) -> Result<Scra
             &InfoSourceType::Weather => 600,
             &InfoSourceType::SocialMedia => 60,
             &InfoSourceType::FinancialPrices => 30,
-            &InfoSourceType::CommodityPrices => 3600,
+            &InfoSourceType::CommodityPrices => 30,
             &InfoSourceType::Livestream => 30,
             &InfoSourceType::EconomicIndicators => 3600,
             &InfoSourceType::OnChainData => 60,
