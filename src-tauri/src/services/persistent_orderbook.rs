@@ -354,9 +354,9 @@ impl PersistentOrderbookMonitor {
 
         // Print full orderbook for Polymarket debug
         if update.platform == "polymarket" {
-            println!("[DEBUG] Polymarket orderbook update for {}:", update.market_id);
-            println!("  Bids ({} levels): {:?}", entry.bids.len(), entry.bids);
-            println!("  Asks ({} levels): {:?}", entry.asks.len(), entry.asks);
+            //println!("[DEBUG] Polymarket orderbook update for {}:", update.market_id);
+            //println!("  Bids ({} levels): {:?}", entry.bids.len(), entry.bids);
+            //println!("  Asks ({} levels): {:?}", entry.asks.len(), entry.asks);
         }
 
         // Update trade data

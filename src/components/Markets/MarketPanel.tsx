@@ -189,7 +189,8 @@ export default function MarketPanel({
   const {
     execute: addMarket,
     loading: isConnecting,
-    error: apiError
+    error: apiError,
+    reset: resetAddMarket
   } = useTauriCommand<Node, {
     marketType: MarketType;
     apiCredentials: Record<string, any>;
@@ -221,7 +222,8 @@ export default function MarketPanel({
     setHasStoredKey(false);
     setUseStoredKey(true);
     setConnectProgress(null);
-  }, []);
+    resetAddMarket();
+  }, [resetAddMarket]);
 
   useEffect(() => {
     if (!isModalOpen) {

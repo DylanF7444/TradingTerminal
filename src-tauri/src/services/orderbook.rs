@@ -821,7 +821,7 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
                         last_update = std::time::Instant::now();
                         last_pong = std::time::Instant::now();
                         
-                        println!("[DEBUG] Emitting Polymarket orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
+                        //println!("[DEBUG] Emitting Polymarket orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
                         
                         // Emit to frontend
                         if let Err(e) = app_handle.emit("orderbook:update", &update) {

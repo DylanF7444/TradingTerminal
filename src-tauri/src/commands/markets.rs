@@ -1107,7 +1107,9 @@ fn parse_polymarket_item(item: &JsonValue) -> Option<MarketSearchResult> {
         id: primary_id,
         title: question,
         description: if description.len() > 200 {
-            format!("{}...", &description[..200])
+            let mut end = 200;
+            while !description.is_char_boundary(end) { end -= 1; }
+            format!("{}...", &description[..end])
         } else {
             description
         },
@@ -1588,7 +1590,9 @@ fn parse_polymarket_event(event: &JsonValue, query_lower: &str) -> Option<EventS
         id: event_id_str,
         title,
         description: if description.len() > 300 {
-            format!("{}...", &description[..300])
+            let mut end = 300;
+            while !description.is_char_boundary(end) { end -= 1; }
+            format!("{}...", &description[..end])
         } else {
             description
         },
