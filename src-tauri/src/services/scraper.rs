@@ -671,23 +671,575 @@ async fn scrape_weather(client: &Client, config: &ScraperConfig) -> Result<Scrap
     Ok(ScrapedData { points, metadata: serde_json::json!({}) })
 }
 
-/// Scrape social media sentiment
+// ============================================================================
+// SOCIAL MEDIA SCRAPING
+// ============================================================================
+
+/// Curated social media sources mapped to prediction market categories
+struct CuratedSourceSet {
+    category: &'static str,
+    subreddits: &'static [&'static str],
+    twitter_accounts: &'static [&'static str],
+}
+
+const CURATED_SOCIAL_SOURCES: &[CuratedSourceSet] = &[
+    CuratedSourceSet {
+        category: "crypto",
+        subreddits: &["CryptoCurrency", "Bitcoin", "ethereum", "solana"],
+        twitter_accounts: &["whale_alert", "CoinDesk", "WatcherGuru"],
+    },
+    CuratedSourceSet {
+        category: "politics",
+        subreddits: &["politics", "PoliticalDiscussion", "Conservative", "neoliberal"],
+        twitter_accounts: &["POTUS", "RealClearNews"],
+    },
+    CuratedSourceSet {
+        category: "sports",
+        subreddits: &["nba", "nfl", "soccer", "sportsbook"],
+        twitter_accounts: &["SportsCenter", "wojespn", "AdamSchefter"],
+    },
+    CuratedSourceSet {
+        category: "economics",
+        subreddits: &["wallstreetbets", "stocks", "economics", "investing"],
+        twitter_accounts: &["markets", "business"],
+    },
+    CuratedSourceSet {
+        category: "science",
+        subreddits: &["science", "climate", "space"],
+        twitter_accounts: &["NASA", "NOAA"],
+    },
+    CuratedSourceSet {
+        category: "entertainment",
+        subreddits: &["entertainment", "movies", "television", "popculture"],
+        twitter_accounts: &[],
+    },
+    CuratedSourceSet {
+        category: "tech",
+        subreddits: &["technology", "programming", "artificial"],
+        twitter_accounts: &[],
+    },
+    CuratedSourceSet {
+        category: "world",
+        subreddits: &["worldnews", "geopolitics"],
+        twitter_accounts: &["Reuters", "AP"],
+    },
+];
+
+/// Return curated social sources as JSON (called by Tauri command)
+pub fn get_curated_social_sources() -> JsonValue {
+    let categories: Vec<JsonValue> = CURATED_SOCIAL_SOURCES.iter().map(|s| {
+        serde_json::json!({
+            "id": s.category,
+            "label": match s.category {
+                "crypto" => "Crypto",
+                "politics" => "Politics",
+                "sports" => "Sports",
+                "economics" => "Economics / Finance",
+                "science" => "Science / Climate",
+                "entertainment" => "Entertainment",
+                "tech" => "Tech",
+                "world" => "World Events",
+                _ => s.category,
+            },
+            "subreddits": s.subreddits,
+            "twitter_accounts": s.twitter_accounts,
+        })
+    }).collect();
+    serde_json::json!({ "categories": categories })
+}
+
+/// Scrape social media data from Reddit, Twitter/X (via Nitter), and Hacker News
 async fn scrape_social(client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
-    // Twitter/X API or Reddit API
-    // Requires authentication (bearer token from secure storage)
-    
-    let points = vec![
-        DataPoint {
-            metric_type: "sentiment_score".to_string(),
-            value: 0.65, // 0.0 to 1.0 (negative to positive)
-            metadata: Some(serde_json::json!({
-                "platform": "twitter",
-                "query": config.params.get("query")
-            })),
+    let platforms: Vec<String> = serde_json::from_value(
+        config.params.get("platforms").cloned().unwrap_or(serde_json::json!(["reddit"]))
+    ).unwrap_or_else(|_| vec!["reddit".to_string()]);
+
+    let subreddits: Vec<String> = serde_json::from_value(
+        config.params.get("subreddits").cloned().unwrap_or(serde_json::json!([]))
+    ).unwrap_or_default();
+
+    let twitter_accounts: Vec<String> = serde_json::from_value(
+        config.params.get("twitter_accounts").cloned().unwrap_or(serde_json::json!([]))
+    ).unwrap_or_default();
+
+    let keywords: Vec<String> = serde_json::from_value(
+        config.params.get("keywords").cloned().unwrap_or(serde_json::json!([]))
+    ).unwrap_or_default();
+    let keywords_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+
+    let mut all_points: Vec<DataPoint> = Vec::new();
+    let mut all_metadata = serde_json::Map::new();
+    let mut any_success = false;
+
+    // Fetch from each platform in parallel
+    let (reddit_result, twitter_result, hn_result) = tokio::join!(
+        async {
+            if platforms.iter().any(|p| p == "reddit") && !subreddits.is_empty() {
+                Some(scrape_reddit(client, &subreddits, &keywords_lower).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if platforms.iter().any(|p| p == "twitter") && !twitter_accounts.is_empty() {
+                Some(scrape_twitter_nitter(client, &twitter_accounts, &keywords_lower).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if platforms.iter().any(|p| p == "hackernews") {
+                Some(scrape_hackernews(client, &keywords_lower).await)
+            } else {
+                None
+            }
         }
+    );
+
+    // Collect Reddit results
+    if let Some(result) = reddit_result {
+        match result {
+            Ok((points, meta)) => {
+                all_points.extend(points);
+                all_metadata.insert("reddit".to_string(), meta);
+                any_success = true;
+            }
+            Err(e) => {
+                eprintln!("[SocialMedia] Reddit scrape failed: {}", e);
+                all_metadata.insert("reddit".to_string(), serde_json::json!({"error": e.to_string()}));
+            }
+        }
+    }
+
+    // Collect Twitter results
+    if let Some(result) = twitter_result {
+        match result {
+            Ok((points, meta)) => {
+                all_points.extend(points);
+                all_metadata.insert("twitter".to_string(), meta);
+                any_success = true;
+            }
+            Err(e) => {
+                eprintln!("[SocialMedia] Twitter/Nitter scrape failed: {}", e);
+                all_metadata.insert("twitter".to_string(), serde_json::json!({"error": e.to_string()}));
+            }
+        }
+    }
+
+    // Collect Hacker News results
+    if let Some(result) = hn_result {
+        match result {
+            Ok((points, meta)) => {
+                all_points.extend(points);
+                all_metadata.insert("hackernews".to_string(), meta);
+                any_success = true;
+            }
+            Err(e) => {
+                eprintln!("[SocialMedia] Hacker News scrape failed: {}", e);
+                all_metadata.insert("hackernews".to_string(), serde_json::json!({"error": e.to_string()}));
+            }
+        }
+    }
+
+    if !any_success && all_points.is_empty() {
+        return Err(anyhow::anyhow!("All social media platforms failed to fetch data"));
+    }
+
+    Ok(ScrapedData {
+        points: all_points,
+        metadata: serde_json::Value::Object(all_metadata),
+    })
+}
+
+/// Scrape Reddit posts from public JSON API (no auth required)
+async fn scrape_reddit(
+    client: &Client,
+    subreddits: &[String],
+    keywords: &[String],
+) -> Result<(Vec<DataPoint>, JsonValue), anyhow::Error> {
+    let mut points = Vec::new();
+    let mut meta = serde_json::Map::new();
+
+    for (i, sub) in subreddits.iter().enumerate() {
+        // Rate limit: 1-second delay between requests (except first)
+        if i > 0 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let url = format!("https://www.reddit.com/r/{}/hot.json?limit=25&raw_json=1", sub);
+
+        let response = match client.get(&url)
+            .header("User-Agent", "PredictionMarketTerminal/1.0 (social media scraper)")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[Reddit] Failed to fetch r/{}: {}", sub, e);
+                meta.insert(sub.clone(), serde_json::json!({"error": e.to_string()}));
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            eprintln!("[Reddit] r/{} returned HTTP {}", sub, response.status());
+            meta.insert(sub.clone(), serde_json::json!({"error": format!("HTTP {}", response.status())}));
+            continue;
+        }
+
+        let body: JsonValue = match response.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[Reddit] Failed to parse r/{} JSON: {}", sub, e);
+                meta.insert(sub.clone(), serde_json::json!({"error": e.to_string()}));
+                continue;
+            }
+        };
+
+        let children = body.get("data")
+            .and_then(|d| d.get("children"))
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut post_count: u64 = 0;
+        let mut total_score: i64 = 0;
+        let mut total_comments: u64 = 0;
+        let mut total_upvote_ratio: f64 = 0.0;
+        let mut top_posts: Vec<JsonValue> = Vec::new();
+        let mut keyword_mention_count: u64 = 0;
+
+        for child in &children {
+            let data = match child.get("data") {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let title = data.get("title").and_then(|t| t.as_str()).unwrap_or("");
+            let score = data.get("score").and_then(|s| s.as_i64()).unwrap_or(0);
+            let num_comments = data.get("num_comments").and_then(|n| n.as_u64()).unwrap_or(0);
+            let upvote_ratio = data.get("upvote_ratio").and_then(|u| u.as_f64()).unwrap_or(0.0);
+            let permalink = data.get("permalink").and_then(|p| p.as_str()).unwrap_or("");
+            let created_utc = data.get("created_utc").and_then(|c| c.as_f64()).unwrap_or(0.0);
+            let selftext = data.get("selftext").and_then(|s| s.as_str()).unwrap_or("");
+            let stickied = data.get("stickied").and_then(|s| s.as_bool()).unwrap_or(false);
+
+            // Skip stickied mod posts
+            if stickied { continue; }
+
+            // Keyword filtering
+            if !keywords.is_empty() {
+                let text_lower = format!("{} {}", title, selftext).to_lowercase();
+                if keywords.iter().any(|kw| text_lower.contains(kw)) {
+                    keyword_mention_count += 1;
+                } else {
+                    continue;
+                }
+            }
+
+            post_count += 1;
+            total_score += score;
+            total_comments += num_comments;
+            total_upvote_ratio += upvote_ratio;
+
+            if top_posts.len() < 10 {
+                top_posts.push(serde_json::json!({
+                    "title": title,
+                    "score": score,
+                    "num_comments": num_comments,
+                    "upvote_ratio": upvote_ratio,
+                    "permalink": format!("https://reddit.com{}", permalink),
+                    "created_utc": created_utc,
+                    "subreddit": sub,
+                }));
+            }
+        }
+
+        let avg_score = if post_count > 0 { total_score as f64 / post_count as f64 } else { 0.0 };
+        let avg_upvote_ratio = if post_count > 0 { total_upvote_ratio / post_count as f64 } else { 0.0 };
+
+        // Emit DataPoints per metric per subreddit
+        points.push(DataPoint {
+            metric_type: format!("reddit:r/{}:post_count", sub),
+            value: post_count as f64,
+            metadata: Some(serde_json::json!({
+                "platform": "reddit",
+                "subreddit": sub,
+                "top_posts": top_posts,
+            })),
+        });
+
+        points.push(DataPoint {
+            metric_type: format!("reddit:r/{}:avg_score", sub),
+            value: avg_score,
+            metadata: Some(serde_json::json!({
+                "platform": "reddit",
+                "subreddit": sub,
+            })),
+        });
+
+        points.push(DataPoint {
+            metric_type: format!("reddit:r/{}:comment_count", sub),
+            value: total_comments as f64,
+            metadata: Some(serde_json::json!({
+                "platform": "reddit",
+                "subreddit": sub,
+            })),
+        });
+
+        points.push(DataPoint {
+            metric_type: format!("reddit:r/{}:avg_upvote_ratio", sub),
+            value: avg_upvote_ratio,
+            metadata: Some(serde_json::json!({
+                "platform": "reddit",
+                "subreddit": sub,
+            })),
+        });
+
+        if !keywords.is_empty() {
+            points.push(DataPoint {
+                metric_type: format!("reddit:r/{}:keyword_mentions", sub),
+                value: keyword_mention_count as f64,
+                metadata: Some(serde_json::json!({
+                    "platform": "reddit",
+                    "subreddit": sub,
+                    "keywords": keywords,
+                })),
+            });
+        }
+
+        meta.insert(sub.clone(), serde_json::json!({
+            "post_count": post_count,
+            "avg_score": avg_score,
+            "total_comments": total_comments,
+            "avg_upvote_ratio": avg_upvote_ratio,
+        }));
+    }
+
+    if points.is_empty() {
+        return Err(anyhow::anyhow!("No Reddit data fetched from any subreddit"));
+    }
+
+    Ok((points, serde_json::Value::Object(meta)))
+}
+
+/// Nitter instances for fetching Twitter/X RSS feeds (tried in order)
+const NITTER_INSTANCES: &[&str] = &[
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.net",
+];
+
+/// Scrape Twitter/X posts via Nitter RSS feeds (no auth required)
+async fn scrape_twitter_nitter(
+    client: &Client,
+    accounts: &[String],
+    keywords: &[String],
+) -> Result<(Vec<DataPoint>, JsonValue), anyhow::Error> {
+    let mut points = Vec::new();
+    let mut meta = serde_json::Map::new();
+
+    for account in accounts {
+        let clean_account = account.trim_start_matches('@');
+        let mut feed_fetched = false;
+
+        for instance in NITTER_INSTANCES {
+            let url = format!("{}/{}/rss", instance, clean_account);
+
+            let response = match client.get(&url)
+                .header("Accept", "application/rss+xml, application/xml, text/xml, */*")
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    eprintln!("[Nitter] {} returned HTTP {} for @{}", instance, r.status(), clean_account);
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("[Nitter] {} failed for @{}: {}", instance, clean_account, e);
+                    continue;
+                }
+            };
+
+            let body = match response.bytes().await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            match feed_rs::parser::parse(&body[..]) {
+                Ok(feed) => {
+                    let mut tweet_count: u64 = 0;
+                    let mut tweets: Vec<JsonValue> = Vec::new();
+
+                    for entry in feed.entries.iter().take(20) {
+                        let title = entry.title.as_ref()
+                            .map(|t| t.content.clone()).unwrap_or_default();
+                        let link = entry.links.first()
+                            .map(|l| l.href.clone()).unwrap_or_default();
+                        let published = entry.published
+                            .or(entry.updated)
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_default();
+
+                        // Keyword filtering
+                        if !keywords.is_empty() {
+                            let text_lower = title.to_lowercase();
+                            if !keywords.iter().any(|kw| text_lower.contains(kw)) {
+                                continue;
+                            }
+                        }
+
+                        tweet_count += 1;
+                        if tweets.len() < 10 {
+                            tweets.push(serde_json::json!({
+                                "text": strip_html_tags(&title),
+                                "link": link,
+                                "published": published,
+                                "account": clean_account,
+                            }));
+                        }
+                    }
+
+                    points.push(DataPoint {
+                        metric_type: format!("twitter:@{}:tweet_count", clean_account),
+                        value: tweet_count as f64,
+                        metadata: Some(serde_json::json!({
+                            "platform": "twitter",
+                            "account": clean_account,
+                            "via": "nitter",
+                            "instance": instance,
+                            "tweets": tweets,
+                        })),
+                    });
+
+                    meta.insert(clean_account.to_string(), serde_json::json!({
+                        "tweet_count": tweet_count,
+                        "instance": instance,
+                    }));
+
+                    feed_fetched = true;
+                    break; // Success, no need to try other instances
+                }
+                Err(e) => {
+                    eprintln!("[Nitter] RSS parse error for @{} from {}: {}", clean_account, instance, e);
+                }
+            }
+        }
+
+        if !feed_fetched {
+            eprintln!("[Nitter] All instances failed for @{}", clean_account);
+            meta.insert(clean_account.to_string(), serde_json::json!({"error": "All Nitter instances failed"}));
+        }
+    }
+
+    if points.is_empty() {
+        return Err(anyhow::anyhow!("No Twitter data fetched from any account via Nitter"));
+    }
+
+    Ok((points, serde_json::Value::Object(meta)))
+}
+
+/// Scrape top stories from Hacker News public API (no auth required)
+async fn scrape_hackernews(
+    client: &Client,
+    keywords: &[String],
+) -> Result<(Vec<DataPoint>, JsonValue), anyhow::Error> {
+    // Fetch top story IDs
+    let top_url = "https://hacker-news.firebaseio.com/v0/topstories.json";
+    let story_ids: Vec<u64> = client.get(top_url)
+        .send().await?
+        .json().await?;
+
+    // Fetch top 20 stories concurrently in batches of 5
+    let mut posts: Vec<JsonValue> = Vec::new();
+    let mut total_score: u64 = 0;
+    let mut keyword_matches: u64 = 0;
+
+    let ids_to_fetch: Vec<u64> = story_ids.into_iter().take(20).collect();
+
+    for chunk in ids_to_fetch.chunks(5) {
+        let fetches: Vec<_> = chunk.iter().map(|&id| {
+            let c = client.clone();
+            async move {
+                let item_url = format!("https://hacker-news.firebaseio.com/v0/item/{}.json", id);
+                c.get(&item_url).send().await?.json::<JsonValue>().await
+            }
+        }).collect();
+
+        let results = futures_util::future::join_all(fetches).await;
+
+        for result in results {
+            let item = match result {
+                Ok(item) => item,
+                Err(e) => {
+                    eprintln!("[HackerNews] Failed to fetch item: {}", e);
+                    continue;
+                }
+            };
+
+            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
+            let score = item.get("score").and_then(|s| s.as_u64()).unwrap_or(0);
+            let descendants = item.get("descendants").and_then(|d| d.as_u64()).unwrap_or(0);
+            let url = item.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let id = item.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+
+            // Keyword filtering
+            if !keywords.is_empty() {
+                let text_lower = title.to_lowercase();
+                if keywords.iter().any(|kw| text_lower.contains(kw)) {
+                    keyword_matches += 1;
+                } else {
+                    continue;
+                }
+            }
+
+            total_score += score;
+            posts.push(serde_json::json!({
+                "title": title,
+                "score": score,
+                "comments": descendants,
+                "url": url,
+                "hn_url": format!("https://news.ycombinator.com/item?id={}", id),
+            }));
+        }
+    }
+
+    let post_count = posts.len();
+    let avg_score = if post_count > 0 { total_score as f64 / post_count as f64 } else { 0.0 };
+
+    let mut result_points = vec![
+        DataPoint {
+            metric_type: "hackernews:top:post_count".to_string(),
+            value: post_count as f64,
+            metadata: Some(serde_json::json!({
+                "platform": "hackernews",
+                "posts": posts.iter().take(10).cloned().collect::<Vec<_>>(),
+            })),
+        },
+        DataPoint {
+            metric_type: "hackernews:top:avg_score".to_string(),
+            value: avg_score,
+            metadata: Some(serde_json::json!({ "platform": "hackernews" })),
+        },
     ];
-    
-    Ok(ScrapedData { points, metadata: serde_json::json!({}) })
+
+    if !keywords.is_empty() {
+        result_points.push(DataPoint {
+            metric_type: "hackernews:top:keyword_mentions".to_string(),
+            value: keyword_matches as f64,
+            metadata: Some(serde_json::json!({
+                "platform": "hackernews",
+                "keywords": keywords,
+            })),
+        });
+    }
+
+    Ok((result_points, serde_json::json!({
+        "post_count": post_count,
+        "avg_score": avg_score,
+    })))
 }
 
 /// Scrape financial prices (stocks, forex)

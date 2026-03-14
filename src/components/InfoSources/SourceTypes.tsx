@@ -333,61 +333,94 @@ export const SOURCE_TYPE_DEFINITIONS: Record<InfoSourceType, SourceTypeDefinitio
     metadata: {
       label: 'Social Media',
       icon: MessageCircle,
-      description: 'Twitter/X and Reddit sentiment and volume tracking',
+      description: 'Reddit, Twitter/X (via Nitter), and Hacker News social signal tracking',
       color: 'text-purple-400',
       bgColor: 'bg-purple-500'
     },
     configSchema: [
       {
-        field: 'platform',
-        type: 'select',
-        label: 'Platform',
+        field: 'platforms',
+        type: 'multiselect' as const,
+        label: 'Platforms',
         required: true,
         options: [
-          { value: 'twitter', label: 'Twitter/X' },
-          { value: 'reddit', label: 'Reddit' },
-          { value: 'both', label: 'Both (aggregated)' }
-        ]
+          { value: 'reddit', label: 'Reddit (Free - No API Key)' },
+          { value: 'twitter', label: 'X/Twitter (Nitter RSS - Free)' },
+          { value: 'hackernews', label: 'Hacker News (Free)' },
+        ],
+        helpText: 'All platforms use free public APIs. No API keys required.'
+      },
+      {
+        field: 'category',
+        type: 'select' as const,
+        label: 'Market Category',
+        options: [
+          { value: '', label: 'Custom (manual entry)' },
+          { value: 'crypto', label: 'Crypto' },
+          { value: 'politics', label: 'Politics' },
+          { value: 'sports', label: 'Sports' },
+          { value: 'economics', label: 'Economics / Finance' },
+          { value: 'science', label: 'Science / Climate' },
+          { value: 'tech', label: 'Tech' },
+          { value: 'world', label: 'World Events' },
+          { value: 'entertainment', label: 'Entertainment' },
+        ],
+        helpText: 'Auto-populates subreddits and accounts for this prediction market category'
+      },
+      {
+        field: 'subreddits',
+        type: 'text' as const,
+        label: 'Subreddits (comma-separated)',
+        placeholder: 'CryptoCurrency, Bitcoin, wallstreetbets',
+        helpText: 'Reddit subreddit names to monitor (without r/ prefix)'
+      },
+      {
+        field: 'twitter_accounts',
+        type: 'text' as const,
+        label: 'X/Twitter Accounts (comma-separated)',
+        placeholder: '@whale_alert, @Reuters, @CoinDesk',
+        helpText: 'Twitter accounts to follow via Nitter RSS (free, no API key)'
       },
       {
         field: 'keywords',
-        type: 'text',
-        label: 'Keywords / Hashtags',
-        placeholder: '$BTC, #crypto, ethereum',
-        required: true,
-        helpText: 'Track specific cashtags, hashtags, or keywords'
+        type: 'text' as const,
+        label: 'Keywords (optional)',
+        placeholder: 'bitcoin, election, fed rate',
+        helpText: 'Filter posts by keyword. Leave empty for all posts.'
       },
       {
-        field: 'volume_threshold',
-        type: 'number',
-        label: 'Volume Threshold',
-        placeholder: '100',
-        helpText: 'Minimum mentions per hour to trigger alert (filters noise)',
+        field: 'update_interval_seconds',
+        type: 'number' as const,
+        label: 'Update Interval (seconds)',
+        placeholder: '60',
+        helpText: 'How often to fetch new social data (default: 60s)',
         validation: (val: number) => {
-          if (val < 0) return 'Threshold must be positive';
+          if (val < 30) return 'Minimum interval is 30 seconds';
           return null;
         }
-      },
-      {
-        field: 'ignore_bots',
-        type: 'checkbox',
-        label: 'Filter Bot Accounts',
-        helpText: 'Remove suspected bot posts from analysis (experimental)',
-        advanced: true
       }
     ],
     defaults: {
-      platform: 'twitter',
-      keywords: 'bitcoin, btc',
-      volume_threshold: 50,
-      ignore_bots: true
+      platforms: ['reddit'],
+      category: 'crypto',
+      subreddits: 'CryptoCurrency, Bitcoin',
+      twitter_accounts: '',
+      keywords: '',
+      update_interval_seconds: 60
     },
     validator: (config) => {
       const errors: Record<string, string> = {};
-      if (!config.keywords) errors.keywords = 'Keywords required';
-      if (config.volume_threshold < 0) errors.volume_threshold = 'Must be positive';
+      if (!config.platforms || config.platforms.length === 0) errors.platforms = 'Select at least one platform';
+      if (config.platforms?.includes('reddit') && !config.subreddits?.trim()) errors.subreddits = 'Enter at least one subreddit for Reddit';
+      if (config.platforms?.includes('twitter') && !config.twitter_accounts?.trim()) errors.twitter_accounts = 'Enter at least one account for Twitter';
       return { valid: Object.keys(errors).length === 0, errors };
-    }
+    },
+    transformer: (config) => ({
+      ...config,
+      subreddits: config.subreddits?.split(',').map((s: string) => s.trim()).filter(Boolean) || [],
+      twitter_accounts: config.twitter_accounts?.split(',').map((s: string) => s.trim().replace(/^@/, '')).filter(Boolean) || [],
+      keywords: config.keywords?.split(',').map((s: string) => s.trim()).filter(Boolean) || [],
+    })
   },
 
   [InfoSourceType.Weather]: {

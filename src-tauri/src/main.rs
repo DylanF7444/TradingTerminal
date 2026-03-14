@@ -207,6 +207,7 @@ fn main() {
             get_data_sources_cmd,
             update_data_source_cmd,
             get_data_source_status_cmd,
+            get_curated_social_sources_cmd,
             update_node_position_cmd,
             update_node_size_cmd,
             add_node_cmd,
@@ -945,6 +946,12 @@ async fn get_data_source_status_cmd(
         "last_update": chrono::Utc::now().timestamp(),
         "data_points_collected": 1234,
     }))
+}
+
+/// Get curated social media sources organized by prediction market category
+#[tauri::command]
+async fn get_curated_social_sources_cmd() -> Result<serde_json::Value, String> {
+    data_sources::get_curated_social_sources().await
 }
 
 /// Add a generic node to the database (for demo nodes and persistence)

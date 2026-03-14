@@ -598,6 +598,97 @@ export function useDataSourceEvents(): void {
             }
 
             console.log(`[DataSource] News update for ${payload.nodeId}: ${allHeadlines.length} headlines from ${sourceNames.join(', ')}`);
+          } else if (payload.sourceType === 'SocialMedia') {
+            // Aggregate posts from all platform DataPoints (Reddit, Twitter, HN)
+            const allPosts: Array<Record<string, unknown>> = [];
+            const platformNames: string[] = [];
+            const metrics: Record<string, number> = {};
+
+            for (const point of payload.data.points) {
+              const meta = point.metadata as Record<string, unknown> | undefined;
+              const platform = (meta?.platform as string) || 'unknown';
+
+              // Collect posts from metadata (different platforms use different field names)
+              const posts = (meta?.top_posts as Array<Record<string, unknown>>)
+                || (meta?.tweets as Array<Record<string, unknown>>)
+                || (meta?.posts as Array<Record<string, unknown>>)
+                || [];
+              allPosts.push(...posts);
+
+              if (!platformNames.includes(platform)) platformNames.push(platform);
+
+              // Track metrics by key (e.g., "reddit:r/bitcoin:post_count")
+              metrics[point.metric_type] = point.value;
+            }
+
+            // 1. Append to raw stream
+            appendRawDataEntry(payload.nodeId, {
+              data: {
+                type: 'social_update',
+                totalPosts: allPosts.length,
+                platforms: platformNames,
+                posts: allPosts.slice(0, 10),
+                metrics,
+              },
+              source: 'social_scraper',
+              status: 'success',
+            });
+
+            // 2. Update node metadata
+            const { nodes, connections } = useStore.getState();
+            const node = nodes[payload.nodeId];
+            if (!node) return;
+
+            const currentMetadata = (node.metadata as Record<string, any>) || {};
+            updateNodeMetadata(payload.nodeId, {
+              ...currentMetadata,
+              lastData: {
+                timestamp: payload.timestamp,
+                value: allPosts.length,
+                posts: allPosts,
+                platforms: platformNames,
+                metrics,
+              },
+              quality: {
+                ...(currentMetadata.quality || {}),
+                successRate: 1.0,
+                lastError: undefined,
+              },
+            });
+
+            // 3. Propagate to connected Market nodes
+            const outgoing = connections.filter((c) => c.source === payload.nodeId);
+            for (const conn of outgoing) {
+              const target = nodes[conn.target];
+              if (!target?.node_type || !('Market' in target.node_type)) continue;
+
+              const targetMeta = (target.metadata as Record<string, any>) || {};
+              const incomingData = { ...(targetMeta.incomingData || {}) };
+              incomingData[payload.nodeId] = {
+                sourceName: 'Social Media',
+                sourceType: 'SocialMedia',
+                posts: allPosts.slice(0, 5),
+                postCount: allPosts.length,
+                platforms: platformNames,
+                metrics,
+                timestamp: payload.timestamp,
+                strength: conn.strength || 1.0,
+              };
+
+              updateNodeMetadata(conn.target, {
+                ...targetMeta,
+                incomingData,
+                lastData: {
+                  timestamp: payload.timestamp,
+                  value: allPosts.length,
+                  sourceId: payload.nodeId,
+                },
+              });
+            }
+
+            console.log(
+              `[DataSource] Social update for ${payload.nodeId}: ${allPosts.length} posts from ${platformNames.join(', ')}`
+            );
           }
         });
 

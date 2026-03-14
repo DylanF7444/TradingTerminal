@@ -417,6 +417,12 @@ async fn log_data_source_event(node_id: &str, event_type: &str) {
     println!("Logger: Node {} {}", node_id, event_type);
 }
 
+/// Get curated social media sources organized by prediction market category
+#[tauri::command]
+pub async fn get_curated_social_sources() -> Result<serde_json::Value, String> {
+    Ok(crate::services::scraper::get_curated_social_sources())
+}
+
 // ============================================================================
 // TESTS
 // ============================================================================

@@ -85,9 +85,9 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
   [InfoSourceType.SocialMedia]: {
     label: 'Social Media',
     icon: MessageCircle,
-    description: 'Twitter, Reddit sentiment tracking',
+    description: 'Reddit, Twitter/X, and Hacker News social signal tracking',
     color: 'text-purple-400',
-    defaultConfig: { platform: 'twitter', keywords: 'btc,crypto', volume_threshold: 100 }
+    defaultConfig: { platforms: ['reddit'], category: 'crypto', subreddits: 'CryptoCurrency, Bitcoin', twitter_accounts: '', keywords: '', update_interval_seconds: 60 }
   },
   [InfoSourceType.Weather]: {
     label: 'Weather Data',
@@ -198,6 +198,17 @@ export default function SourcePanel({
         // Convert storage_interval_seconds to storageIntervalMs for backend
         storageIntervalMs: config.storage_interval_seconds ? config.storage_interval_seconds * 1000 : 1000,
       };
+
+      // SocialMedia-specific: split comma-separated subreddits and accounts into arrays
+      if (selectedType === InfoSourceType.SocialMedia) {
+        transformedConfig.subreddits = config.subreddits?.trim()
+          ? config.subreddits.split(',').map((s: string) => s.trim()).filter(Boolean)
+          : [];
+        transformedConfig.twitter_accounts = config.twitter_accounts?.trim()
+          ? config.twitter_accounts.split(',').map((s: string) => s.trim().replace(/^@/, '')).filter(Boolean)
+          : [];
+        transformedConfig.platforms = config.platforms || ['reddit'];
+      }
 
       const result = await addSource({
         sourceType: selectedType as string,
@@ -411,6 +422,143 @@ export default function SourcePanel({
             </div>
           </div>
         );
+
+      case InfoSourceType.SocialMedia: {
+        const curatedMap: Record<string, { subreddits: string; accounts: string }> = {
+          crypto: { subreddits: 'CryptoCurrency, Bitcoin, ethereum, solana', accounts: 'whale_alert, CoinDesk, WatcherGuru' },
+          politics: { subreddits: 'politics, PoliticalDiscussion, Conservative, neoliberal', accounts: 'POTUS, RealClearNews' },
+          sports: { subreddits: 'nba, nfl, soccer, sportsbook', accounts: 'SportsCenter, wojespn, AdamSchefter' },
+          economics: { subreddits: 'wallstreetbets, stocks, economics, investing', accounts: 'markets, business' },
+          science: { subreddits: 'science, climate, space', accounts: 'NASA, NOAA' },
+          tech: { subreddits: 'technology, programming, artificial', accounts: '' },
+          world: { subreddits: 'worldnews, geopolitics', accounts: 'Reuters, AP' },
+          entertainment: { subreddits: 'entertainment, movies, television', accounts: '' },
+        };
+
+        return (
+          <div className="space-y-4">
+            {/* Platform Selection */}
+            <div>
+              <label className={labelClass}>Platforms</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { value: 'reddit', label: 'Reddit (Free)' },
+                  { value: 'twitter', label: 'X/Twitter (Nitter RSS)' },
+                  { value: 'hackernews', label: 'Hacker News (Free)' },
+                ].map((platform) => (
+                  <label key={platform.value} className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={(config.platforms || ['reddit']).includes(platform.value)}
+                      onChange={(e) => {
+                        const current = config.platforms || ['reddit'];
+                        if (e.target.checked) {
+                          handleConfigChange('platforms', [...current, platform.value]);
+                        } else {
+                          handleConfigChange('platforms', current.filter((p: string) => p !== platform.value));
+                        }
+                      }}
+                      className="rounded bg-gray-800 border-gray-700 text-purple-500"
+                    />
+                    {platform.label}
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">All platforms use free public APIs — no API keys required</p>
+            </div>
+
+            {/* Market Category Quick-Select */}
+            <div>
+              <label className={labelClass}>Market Category</label>
+              <select
+                value={config.category || ''}
+                onChange={(e) => {
+                  const category = e.target.value;
+                  handleConfigChange('category', category);
+                  if (curatedMap[category]) {
+                    handleConfigChange('subreddits', curatedMap[category].subreddits);
+                    handleConfigChange('twitter_accounts', curatedMap[category].accounts);
+                  }
+                }}
+                className={commonInputClass}
+              >
+                <option value="">Custom (enter manually)</option>
+                <option value="crypto">Crypto</option>
+                <option value="politics">Politics</option>
+                <option value="sports">Sports</option>
+                <option value="economics">Economics / Finance</option>
+                <option value="science">Science / Climate</option>
+                <option value="tech">Tech</option>
+                <option value="world">World Events</option>
+                <option value="entertainment">Entertainment</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Auto-populates recommended subreddits and accounts for this category</p>
+            </div>
+
+            {/* Reddit Subreddits */}
+            {(config.platforms || ['reddit']).includes('reddit') && (
+              <div>
+                <label className={labelClass}>Subreddits (comma-separated)</label>
+                <input
+                  type="text"
+                  value={config.subreddits || ''}
+                  onChange={(e) => handleConfigChange('subreddits', e.target.value)}
+                  placeholder="CryptoCurrency, Bitcoin, wallstreetbets"
+                  className={commonInputClass}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  No API key needed. Uses Reddit's public JSON API.
+                </p>
+              </div>
+            )}
+
+            {/* Twitter/X Accounts */}
+            {(config.platforms || []).includes('twitter') && (
+              <div>
+                <label className={labelClass}>X/Twitter Accounts (comma-separated)</label>
+                <input
+                  type="text"
+                  value={config.twitter_accounts || ''}
+                  onChange={(e) => handleConfigChange('twitter_accounts', e.target.value)}
+                  placeholder="@whale_alert, @Reuters, @CoinDesk"
+                  className={commonInputClass}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Uses Nitter RSS (free, no API key). Falls back across multiple instances.
+                </p>
+              </div>
+            )}
+
+            {/* Keywords */}
+            <div>
+              <label className={labelClass}>Keywords (optional, comma-separated)</label>
+              <input
+                type="text"
+                value={config.keywords || ''}
+                onChange={(e) => handleConfigChange('keywords', e.target.value)}
+                placeholder="bitcoin, election, inflation"
+                className={commonInputClass}
+              />
+              <p className="text-xs text-gray-500 mt-1">Filter posts by keyword. Leave empty for all posts.</p>
+            </div>
+
+            {/* Update Interval */}
+            <div>
+              <label className={labelClass}>Update Interval</label>
+              <input
+                type="range"
+                min="30"
+                max="600"
+                step="30"
+                value={config.update_interval_seconds || 60}
+                onChange={(e) => handleConfigChange('update_interval_seconds', parseInt(e.target.value))}
+                className="w-full"
+              />
+              <span className="text-sm text-gray-400">{config.update_interval_seconds || 60}s ({Math.round((config.update_interval_seconds || 60) / 60)} min)</span>
+            </div>
+          </div>
+        );
+      }
 
       default:
         return (
