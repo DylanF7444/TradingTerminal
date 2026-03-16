@@ -1312,6 +1312,50 @@ export interface SelectedEventMarket {
 }
 
 // =============================================================================
+// SERIES NODE TYPES
+// =============================================================================
+
+/**
+ * A single market entry stored within a series node's metadata.
+ * Contains a snapshot of the market's current state from the last refresh.
+ */
+export interface SeriesChildMarket {
+  /** Market ID (same as EventMarketItem.id) */
+  id: string;
+  /** Market title/question */
+  title: string;
+  /** CLOB token IDs (Polymarket) */
+  token_ids: string[];
+  /** Current YES price (0.0 - 1.0), null if unavailable */
+  yes_price: number | null;
+  /** Current NO price, null if unavailable */
+  no_price: number | null;
+  /** Trading volume */
+  volume: number | null;
+  /** Liquidity / open interest */
+  liquidity: number | null;
+  /** Market status string (e.g., "active", "resolved", "closed") */
+  status: string;
+  /** End date / close time */
+  end_date: string | null;
+  /** URL-friendly slug or ticker */
+  slug: string;
+  /** Condition ID for Polymarket */
+  condition_id: string | null;
+  /** Whether this market has been resolved */
+  is_resolved: boolean;
+}
+
+/**
+ * Type guard: checks if a node's metadata indicates it is a series node.
+ */
+export function isSeriesNode(node: { metadata: unknown } | null | undefined): boolean {
+  if (!node) return false;
+  const meta = node.metadata as Record<string, unknown> | undefined;
+  return meta?.is_series === true;
+}
+
+// =============================================================================
 // CONSTANTS & ENUMERATIONS
 // =============================================================================
 

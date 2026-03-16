@@ -201,6 +201,22 @@ export default function NodeComponent({
   const isInfoSource = node.node_type && 'InfoSource' in node.node_type;
   const isMarket = node.node_type && 'Market' in node.node_type;
   const isAnalyzer = node.node_type && 'Analyzer' in node.node_type;
+
+  // Series detection
+  const isSeries = useMemo(() => {
+    if (!isMarket) return false;
+    const meta = node.metadata as Record<string, unknown> | undefined;
+    return meta?.is_series === true;
+  }, [isMarket, node.metadata]);
+
+  const seriesInfo = useMemo(() => {
+    if (!isSeries) return { total: 0, active: 0, topPrice: null as number | null };
+    const meta = node.metadata as Record<string, unknown>;
+    const markets = (meta?.series_markets as Array<{ is_resolved?: boolean; yes_price?: number | null }>) || [];
+    const active = markets.filter((m) => !m?.is_resolved);
+    const topMarket = [...active].sort((a, b) => (b?.yes_price ?? 0) - (a?.yes_price ?? 0))[0];
+    return { total: markets.length, active: active.length, topPrice: topMarket?.yes_price ?? null };
+  }, [isSeries, node.metadata]);
   
   // Get the source type string
   const sourceType = isInfoSource 
@@ -212,9 +228,9 @@ export default function NodeComponent({
         : 'Unknown';
   
   // Color scheme based on type and connection mode
-  const colorScheme = isInfoSource 
-    ? { 
-        bg: 'bg-slate-800/95', 
+  const colorScheme = isInfoSource
+    ? {
+        bg: 'bg-slate-800/95',
         border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-blue-400' : 'border-slate-600',
         header: 'bg-blue-600',
         accent: 'text-blue-400',
@@ -228,19 +244,31 @@ export default function NodeComponent({
           accent: 'text-purple-400',
           glow: 'shadow-purple-500/20'
         }
-      : { 
-        bg: 'bg-slate-800/95', 
-        border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-emerald-400' : 'border-slate-600',
-        header: 'bg-emerald-600',
-        accent: 'text-emerald-400',
-        glow: 'shadow-emerald-500/20'
-      };
+      : isSeries
+        ? {
+            bg: 'bg-slate-800/95',
+            border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-teal-400' : 'border-slate-600',
+            header: 'bg-gradient-to-r from-emerald-600 to-blue-600',
+            accent: 'text-teal-400',
+            glow: 'shadow-teal-500/20'
+          }
+        : {
+          bg: 'bg-slate-800/95',
+          border: isConnectionSource ? 'border-yellow-400' : isValidConnectionTarget ? 'border-green-400' : isSelected ? 'border-emerald-400' : 'border-slate-600',
+          header: 'bg-emerald-600',
+          accent: 'text-emerald-400',
+          glow: 'shadow-emerald-500/20'
+        };
 
   // Extract metadata
   const metadata = node.metadata as InfoSourceMetadata | MarketMetadata | undefined;
   
   // Get display name - for market nodes, prefer the question/title from metadata
   const displayName = useMemo(() => {
+    if (isSeries) {
+      const rawMeta = node.metadata as Record<string, unknown> | undefined;
+      return (rawMeta?.series_event_title as string) || (rawMeta?.question as string) || 'Series';
+    }
     if (node.name) return node.name;
     if (isMarket) {
       const rawMeta = node.metadata as Record<string, any> | undefined;
@@ -248,7 +276,7 @@ export default function NodeComponent({
       if (question) return question;
     }
     return isInfoSource ? sourceType : sourceType;
-  }, [node.name, node.metadata, isInfoSource, isMarket, sourceType]);
+  }, [node.name, node.metadata, isInfoSource, isMarket, sourceType, isSeries]);
   
   // Extract metrics based on node type
   const metrics = useMemo(() => {
@@ -299,6 +327,16 @@ export default function NodeComponent({
     }
     
     if (isMarket) {
+      if (isSeries) {
+        return {
+          primary: seriesInfo.topPrice != null
+            ? `${(seriesInfo.topPrice * 100).toFixed(1)}\u00A2`
+            : '--',
+          secondary: `${seriesInfo.active} active / ${seriesInfo.total} total`,
+          status: 'Series',
+          hasError: false,
+        };
+      }
       const marketMeta = metadata as MarketMetadata | undefined;
       const marketState = marketMeta?.marketState;
       const trading = marketMeta?.trading;
@@ -323,7 +361,7 @@ export default function NodeComponent({
     }
     
     return { primary: '--', secondary: '--', status: 'Unknown' };
-  }, [isInfoSource, isMarket, metadata]);
+  }, [isInfoSource, isMarket, isSeries, seriesInfo, metadata]);
 
   // Extract market info for orderbook overlay
   const marketInfo = useMemo(() => {
@@ -467,7 +505,7 @@ export default function NodeComponent({
           )}
           
           {/* Live indicator for market nodes - reflects actual metadata status */}
-          {isMarket && !isConnectionSource && !isValidConnectionTarget && (() => {
+          {isMarket && !isSeries && !isConnectionSource && !isValidConnectionTarget && (() => {
             const meta = node.metadata as Record<string, any> | undefined;
             const metaStatus = meta?.status;
             // "connected" means node was configured/saved, not that WS is live
@@ -477,6 +515,16 @@ export default function NodeComponent({
                              'bg-gray-400';
             return <div className={`w-2 h-2 ${dotColor} rounded-full flex-shrink-0`} />;
           })()}
+          {/* Series badge with market count */}
+          {isMarket && isSeries && (
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <svg className="w-3 h-3 text-blue-200" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18M3 15h18M9 3v18" />
+              </svg>
+              <span className="text-[10px] text-blue-200 font-medium">{seriesInfo.total}</span>
+            </div>
+          )}
         </div>
         
         {/* Content Section */}
@@ -587,10 +635,17 @@ export default function NodeComponent({
       )}
       
       {/* Market indicator tooltip on hover */}
-      {isMarket && isHovered && marketInfo && (
+      {isMarket && isHovered && !isSeries && marketInfo && (
         <div className="absolute -bottom-6 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
           <span className="text-[10px] text-gray-400 bg-gray-800 px-2 py-0.5 rounded">
             Double-click for orderbook
+          </span>
+        </div>
+      )}
+      {isMarket && isHovered && isSeries && (
+        <div className="absolute -bottom-6 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
+          <span className="text-[10px] text-gray-400 bg-gray-800 px-2 py-0.5 rounded">
+            Click to view series details
           </span>
         </div>
       )}

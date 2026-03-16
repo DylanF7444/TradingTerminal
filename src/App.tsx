@@ -52,6 +52,7 @@ import { createDemoNodes } from './utils/demoData';
 // Extracted hooks
 import { useInfoSourceEvents, useNodeQualityMetrics, useMarketOrderbookEvents, useAutoMarketSubscriptions, useDataSourceEvents } from './hooks/useInfoSourceEvents';
 import { usePersistentOrderbooks } from './hooks/usePersistentOrderbooks';
+import { useSeriesRefresh } from './hooks/useSeriesRefresh';
 
 // Layout components
 import Canvas from './components/Canvas/Canvas';
@@ -72,6 +73,7 @@ import { NodeDetailsPanelExtracted as NodeDetailsPanel } from './components/Node
 import { RawStreamTab } from './components/Nodes/RawStreamTab';
 import { PanelErrorBoundary } from './components/UI/ErrorBoundary';
 import { UptimeDisplay } from './components/UI/UptimeDisplay';
+import { SeriesMarketPanel } from './components/Markets/SeriesMarketPanel';
 
 // UI components
 import { Modal } from './components/UI/Modal';
@@ -152,6 +154,7 @@ function App(): ReactNode {
   useAutoMarketSubscriptions();
   useDataSourceEvents();
   usePersistentOrderbooks();
+  useSeriesRefresh();
 
   // -------------------------------------------------------------------------
   // Shared add-node callback (eliminates duplication across layouts)
@@ -504,7 +507,20 @@ function App(): ReactNode {
       <div className="flex-1 overflow-y-auto p-4">
         <PanelErrorBoundary panelName="Node Details">
           {detailPanelTab === 'details' ? (
-            <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
+            (() => {
+              const meta = selectedNode?.metadata as Record<string, unknown> | undefined;
+              const isSelectedSeries = meta?.is_series === true;
+              return isSelectedSeries ? (
+                <>
+                  <SeriesMarketPanel node={selectedNode} />
+                  <div className="mt-4 pt-4 border-t border-gray-700">
+                    <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
+                  </div>
+                </>
+              ) : (
+                <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
+              );
+            })()
           ) : detailPanelTab === 'raw-stream' ? (
             <RawStreamTab nodeId={selectedNode.id} />
           ) : (

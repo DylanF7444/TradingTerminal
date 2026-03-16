@@ -39,13 +39,14 @@ import {
   Key,
   Search,
   Type,
-  X
+  X,
+  Layers
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
 import MarketBrowser from './MarketBrowser';
-import type { SelectedEventMarket } from '../../types/markets';
+import type { SelectedEventMarket, EventSearchResult, SeriesChildMarket } from '../../types/markets';
 
 // ============================================================================
 // API KEY TYPES
@@ -172,6 +173,9 @@ export default function MarketPanel({
     markets: SelectedEventMarket[];
   } | null>(null);
 
+  // Series event selection (entire event as single node)
+  const [seriesEvent, setSeriesEvent] = useState<EventSearchResult | null>(null);
+
   // Manual entry fallback (single market)
   const [manualMarketId, setManualMarketId] = useState('');
 
@@ -213,6 +217,7 @@ export default function MarketPanel({
   const clearSensitiveData = useCallback(() => {
     setCredentials({});
     setSelectedEvent(null);
+    setSeriesEvent(null);
     setManualMarketId('');
     setMarketInputMode('search');
     setLocalError(null);
@@ -309,6 +314,7 @@ export default function MarketPanel({
 
   // Check if we have a valid market selection
   const hasMarketSelection = (): boolean => {
+    if (seriesEvent) return true;
     if (marketInputMode === 'search') {
       return !!selectedEvent && selectedEvent.markets.length > 0;
     }
@@ -357,7 +363,80 @@ export default function MarketPanel({
         environment: selectedPlatform === MarketType.Kalshi ? environment : undefined
       };
 
-      if (marketInputMode === 'manual') {
+      const platformName = selectedPlatform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
+
+      if (seriesEvent) {
+        // Series mode: create a single node representing the entire event
+        const childMarkets: SeriesChildMarket[] = (seriesEvent.markets || []).map((m) => ({
+          id: m.id || '',
+          title: m.title || '',
+          token_ids: m.token_ids || [],
+          yes_price: m.yes_price ?? null,
+          no_price: m.no_price ?? null,
+          volume: m.volume ?? null,
+          liquidity: m.liquidity ?? null,
+          status: m.status || 'active',
+          end_date: m.end_date ?? null,
+          slug: m.slug || '',
+          condition_id: m.condition_id ?? null,
+          is_resolved: m.status === 'resolved' || m.status === 'closed',
+        }));
+
+        const firstMarket = seriesEvent.markets?.[0];
+        const result = await addMarket({
+          marketType: selectedPlatform,
+          apiCredentials: credPayload,
+          marketConfig: {
+            market_id: firstMarket?.id || seriesEvent.id || '',
+            question: seriesEvent.title || 'Series',
+            token_ids: firstMarket?.token_ids || [],
+            event_group_id: seriesEvent.id || '',
+            event_title: seriesEvent.title || '',
+          },
+          marketDetails: {
+            title: seriesEvent.title || undefined,
+            description: seriesEvent.description || undefined,
+            image_url: seriesEvent.image_url || undefined,
+            category: seriesEvent.category || undefined,
+            slug: seriesEvent.slug || undefined,
+          },
+        });
+
+        if (result) {
+          // Enrich metadata with series fields
+          const enrichedMetadata = {
+            ...(result.metadata || {}),
+            is_series: true,
+            series_event_id: seriesEvent.id || '',
+            series_event_slug: seriesEvent.slug || '',
+            series_event_title: seriesEvent.title || '',
+            series_image_url: seriesEvent.image_url || null,
+            series_category: seriesEvent.category || null,
+            series_platform: platformName,
+            series_markets: childMarkets,
+            series_last_refreshed: Date.now(),
+            series_refresh_interval: 60,
+            series_hide_resolved: true,
+          };
+
+          // Persist enriched metadata to backend
+          try {
+            await invoke('update_data_source_cmd', {
+              nodeId: result.id,
+              config: enrichedMetadata,
+            });
+          } catch (persistErr) {
+            console.error('Failed to persist series metadata:', persistErr);
+          }
+
+          const seriesNode = {
+            ...result,
+            metadata: enrichedMetadata,
+          };
+          onAddMarket?.(seriesNode);
+          setIsModalOpen(false);
+        }
+      } else if (marketInputMode === 'manual') {
         // Manual entry: single market, no event group
         const result = await addMarket({
           marketType: selectedPlatform,
@@ -688,6 +767,12 @@ export default function MarketPanel({
                           platform={selectedPlatform}
                           onSelectMarkets={(eventId, eventTitle, markets) => {
                             setSelectedEvent({ eventId, eventTitle, markets });
+                            setSeriesEvent(null);
+                            setLocalError(null);
+                          }}
+                          onAddAsSeries={(event) => {
+                            setSeriesEvent(event);
+                            setSelectedEvent(null);
                             setLocalError(null);
                           }}
                         />
@@ -717,6 +802,25 @@ export default function MarketPanel({
                                 ))}
                               </div>
                             )}
+                          </div>
+                        )}
+                        {seriesEvent && (
+                          <div className="p-2.5 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                            <div className="flex items-center gap-2">
+                              <Layers className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-blue-300 truncate">{seriesEvent.title}</p>
+                                <p className="text-xs text-gray-500">
+                                  Series: {seriesEvent.market_count} market{seriesEvent.market_count !== 1 ? 's' : ''} (auto-updating)
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => setSeriesEvent(null)}
+                                className="text-gray-500 hover:text-gray-300 flex-shrink-0"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
