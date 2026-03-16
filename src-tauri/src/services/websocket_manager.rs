@@ -455,6 +455,8 @@ struct KalshiSubscribe {
 struct KalshiSubscribeParams {
     channels: Vec<String>,
     market_ticker: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_initial_snapshot: Option<bool>,
 }
 
 /// Run a consolidated Kalshi WebSocket connection
@@ -479,6 +481,12 @@ async fn run_kalshi_consolidated(
     let mut orderbook_state: HashMap<String, (Vec<OrderbookLevel>, Vec<OrderbookLevel>, Vec<OrderbookLevel>, Vec<OrderbookLevel>)> = HashMap::new();
     let mut sequence: u64 = 0;
     let mut subscription_id: u64 = 1;
+
+    // Kalshi uses sid (server-assigned subscription ID) to identify which subscription
+    // a message belongs to. The initial orderbook_snapshot may not include market_ticker,
+    // so we need to map sid -> market_ticker from the subscribed confirmation.
+    let mut request_id_to_market: HashMap<u64, String> = HashMap::new(); // our request id -> market_ticker
+    let mut sid_to_market: HashMap<u64, String> = HashMap::new(); // kalshi sid -> market_ticker
     
     loop {
         tokio::select! {
@@ -510,10 +518,12 @@ async fn run_kalshi_consolidated(
                                 params: KalshiSubscribeParams {
                                     channels,
                                     market_ticker: market_id.clone(),
+                                    send_initial_snapshot: if credentials.is_some() { Some(true) } else { None },
                                 },
                             };
+                            request_id_to_market.insert(subscription_id, market_id.clone());
                             subscription_id += 1;
-                            
+
                             if let Ok(json) = serde_json::to_string(&subscribe_msg) {
                                 println!("[Kalshi Consolidated] Sending subscription: {}", json);
                                 let _ = sender.send(WsMessage::Text(json)).await;
@@ -542,6 +552,7 @@ async fn run_kalshi_consolidated(
                                 params: KalshiSubscribeParams {
                                     channels: vec!["orderbook_delta".to_string(), "trade".to_string(), "ticker".to_string()],
                                     market_ticker: market_id.clone(),
+                                    send_initial_snapshot: None,
                                 },
                             };
                             subscription_id += 1;
@@ -595,14 +606,41 @@ async fn run_kalshi_consolidated(
                     Some(Ok(WsMessage::Text(text))) => {
                         // Record network bandwidth (received)
                         network_metrics.record_received(text.len() as u64);
-                        
+
                         // Parse message to determine market
                         if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+                            let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                            // Handle "subscribed" confirmations to build sid -> market_ticker mapping.
+                            // Kalshi responds to our subscribe request (which has our "id") with a
+                            // "subscribed" message containing a server-assigned "sid". We map sid to
+                            // the market_ticker we associated with that request id.
+                            if msg_type == "subscribed" {
+                                if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
+                                    if let Some(sid) = value.get("sid").and_then(|v| v.as_u64()) {
+                                        if let Some(market) = request_id_to_market.get(&id) {
+                                            println!("[Kalshi Consolidated] Mapped sid {} -> market {} (request id {})", sid, market, id);
+                                            sid_to_market.insert(sid, market.clone());
+                                        }
+                                    }
+                                }
+                                println!("Kalshi subscription confirmed: {}", text);
+                                continue;
+                            }
+
+                            // Extract market_ticker from message, with sid fallback.
+                            // The initial orderbook_snapshot may not include market_ticker inline,
+                            // relying on sid to identify the subscription instead.
                             let market_ticker = value.get("market_ticker")
                                 .and_then(|v| v.as_str())
                                 .or_else(|| value.get("msg").and_then(|m| m.get("market_ticker")).and_then(|v| v.as_str()))
-                                .map(|s| s.to_string());
-                            
+                                .map(|s| s.to_string())
+                                .or_else(|| {
+                                    value.get("sid")
+                                        .and_then(|v| v.as_u64())
+                                        .and_then(|sid| sid_to_market.get(&sid).cloned())
+                                });
+
                             if let Some(ticker) = market_ticker {
                                 // Emit raw message
                                 let raw_msg = RawWebSocketMessage {
@@ -610,26 +648,28 @@ async fn run_kalshi_consolidated(
                                     platform: "kalshi".to_string(),
                                     raw_message: text.clone(),
                                     timestamp: Utc::now().timestamp_millis(),
-                                    msg_type: value.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    msg_type: Some(msg_type.to_string()),
                                 };
                                 let _ = app_handle.emit("orderbook:raw", &raw_msg);
-                                
+
                                 // Parse message
                                 let (yes_bids, yes_asks, no_bids, no_asks) = orderbook_state.entry(ticker.clone()).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
 
                                 match parse_kalshi_message(&text, &ticker, yes_bids, yes_asks, no_bids, no_asks, &mut sequence) {
                                     Ok(updates) => {
                                         for update in updates {
-                                            println!("[DEBUG] Emitting kalshi orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
+                                            println!("[DEBUG] Emitting kalshi orderbook:update for market: {} (bids: {}, asks: {})", update.market_id, update.bids.len(), update.asks.len());
                                             if let Err(e) = app_handle.emit("orderbook:update", &update) {
                                                 eprintln!("[Kalshi Consolidated] Failed to emit update: {}", e);
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("[Kalshi Consolidated] Parse error: {}", e);
+                                        eprintln!("[Kalshi Consolidated] Parse error for {}: {}", ticker, e);
                                     }
                                 }
+                            } else {
+                                println!("[Kalshi Consolidated] Unroutable message (no market_ticker or sid mapping): type={}, text={}", msg_type, &text[..text.len().min(200)]);
                             }
                         }
                     }
@@ -642,11 +682,14 @@ async fn run_kalshi_consolidated(
                         println!("[Kalshi Consolidated] Connection closed by server");
                         ws_sender = None;
                         ws_receiver = None;
+                        // Clear sid mappings - they're invalid after disconnect
+                        sid_to_market.clear();
                     }
                     Some(Err(e)) => {
                         eprintln!("[Kalshi Consolidated] WebSocket error: {}", e);
                         ws_sender = None;
                         ws_receiver = None;
+                        sid_to_market.clear();
                     }
                     _ => {}
                 }
@@ -726,8 +769,10 @@ async fn run_kalshi_consolidated(
                                             params: KalshiSubscribeParams {
                                                 channels: channels.clone(),
                                                 market_ticker: market_id.clone(),
+                                                send_initial_snapshot: if credentials.is_some() { Some(true) } else { None },
                                             },
                                         };
+                                        request_id_to_market.insert(subscription_id, market_id.clone());
                                         subscription_id += 1;
                                         
                                         if let Ok(json) = serde_json::to_string(&subscribe_msg) {

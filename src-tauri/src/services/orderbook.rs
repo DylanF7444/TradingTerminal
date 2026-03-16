@@ -1383,6 +1383,8 @@ struct KalshiSubscribe {
 struct KalshiSubscribeParams {
     channels: Vec<String>,
     market_ticker: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_initial_snapshot: Option<bool>,
 }
 
 /// Kalshi orderbook message
@@ -1594,12 +1596,13 @@ async fn run_kalshi_connection(
             params: KalshiSubscribeParams {
                 channels: vec!["orderbook_delta".to_string()],
                 market_ticker: market_ticker.to_string(),
+                send_initial_snapshot: Some(true),
             },
         };
         let orderbook_json = serde_json::to_string(&orderbook_subscribe)?;
         println!("Sending orderbook_delta subscription: {}", orderbook_json);
         ws_sender.send(WsMessage::Text(orderbook_json)).await?;
-        
+
         // Also subscribe to trades for last price
         let trade_subscribe = KalshiSubscribe {
             id: 2,
@@ -1607,6 +1610,7 @@ async fn run_kalshi_connection(
             params: KalshiSubscribeParams {
                 channels: vec!["trade".to_string()],
                 market_ticker: market_ticker.to_string(),
+                send_initial_snapshot: None,
             },
         };
         let trade_json = serde_json::to_string(&trade_subscribe)?;
@@ -1620,18 +1624,20 @@ async fn run_kalshi_connection(
             params: KalshiSubscribeParams {
                 channels: vec!["ticker".to_string()],
                 market_ticker: market_ticker.to_string(),
+                send_initial_snapshot: None,
             },
         };
         let ticker_json = serde_json::to_string(&ticker_subscribe)?;
         println!("Sending ticker subscription: {}", ticker_json);
         ws_sender.send(WsMessage::Text(ticker_json)).await?;
-        
+
         let trade_subscribe = KalshiSubscribe {
             id: 2,
             cmd: "subscribe".to_string(),
             params: KalshiSubscribeParams {
                 channels: vec!["trade".to_string()],
                 market_ticker: market_ticker.to_string(),
+                send_initial_snapshot: None,
             },
         };
         let trade_json = serde_json::to_string(&trade_subscribe)?;
@@ -1801,19 +1807,29 @@ pub fn parse_kalshi_message(
             ])
         }
         "orderbook_snapshot" => {
-            // Full snapshot: { "type": "orderbook_snapshot", "msg": { "yes": [[price,qty],...], "no": [[price,qty],...] } }
+            // Full snapshot: supports both old format (yes/no with integer pairs)
+            // and new Kalshi v2 format (yes_dollars_fp/no_dollars_fp with string pairs)
             let msg = value.get("msg").ok_or_else(|| anyhow!("Missing msg field in orderbook_snapshot"))?;
-            let raw_yes_levels = parse_kalshi_levels(msg.get("yes"));
-            let raw_no_levels = parse_kalshi_levels(msg.get("no"));
+            // Try new field names first (yes_dollars_fp/no_dollars_fp), fall back to old (yes/no)
+            let raw_yes_levels = parse_kalshi_levels(
+                msg.get("yes_dollars_fp").or_else(|| msg.get("yes"))
+            );
+            let raw_no_levels = parse_kalshi_levels(
+                msg.get("no_dollars_fp").or_else(|| msg.get("no"))
+            );
 
             // YES orderbook: YES bids from yes array, YES asks derived from NO (price = 1 - no_price)
             *yes_bids = raw_yes_levels.clone();
             *yes_asks = invert_kalshi_levels(&raw_no_levels);
-            yes_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
 
             // NO orderbook: NO bids from no array, NO asks derived from YES (price = 1 - yes_price)
             *no_bids = raw_no_levels.clone();
             *no_asks = invert_kalshi_levels(&raw_yes_levels);
+
+            // Sort all sides: bids descending, asks ascending
+            yes_bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+            yes_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+            no_bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
             no_asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
 
             *sequence += 1;
@@ -1842,21 +1858,39 @@ pub fn parse_kalshi_message(
             ])
         }
         "orderbook_delta" => {
-            // Delta update: { "type": "orderbook_delta", "msg": { "side": "yes"|"no", "price": N, "delta": N } }
+            // Delta update: supports both old format (price/delta as integers in cents)
+            // and new Kalshi v2 format (price_dollars/delta_fp as strings)
             let msg = value.get("msg").ok_or_else(|| anyhow!("Missing msg field in orderbook_delta"))?;
             let side = msg.get("side").and_then(|v| v.as_str()).unwrap_or("");
-            let price = msg.get("price").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let delta = msg.get("delta").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let inverted_price = 100 - price;
+
+            // Parse price: try new "price_dollars" (string in dollars) first, then old "price" (int in cents)
+            let price_cents: i32 = if let Some(price_str) = msg.get("price_dollars").and_then(|v| v.as_str()) {
+                // price_dollars is a string like "0.55" representing dollars
+                let price_f64: f64 = price_str.parse().unwrap_or(0.0);
+                (price_f64 * 100.0).round() as i32
+            } else {
+                msg.get("price").and_then(|v| v.as_i64()).unwrap_or(0) as i32
+            };
+
+            // Parse delta: try new "delta_fp" (string, fixed-point) first, then old "delta" (int)
+            let delta: i32 = if let Some(delta_str) = msg.get("delta_fp").and_then(|v| v.as_str()) {
+                // delta_fp is a fixed-point string like "100.00" representing contract count
+                let delta_f64: f64 = delta_str.parse().unwrap_or(0.0);
+                delta_f64.round() as i32
+            } else {
+                msg.get("delta").and_then(|v| v.as_i64()).unwrap_or(0) as i32
+            };
+
+            let inverted_price = 100 - price_cents;
 
             if side == "yes" {
                 // Update YES bids
-                apply_kalshi_delta(yes_bids, price, delta);
+                apply_kalshi_delta(yes_bids, price_cents, delta);
                 // Update NO asks (inverted YES)
                 apply_kalshi_delta(no_asks, inverted_price, delta);
             } else {
                 // Update NO bids
-                apply_kalshi_delta(no_bids, price, delta);
+                apply_kalshi_delta(no_bids, price_cents, delta);
                 // Update YES asks (inverted NO)
                 apply_kalshi_delta(yes_asks, inverted_price, delta);
             }
@@ -1949,17 +1983,30 @@ fn apply_kalshi_delta(levels: &mut Vec<OrderbookLevel>, price_cents: i32, delta:
 }
 
 /// Parse Kalshi price levels
-/// Kalshi sends levels as arrays of [price_cents, quantity], e.g. [[1,63108],[2,12145],...]
+/// Supports both formats:
+///   - Old: [[price_cents (int), quantity (int)], ...] e.g. [[1,63108],[2,12145],...]
+///   - New (v2): [["price_dollars" (string), "qty_fp" (string)], ...] e.g. [["0.01","63108.00"],["0.02","12145.00"],...]
 fn parse_kalshi_levels(value: Option<&JsonValue>) -> Vec<OrderbookLevel> {
     let mut levels = Vec::new();
 
     if let Some(arr) = value.and_then(|v| v.as_array()) {
         for item in arr {
-            // Kalshi snapshot levels are [price_in_cents, quantity] arrays
+            // Kalshi snapshot levels are [price, quantity] arrays
             if let Some(pair) = item.as_array() {
                 if pair.len() >= 2 {
-                    let price = pair[0].as_i64().unwrap_or(0) as f64 / 100.0;
-                    let count = pair[1].as_i64().unwrap_or(0) as f64;
+                    // Try string format first (new v2 API: ["0.55", "100.00"])
+                    // then fall back to integer format (old API: [55, 100])
+                    let price = if let Some(s) = pair[0].as_str() {
+                        s.parse::<f64>().unwrap_or(0.0)
+                    } else {
+                        pair[0].as_i64().unwrap_or(0) as f64 / 100.0
+                    };
+
+                    let count = if let Some(s) = pair[1].as_str() {
+                        s.parse::<f64>().unwrap_or(0.0)
+                    } else {
+                        pair[1].as_i64().unwrap_or(0) as f64
+                    };
 
                     if price > 0.0 && count > 0.0 {
                         levels.push(OrderbookLevel {
