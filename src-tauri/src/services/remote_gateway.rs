@@ -124,6 +124,7 @@ impl RemoteConnectionManager {
             app_handle,
             device_id: device_id.clone(),
             enabled: enabled.clone(),
+            command_tx: command_tx.clone(),
             relay_config: None,
             relay_connected: false,
             pairing_code: None,
@@ -265,6 +266,8 @@ struct GatewayState {
     device_id: String,
     /// Whether the gateway is enabled
     enabled: Arc<AtomicBool>,
+    /// Command channel sender (for passing to reconnect loop)
+    command_tx: mpsc::Sender<GatewayCommand>,
     /// Relay server configuration
     relay_config: Option<RelayConfig>,
     /// Whether currently connected to the relay server
@@ -368,14 +371,18 @@ async fn handle_enable(state: &mut GatewayState, config: RelayConfig) {
             state.relay_connected = false;
             emit_status_update(state).await;
 
-            // Spawn reconnection task
+            // Emit error to frontend so the UI can display it
+            let _ = state.app_handle.emit("remote:relay_error", serde_json::json!({
+                "error": format!("Failed to connect to relay: {}", e),
+            }));
+
+            // Spawn reconnection task with command channel for proper re-enable
             let config_clone = config.clone();
-            let app_handle = state.app_handle.clone();
-            let device_id = state.device_id.clone();
             let enabled = state.enabled.clone();
+            let command_tx = state.command_tx.clone();
 
             tokio::spawn(async move {
-                reconnect_loop(app_handle, device_id, enabled, config_clone).await;
+                reconnect_loop(enabled, command_tx, config_clone).await;
             });
         }
     }
@@ -493,7 +500,7 @@ async fn handle_submit_pairing_code(state: &mut GatewayState, code: &str, device
         warn!("[RemoteGateway] Cannot submit pairing code: not connected to relay");
         let _ = state.app_handle.emit("remote:pair_result", serde_json::json!({
             "success": false,
-            "error": "Not connected to relay server. Enable remote access first.",
+            "error": "Not connected to relay server. Check relay URL and connection status.",
         }));
     }
 }
@@ -765,12 +772,12 @@ fn is_command_allowed(command: &str) -> bool {
 
 /// Reconnection loop with exponential backoff.
 ///
-/// Runs in a separate task and attempts to reconnect to the relay server
-/// when the connection is lost. Stops when the gateway is disabled.
+/// Runs in a separate task. When reconnection succeeds, sends an Enable
+/// command back to the gateway task so the connection is properly set up
+/// with read/write tasks and state updates.
 async fn reconnect_loop(
-    app_handle: AppHandle,
-    device_id: String,
     enabled: Arc<AtomicBool>,
+    command_tx: mpsc::Sender<GatewayCommand>,
     config: RelayConfig,
 ) {
     let mut attempt = 0u32;
@@ -799,38 +806,23 @@ async fn reconnect_loop(
             break;
         }
 
+        // Test if relay is reachable
         match connect_async(&config.relay_url).await {
             Ok((ws_stream, _)) => {
-                info!("[RemoteGateway] Reconnected to relay server");
-                let _ = app_handle.emit("remote:relay_connected", ());
+                info!("[RemoteGateway] Relay reachable, re-enabling gateway connection");
+                // Drop the test connection immediately
+                drop(ws_stream);
 
-                // Send re-registration
-                let (mut ws_write, _ws_read) = ws_stream.split();
-                let registration = serde_json::json!({
-                    "type": "register",
-                    "deviceId": device_id,
-                    "role": "host",
-                    "reconnect": true,
-                    "timestamp": Utc::now().timestamp_millis(),
-                });
-
-                if let Ok(json) = serde_json::to_string(&registration) {
-                    let _ = ws_write.send(WsMessage::Text(json)).await;
-                }
-
-                break;
+                // Send Enable command to the gateway task so it properly
+                // sets up the connection with read/write tasks and state
+                let _ = command_tx
+                    .send(GatewayCommand::Enable { config: config.clone() })
+                    .await;
+                return;
             }
             Err(e) => {
                 warn!("[RemoteGateway] Reconnection failed: {}", e);
                 attempt += 1;
-                let _ = app_handle.emit(
-                    "remote:reconnect_failed",
-                    serde_json::json!({
-                        "attempt": attempt,
-                        "maxAttempts": max_attempts,
-                        "error": e.to_string(),
-                    }),
-                );
             }
         }
     }
@@ -838,7 +830,6 @@ async fn reconnect_loop(
     if attempt >= max_attempts {
         error!("[RemoteGateway] Max reconnection attempts reached, giving up");
         enabled.store(false, Ordering::Relaxed);
-        let _ = app_handle.emit("remote:relay_gave_up", ());
     }
 }
 

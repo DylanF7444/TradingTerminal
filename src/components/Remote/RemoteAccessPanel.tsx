@@ -52,6 +52,7 @@ export function RemoteAccessPanel() {
     pairingCode,
     pairingCodeExpiry,
     pairResult,
+    relayError,
     isLoading,
     error,
     enableRemoteAccess,
@@ -179,6 +180,8 @@ export function RemoteAccessPanel() {
               className={`w-3 h-3 rounded-full ${
                 isEnabled && isRelayConnected
                   ? 'bg-green-400 shadow-lg shadow-green-400/30'
+                  : isEnabled && relayError
+                  ? 'bg-red-400'
                   : isEnabled
                   ? 'bg-yellow-400 animate-pulse'
                   : 'bg-gray-600'
@@ -189,6 +192,8 @@ export function RemoteAccessPanel() {
               <p className="text-xs text-gray-500">
                 {isEnabled && isRelayConnected
                   ? 'Connected to relay'
+                  : isEnabled && relayError
+                  ? 'Connection failed'
                   : isEnabled
                   ? 'Connecting...'
                   : 'Disabled'}
@@ -270,6 +275,17 @@ export function RemoteAccessPanel() {
           </div>
         )}
       </div>
+
+      {/* Relay Connection Error */}
+      {isEnabled && relayError && (
+        <div className="bg-red-900/20 border border-red-800/50 rounded-lg px-4 py-3">
+          <p className="text-xs text-red-400 font-medium mb-1">Relay Connection Error</p>
+          <p className="text-xs text-red-300/80">{relayError}</p>
+          <p className="text-xs text-gray-500 mt-2">
+            The relay server may not be running. Reconnection will be attempted automatically.
+          </p>
+        </div>
+      )}
 
       {/* Device ID Display (when enabled) */}
       {isEnabled && status && (

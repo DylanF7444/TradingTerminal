@@ -64,6 +64,8 @@ interface RemoteAccessState {
   pairingCodeExpiry: number | null;
   /** Result of the last pairing code submission */
   pairResult: PairResultEvent | null;
+  /** Relay connection error message (null when connected or no error) */
+  relayError: string | null;
   /** Whether an operation is in progress */
   isLoading: boolean;
   /** Last error message */
@@ -119,6 +121,7 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
     pairingCode: null,
     pairingCodeExpiry: null,
     pairResult: null,
+    relayError: null,
     isLoading: false,
     error: null,
   });
@@ -350,6 +353,7 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
 
     // Listen for relay connection state changes
     listen('remote:relay_connected', () => {
+      setState((prev) => ({ ...prev, relayError: null }));
       refreshStatus();
     }).then((unlisten) => unlisteners.push(unlisten));
 
@@ -357,6 +361,14 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
       setState((prev) => ({
         ...prev,
         status: prev.status ? { ...prev.status, relayConnected: false } : null,
+      }));
+    }).then((unlisten) => unlisteners.push(unlisten));
+
+    // Listen for relay connection errors
+    listen<{ error: string }>('remote:relay_error', (event) => {
+      setState((prev) => ({
+        ...prev,
+        relayError: event.payload.error,
       }));
     }).then((unlisten) => unlisteners.push(unlisten));
 
