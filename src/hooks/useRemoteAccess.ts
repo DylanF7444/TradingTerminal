@@ -46,6 +46,7 @@ import type {
   PairingCodeEvent,
   DeviceConnectedEvent,
   DeviceDisconnectedEvent,
+  PairResultEvent,
 } from '../types/remote';
 
 // ============================================================================
@@ -61,6 +62,8 @@ interface RemoteAccessState {
   pairingCode: string | null;
   /** Pairing code expiration countdown (seconds remaining) */
   pairingCodeExpiry: number | null;
+  /** Result of the last pairing code submission */
+  pairResult: PairResultEvent | null;
   /** Whether an operation is in progress */
   isLoading: boolean;
   /** Last error message */
@@ -78,6 +81,8 @@ interface UseRemoteAccessReturn extends RemoteAccessState {
   disableRemoteAccess: () => Promise<void>;
   /** Generate a new 6-digit pairing code */
   generatePairingCode: () => Promise<void>;
+  /** Submit a 6-digit pairing code to connect to a host device */
+  submitPairingCode: (code: string, deviceName: string) => Promise<void>;
   /** Revoke a paired device's access */
   revokeDevice: (deviceId: string) => Promise<void>;
   /** Update relay server configuration */
@@ -86,6 +91,8 @@ interface UseRemoteAccessReturn extends RemoteAccessState {
   refreshStatus: () => Promise<void>;
   /** Clear the current error */
   clearError: () => void;
+  /** Clear the pair result */
+  clearPairResult: () => void;
 }
 
 // ============================================================================
@@ -111,6 +118,7 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
     pairedDevices: [],
     pairingCode: null,
     pairingCodeExpiry: null,
+    pairResult: null,
     isLoading: false,
     error: null,
   });
@@ -210,6 +218,28 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
   }, []);
 
   // --------------------------------------------------------------------------
+  // Submit Pairing Code (connect to host)
+  // --------------------------------------------------------------------------
+
+  const submitPairingCode = useCallback(
+    async (code: string, deviceName: string) => {
+      setState((prev) => ({ ...prev, isLoading: true, error: null, pairResult: null }));
+      try {
+        await invoke('submit_pairing_code_cmd', { code, deviceName });
+        // Result will arrive via remote:pair_result event
+        setState((prev) => ({ ...prev, isLoading: false }));
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          error: String(err),
+        }));
+      }
+    },
+    [],
+  );
+
+  // --------------------------------------------------------------------------
   // Revoke Device
   // --------------------------------------------------------------------------
 
@@ -271,6 +301,10 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
     setState((prev) => ({ ...prev, error: null }));
   }, []);
 
+  const clearPairResult = useCallback(() => {
+    setState((prev) => ({ ...prev, pairResult: null }));
+  }, []);
+
   // --------------------------------------------------------------------------
   // Event Listeners
   // --------------------------------------------------------------------------
@@ -326,6 +360,17 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
       }));
     }).then((unlisten) => unlisteners.push(unlisten));
 
+    // Listen for pair result (response after submitting a pairing code)
+    listen<PairResultEvent>('remote:pair_result', (event) => {
+      setState((prev) => ({
+        ...prev,
+        pairResult: event.payload,
+      }));
+      if (event.payload.success) {
+        refreshStatus();
+      }
+    }).then((unlisten) => unlisteners.push(unlisten));
+
     // Initial status fetch
     refreshStatus();
 
@@ -360,9 +405,11 @@ export function useRemoteAccess(): UseRemoteAccessReturn {
     enableRemoteAccess,
     disableRemoteAccess,
     generatePairingCode,
+    submitPairingCode,
     revokeDevice,
     updateRelayConfig,
     refreshStatus,
     clearError,
+    clearPairResult,
   };
 }

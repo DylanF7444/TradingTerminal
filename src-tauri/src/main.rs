@@ -330,6 +330,7 @@ fn main() {
             // - disable_remote_access_cmd: Disconnect relay and all remote sessions
             // - get_remote_status_cmd: Current gateway status (connections, uptime, etc.)
             // - generate_pairing_code_cmd: Create 6-digit code for device enrollment
+            // - submit_pairing_code_cmd: Enter 6-digit code to connect to a host device
             // - revoke_remote_device_cmd: Revoke a paired device's access
             // - get_paired_devices_cmd: List all paired devices (sans auth tokens)
             // - update_relay_config_cmd: Change relay server URL/settings
@@ -337,6 +338,7 @@ fn main() {
             disable_remote_access_cmd,
             get_remote_status_cmd,
             generate_pairing_code_cmd,
+            submit_pairing_code_cmd,
             revoke_remote_device_cmd,
             get_paired_devices_cmd,
             update_relay_config_cmd,
@@ -2552,6 +2554,18 @@ async fn generate_pairing_code_cmd(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     remote::generate_pairing_code(state.remote_manager.clone()).await
+}
+
+/// Submit a 6-digit pairing code to connect to a host device.
+///
+/// Frontend: await invoke('submit_pairing_code_cmd', { code: '123456', deviceName: 'My Laptop' })
+#[tauri::command]
+async fn submit_pairing_code_cmd(
+    code: String,
+    device_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    remote::submit_pairing_code(code, device_name, state.remote_manager.clone()).await
 }
 
 /// Revoke a paired device's access and disconnect it.

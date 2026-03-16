@@ -136,6 +136,7 @@ pub use remote::{
     disable_remote_access,
     get_remote_status,
     generate_pairing_code,
+    submit_pairing_code,
     revoke_remote_device,
     get_paired_devices,
     update_relay_config,

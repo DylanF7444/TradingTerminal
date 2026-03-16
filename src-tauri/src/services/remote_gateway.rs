@@ -91,6 +91,8 @@ pub enum GatewayCommand {
     GetStatus { reply: tokio::sync::oneshot::Sender<RemoteStatus> },
     /// Get all paired devices
     GetPairedDevices { reply: tokio::sync::oneshot::Sender<Vec<DeviceCredentials>> },
+    /// Submit a pairing code to connect to a host device as a remote
+    SubmitPairingCode { code: String, device_name: String },
     /// Forward a market data event to all connected remotes
     ForwardEvent { event: String, data: JsonValue },
     /// Shutdown the gateway
@@ -203,6 +205,17 @@ impl RemoteConnectionManager {
         reply_rx.await.map_err(|_| anyhow!("Gateway did not respond"))
     }
 
+    /// Submit a pairing code to connect to a host device as a remote.
+    ///
+    /// Sends a PairRequest message through the relay with the entered code.
+    pub async fn submit_pairing_code(&self, code: String, device_name: String) -> Result<()> {
+        self.command_tx
+            .send(GatewayCommand::SubmitPairingCode { code, device_name })
+            .await
+            .map_err(|_| anyhow!("Gateway task not running"))?;
+        Ok(())
+    }
+
     /// Forward a market data event to all connected remote devices.
     pub async fn forward_event(&self, event: String, data: JsonValue) -> Result<()> {
         // Only forward if enabled and has active sessions
@@ -302,6 +315,9 @@ async fn gateway_task(
                     }
                     Some(GatewayCommand::RevokeDevice { device_id }) => {
                         handle_revoke_device(&mut state, &device_id).await;
+                    }
+                    Some(GatewayCommand::SubmitPairingCode { code, device_name }) => {
+                        handle_submit_pairing_code(&mut state, &code, &device_name).await;
                     }
                     Some(GatewayCommand::GetStatus { reply }) => {
                         let status = build_status(&state);
@@ -460,6 +476,28 @@ async fn handle_forward_event(state: &mut GatewayState, event: &str, data: &Json
     }
 }
 
+/// Handle SubmitPairingCode command: send a PairRequest to the relay to connect to a host.
+async fn handle_submit_pairing_code(state: &mut GatewayState, code: &str, device_name: &str) {
+    info!("[RemoteGateway] Submitting pairing code to host");
+
+    if let Some(ref ws_tx) = state.ws_write_tx {
+        let pair_request = RemoteCommand::PairRequest {
+            pairing_code: code.to_string(),
+            device_name: device_name.to_string(),
+        };
+
+        if let Ok(json) = serde_json::to_string(&pair_request) {
+            let _ = ws_tx.send(WsMessage::Text(json)).await;
+        }
+    } else {
+        warn!("[RemoteGateway] Cannot submit pairing code: not connected to relay");
+        let _ = state.app_handle.emit("remote:pair_result", serde_json::json!({
+            "success": false,
+            "error": "Not connected to relay server. Enable remote access first.",
+        }));
+    }
+}
+
 // ============================================================================
 // RELAY CONNECTION
 // ============================================================================
@@ -601,10 +639,21 @@ async fn handle_relay_message(
         }
 
         RemoteCommand::PairRequest { pairing_code, device_name } => {
-            // Pairing is handled by emitting to frontend for user confirmation
+            // Emit to frontend for user confirmation
             let _ = app_handle.emit("remote:pair_request", serde_json::json!({
                 "pairingCode": pairing_code,
                 "deviceName": device_name,
+            }));
+        }
+
+        RemoteCommand::PairResult { success, device_id, auth_token, error } => {
+            // Received when this device submitted a pairing code to a host
+            info!("[RemoteGateway] Pair result received: success={}", success);
+            let _ = app_handle.emit("remote:pair_result", serde_json::json!({
+                "success": success,
+                "deviceId": device_id,
+                "authToken": auth_token,
+                "error": error,
             }));
         }
 
@@ -660,7 +709,6 @@ async fn handle_relay_message(
 
         // Outbound-only commands (shouldn't be received from remote)
         RemoteCommand::AuthResult { .. }
-        | RemoteCommand::PairResult { .. }
         | RemoteCommand::CommandResponse { .. }
         | RemoteCommand::MarketDataUpdate { .. }
         | RemoteCommand::Pong { .. } => {

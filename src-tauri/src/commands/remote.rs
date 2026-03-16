@@ -196,6 +196,28 @@ pub async fn get_paired_devices(
     Ok(devices.into_iter().map(PairedDeviceSummary::from).collect())
 }
 
+/// Submit a pairing code to connect to a host device.
+///
+/// Sends a PairRequest through the relay with the 6-digit code entered
+/// by the user and a device name. The host validates the code and responds
+/// with device credentials via a `remote:pair_result` frontend event.
+///
+/// # Arguments
+/// * `code` - 6-digit pairing code displayed on the host device
+/// * `device_name` - Human-readable name for this device
+///
+/// # Returns
+/// * `Ok(())` - PairRequest sent successfully
+/// * `Err(String)` - Error if gateway is not running or not connected
+pub async fn submit_pairing_code(
+    code: String,
+    device_name: String,
+    manager: Arc<RemoteConnectionManager>,
+) -> Result<(), String> {
+    info!("Submitting pairing code: {}", code);
+    manager.submit_pairing_code(code, device_name).await.map_err(|e| e.to_string())
+}
+
 /// Update the relay server configuration.
 ///
 /// Changes the relay URL and/or authentication settings. If the gateway

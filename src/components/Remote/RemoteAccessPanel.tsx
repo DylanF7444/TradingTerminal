@@ -51,19 +51,24 @@ export function RemoteAccessPanel() {
     pairedDevices,
     pairingCode,
     pairingCodeExpiry,
+    pairResult,
     isLoading,
     error,
     enableRemoteAccess,
     disableRemoteAccess,
     generatePairingCode,
+    submitPairingCode,
     revokeDevice,
     clearError,
+    clearPairResult,
   } = useRemoteAccess();
 
   const [relayUrl, setRelayUrl] = useState('wss://localhost:9090/ws');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [heartbeatSecs, setHeartbeatSecs] = useState(30);
   const [sessionTimeoutSecs, setSessionTimeoutSecs] = useState(300);
+  const [joinCode, setJoinCode] = useState('');
+  const [joinDeviceName, setJoinDeviceName] = useState('');
 
   // --------------------------------------------------------------------------
   // Handlers
@@ -90,6 +95,13 @@ export function RemoteAccessPanel() {
     if (confirm('Revoke access for this device? It will need to re-pair.')) {
       await revokeDevice(deviceId);
     }
+  };
+
+  const handleSubmitJoinCode = async () => {
+    if (joinCode.length !== 6) return;
+    const name = joinDeviceName.trim() || 'Remote Device';
+    await submitPairingCode(joinCode, name);
+    setJoinCode('');
   };
 
   // --------------------------------------------------------------------------
@@ -313,6 +325,74 @@ export function RemoteAccessPanel() {
             <p className="text-xs text-gray-500">
               Generate a 6-digit code to pair a new remote device. The code is valid for 5 minutes.
             </p>
+          )}
+        </div>
+      )}
+
+      {/* Connect to Host Device Section */}
+      {isEnabled && (
+        <div className="bg-gray-800/50 rounded-lg p-4 space-y-3">
+          <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider">
+            Connect to Host
+          </h4>
+          <p className="text-xs text-gray-500">
+            Enter the 6-digit code displayed on the host device to connect.
+          </p>
+
+          <div className="space-y-2">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Device Name</label>
+              <input
+                type="text"
+                value={joinDeviceName}
+                onChange={(e) => setJoinDeviceName(e.target.value)}
+                placeholder="My Device"
+                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Pairing Code</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={joinCode}
+                  onChange={(e) => {
+                    const val = e.target.value.replace(/\D/g, '').slice(0, 6);
+                    setJoinCode(val);
+                  }}
+                  placeholder="000000"
+                  maxLength={6}
+                  className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-lg font-mono text-center text-gray-200 placeholder-gray-600 tracking-[0.3em] focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                />
+                <button
+                  onClick={handleSubmitJoinCode}
+                  disabled={isLoading || joinCode.length !== 6}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                >
+                  Connect
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Pair Result Feedback */}
+          {pairResult && (
+            <div className={`rounded-lg px-3 py-2 flex items-center justify-between ${
+              pairResult.success
+                ? 'bg-green-900/30 border border-green-800'
+                : 'bg-red-900/30 border border-red-800'
+            }`}>
+              <p className={`text-xs ${pairResult.success ? 'text-green-300' : 'text-red-300'}`}>
+                {pairResult.success
+                  ? 'Successfully paired with host device!'
+                  : pairResult.error || 'Pairing failed. Check the code and try again.'}
+              </p>
+              <button onClick={clearPairResult} className="text-gray-400 hover:text-gray-200 ml-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
           )}
         </div>
       )}

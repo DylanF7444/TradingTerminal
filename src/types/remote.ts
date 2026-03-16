@@ -193,3 +193,19 @@ export interface ReconnectFailedEvent {
   /** Error message */
   error: string;
 }
+
+/**
+ * Pair result event payload (received after submitting a pairing code).
+ *
+ * Received via Tauri event `remote:pair_result`.
+ */
+export interface PairResultEvent {
+  /** Whether pairing succeeded */
+  success: boolean;
+  /** Assigned device ID (if successful) */
+  deviceId?: string;
+  /** Auth token for future connections (if successful) */
+  authToken?: string;
+  /** Error message (if failed) */
+  error?: string;
+}
