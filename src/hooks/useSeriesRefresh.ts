@@ -1,50 +1,55 @@
 // ============================================================================
-// SERIES REFRESH HOOK
+// SERIES GROUP REFRESH HOOK
 // ============================================================================
 //
-// Periodically refreshes all series nodes by re-fetching their events
-// from the platform search API and merging updated market data.
+// Periodically refreshes all series groups by re-fetching their events
+// from the platform search API and updating member node metadata.
+// Detects new markets and creates nodes for them, updates prices for
+// existing markets, and marks resolved markets.
 // ============================================================================
 
 import { useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore, type StoreState } from '../store';
-import type { EventSearchResponse, EventSearchResult, SeriesChildMarket } from '../types/markets';
+import type { EventSearchResponse, EventSearchResult } from '../types/markets';
+import type { Node, NodeGroup } from '../types/nodes';
 
 /**
- * Hook that periodically refreshes all series nodes.
+ * Hook that periodically refreshes all series groups.
  * Should be called once at the App level.
  */
 export function useSeriesRefresh() {
+  const groupsRef = useRef<StoreState['groups']>({});
   const nodesRef = useRef<StoreState['nodes']>({});
-  const updateNodeMetadataRef = useRef<StoreState['updateNodeMetadata']>(() => {});
 
-  // Keep refs in sync to avoid stale closures in the interval
+  const groups = useStore((s: StoreState) => s.groups);
   const nodes = useStore((s: StoreState) => s.nodes);
+  const updateGroup = useStore((s: StoreState) => s.updateGroup);
+  const addNodesToGroup = useStore((s: StoreState) => s.addNodesToGroup);
+  const addNode = useStore((s: StoreState) => s.addNode);
   const updateNodeMetadata = useStore((s: StoreState) => s.updateNodeMetadata);
+
+  // Keep refs in sync to avoid stale closures
+  groupsRef.current = groups;
   nodesRef.current = nodes;
-  updateNodeMetadataRef.current = updateNodeMetadata;
 
-  const refreshSeriesNodes = useCallback(async () => {
-    const allNodes = Object.values(nodesRef.current || {});
-    const seriesNodes = allNodes.filter((n) => {
-      if (!n?.metadata) return false;
-      const meta = n.metadata as Record<string, unknown>;
-      return meta?.is_series === true;
-    });
+  const refreshSeriesGroups = useCallback(async () => {
+    const allGroups = Object.values(groupsRef.current || {});
+    const seriesGroups = allGroups.filter(
+      (g: NodeGroup) => g.origin.type === 'series'
+    );
 
-    for (const node of seriesNodes) {
+    for (const group of seriesGroups) {
       try {
-        const meta = (node.metadata ?? {}) as Record<string, unknown>;
-        const lastRefreshed = (meta.series_last_refreshed as number) || 0;
-        const interval = ((meta.series_refresh_interval as number) || 60) * 1000;
+        const origin = group.origin;
+        const lastRefreshed = origin.seriesLastRefreshed || 0;
+        const interval = (origin.seriesRefreshInterval || 60) * 1000;
 
-        // Skip if not enough time has passed
         if (Date.now() - lastRefreshed < interval) continue;
 
-        const platform = (meta.series_platform as string) || 'Polymarket';
-        const searchQuery = (meta.series_event_title as string) || '';
-        const eventId = (meta.series_event_id as string) || '';
+        const platform = origin.platform || 'Polymarket';
+        const searchQuery = origin.seriesEventTitle || '';
+        const eventId = origin.seriesEventId || '';
 
         if (!searchQuery || !eventId) continue;
 
@@ -56,63 +61,129 @@ export function useSeriesRefresh() {
 
         if (!response?.results) continue;
 
-        // Find matching event by ID
         const matchingEvent = response.results.find(
           (e: EventSearchResult) => e.id === eventId
         );
 
         if (!matchingEvent) continue;
 
-        // Merge updated market data
-        const existingMarkets = ((meta.series_markets as SeriesChildMarket[]) || []);
-        const updatedMarkets: SeriesChildMarket[] = (matchingEvent.markets || []).map((m) => {
-          const existing = existingMarkets.find((em) => em.id === m.id);
-          return {
-            id: m.id || '',
-            title: m.title || '',
-            token_ids: m.token_ids || [],
-            yes_price: m.yes_price ?? null,
-            no_price: m.no_price ?? null,
-            volume: m.volume ?? null,
-            liquidity: m.liquidity ?? null,
-            status: m.status || 'active',
-            end_date: m.end_date ?? null,
-            slug: m.slug || '',
-            condition_id: m.condition_id ?? null,
-            is_resolved: existing?.is_resolved || m.status === 'resolved' || m.status === 'closed',
-          };
-        });
+        // Get current member nodes
+        const currentNodes = group.memberIds
+          .map((id) => nodesRef.current[id])
+          .filter(Boolean) as Node[];
 
-        const now = Date.now();
-
-        updateNodeMetadataRef.current(node.id, {
-          series_markets: updatedMarkets,
-          series_last_refreshed: now,
-        });
-
-        // Persist to backend (fire and forget)
-        invoke('update_data_source_cmd', {
-          nodeId: node.id,
-          config: { ...meta, series_markets: updatedMarkets, series_last_refreshed: now },
-        }).catch((err: unknown) =>
-          console.error(`Failed to persist series refresh for ${node.id}:`, err)
+        const currentMarketIds = new Set(
+          currentNodes.map((n) => {
+            const meta = n.metadata as Record<string, unknown>;
+            return (meta?.market_id as string) || (meta?.marketId as string) || '';
+          }).filter(Boolean)
         );
+
+        // Detect new markets not yet in the group
+        const newMarkets = (matchingEvent.markets || []).filter(
+          (m) => !currentMarketIds.has(m.id)
+        );
+
+        // Create nodes for new markets
+        if (newMarkets.length > 0) {
+          const credPayload = { environment: 'demo' };
+          const newNodeIds: string[] = [];
+
+          // Position new nodes near existing group members
+          const existingPositions = currentNodes
+            .filter((n) => n.position)
+            .map((n) => n.position);
+          const baseX = existingPositions.length > 0
+            ? Math.max(...existingPositions.map((p) => p[0])) + 220
+            : 300;
+          const baseY = existingPositions.length > 0
+            ? Math.min(...existingPositions.map((p) => p[1]))
+            : 300;
+
+          for (let i = 0; i < newMarkets.length; i++) {
+            const market = newMarkets[i];
+            try {
+              const result = await invoke<{ node: Node }>('add_market_cmd', {
+                marketType: platform === 'Polymarket' ? 'Polymarket' : 'Kalshi',
+                apiCredentials: credPayload,
+                marketConfig: {
+                  market_id: market.id,
+                  question: market.title,
+                  token_ids: market.token_ids || [],
+                  event_group_id: eventId,
+                  event_title: origin.seriesEventTitle || '',
+                },
+                marketDetails: {
+                  title: market.title,
+                  description: market.description || undefined,
+                  image_url: origin.seriesImageUrl || undefined,
+                  category: origin.seriesCategory || undefined,
+                  status: market.status || undefined,
+                },
+              });
+
+              if (result?.node) {
+                const node = {
+                  ...result.node,
+                  position: [baseX, baseY + i * 160] as [number, number],
+                };
+                addNode(node);
+                newNodeIds.push(node.id);
+              }
+            } catch (err) {
+              console.error(`Failed to add new market ${market.id}:`, err);
+            }
+          }
+
+          if (newNodeIds.length > 0) {
+            addNodesToGroup(group.id, newNodeIds);
+          }
+        }
+
+        // Update existing member nodes with latest prices/status
+        for (const node of currentNodes) {
+          const meta = node.metadata as Record<string, unknown>;
+          const marketId = (meta?.market_id as string) || (meta?.marketId as string) || '';
+          const apiMarket = (matchingEvent.markets || []).find((m) => m.id === marketId);
+          if (!apiMarket) continue;
+
+          const updates: Record<string, unknown> = {};
+          if (apiMarket.status === 'resolved' || apiMarket.status === 'closed') {
+            updates.status = apiMarket.status;
+          }
+          if (apiMarket.yes_price != null) {
+            updates.marketState = {
+              ...((meta?.marketState as Record<string, unknown>) || {}),
+              lastPrice: apiMarket.yes_price,
+              status: apiMarket.status || 'active',
+            };
+          }
+
+          if (Object.keys(updates).length > 0) {
+            updateNodeMetadata(node.id, updates);
+          }
+        }
+
+        // Update group's last refreshed timestamp
+        updateGroup(group.id, {
+          origin: {
+            ...origin,
+            seriesLastRefreshed: Date.now(),
+          },
+        });
       } catch (err) {
-        console.error(`Failed to refresh series node ${node.id}:`, err);
+        console.error(`Failed to refresh series group ${group.id}:`, err);
       }
     }
-  }, []);
+  }, [updateGroup, addNodesToGroup, addNode, updateNodeMetadata]);
 
   useEffect(() => {
-    // Run an initial refresh shortly after mount
-    const initialTimeout = setTimeout(refreshSeriesNodes, 5000);
-
-    // Then run on interval
-    const intervalId = setInterval(refreshSeriesNodes, 30000);
+    const initialTimeout = setTimeout(refreshSeriesGroups, 5000);
+    const intervalId = setInterval(refreshSeriesGroups, 30000);
 
     return () => {
       clearTimeout(initialTimeout);
       clearInterval(intervalId);
     };
-  }, [refreshSeriesNodes]);
+  }, [refreshSeriesGroups]);
 }

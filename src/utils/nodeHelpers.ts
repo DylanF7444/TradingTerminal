@@ -109,8 +109,6 @@ export function getNodeCategoryEmoji(node: Node): string {
 export function getNodeCategoryLabel(node: Node): string {
   if (isInfoSource(node)) return 'Information Source';
   if (isMarket(node)) {
-    const meta = getMetadata(node);
-    if (meta.is_series === true) return 'Market Series';
     return 'Prediction Market';
   }
   if (isAnalyzer(node)) return 'Analyzer';
@@ -170,9 +168,6 @@ export function getMetadata(node: Node): Record<string, unknown> {
 /** Returns the display name for a node, falling back through multiple sources. */
 export function getNodeDisplayName(node: Node): string {
   const meta = getMetadata(node);
-  if (meta.is_series === true) {
-    return (meta.series_event_title as string) || (meta.name as string) || node.name || 'Series';
-  }
   return (
     (meta.name as string) ||
     node.name ||

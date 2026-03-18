@@ -45,8 +45,6 @@ interface MarketBrowserProps {
     eventTitle: string,
     markets: SelectedEventMarket[]
   ) => void;
-  /** Callback when user wants to add an entire event as a single series node */
-  onAddAsSeries?: (event: EventSearchResult) => void;
   className?: string;
 }
 
@@ -57,7 +55,6 @@ interface MarketBrowserProps {
 export default function MarketBrowser({
   platform,
   onSelectMarkets,
-  onAddAsSeries,
   className = '',
 }: MarketBrowserProps) {
   const [query, setQuery] = useState('');
@@ -502,21 +499,6 @@ export default function MarketBrowser({
                         </div>
                       )}
 
-                      {/* Add as Series Button */}
-                      {onAddAsSeries && (
-                        <div className={`px-4 py-2 ${selectedCount > 0 ? '' : 'border-t border-gray-800/50'}`}>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onAddAsSeries(event);
-                            }}
-                            className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5"
-                          >
-                            <Layers className="w-3 h-3" />
-                            Add as Series ({event.market_count} markets)
-                          </button>
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>

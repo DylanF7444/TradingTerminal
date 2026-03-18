@@ -593,9 +593,37 @@ export interface NodeGraph {
   };
 }
 
+// =============================================================================
+// NODE GROUPS (visual bounding boxes on canvas)
+// =============================================================================
+
+export interface NodeGroupOrigin {
+  type: 'series' | 'manual';
+  platform?: string;
+  seriesEventId?: string;
+  seriesEventSlug?: string;
+  seriesEventTitle?: string;
+  seriesImageUrl?: string | null;
+  seriesCategory?: string | null;
+  seriesRefreshInterval?: number;
+  seriesLastRefreshed?: number;
+}
+
+export interface NodeGroup {
+  id: string;
+  label: string;
+  memberIds: string[];
+  color: string;
+  padding: number;
+  collapsed: boolean;
+  origin: NodeGroupOrigin;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /**
  * Canvas viewport transform state.
- * 
+ *
  * Maps world coordinates to screen coordinates:
  *   screenX = worldX * zoom + x
  *   screenY = worldY * zoom + y

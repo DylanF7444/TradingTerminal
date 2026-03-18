@@ -48,6 +48,7 @@ enableMapSet();
 import { createNodesSlice, type NodesSlice } from './nodesSlice';
 import { createMarketsSlice, type MarketsSlice } from './marketsSlice';
 import { createPositionsSlice, type PositionsSlice } from './positionsSlice';
+import { createGroupsSlice, type GroupsSlice } from './groupsSlice';
 
 // UI State (defined inline as it's simple)
 export interface UISlice {
@@ -69,7 +70,7 @@ export interface UISlice {
 }
 
 // Combined Store State
-export type StoreState = NodesSlice & MarketsSlice & PositionsSlice & UISlice;
+export type StoreState = NodesSlice & MarketsSlice & PositionsSlice & GroupsSlice & UISlice;
 
 // Type helpers for slice creators
 // With the immer middleware, `set` receives a draft updater; `replace: true` is disallowed.
@@ -125,6 +126,7 @@ export const useStore = create<StoreState>()(
             ...createNodesSlice(set as unknown as Parameters<typeof createNodesSlice>[0], get as unknown as Parameters<typeof createNodesSlice>[1], api as unknown as Parameters<typeof createNodesSlice>[2]),
             ...createMarketsSlice(set as unknown as Parameters<typeof createMarketsSlice>[0], get as unknown as Parameters<typeof createMarketsSlice>[1], api as unknown as Parameters<typeof createMarketsSlice>[2]),
             ...createPositionsSlice(set as unknown as Parameters<typeof createPositionsSlice>[0], get as unknown as Parameters<typeof createPositionsSlice>[1], api as unknown as Parameters<typeof createPositionsSlice>[2]),
+            ...createGroupsSlice(set as unknown as Parameters<typeof createGroupsSlice>[0], get as unknown as Parameters<typeof createGroupsSlice>[1], api as unknown as Parameters<typeof createGroupsSlice>[2]),
             ...createUISlice(set, get),
           })
         ),
@@ -140,6 +142,8 @@ export const useStore = create<StoreState>()(
             activePanel: state.activePanel,
             // Selection state (restore on reload)
             selectedNodeId: state.selectedNodeId,
+            // Groups (persisted to localStorage since no backend table yet)
+            groups: state.groups,
             // Don't persist: nodes (from DB), markets (reconnect), positions (from DB)
           }),
           
@@ -190,6 +194,20 @@ export const useOrderbook = (marketId: string) =>
 
 export const usePositions = () => useStore((state: StoreState) => state.openPositions);
 export const useDailyPnL = () => useStore((state: StoreState) => state.dailyStats.realizedPnl);
+
+export const useGroups = () => useStore((state: StoreState) => state.groups);
+export const useGroupsArray = () => useStore((state: StoreState) => Object.values(state.groups));
+
+export const useGroupActions = () => useStore((state: StoreState) => ({
+  addGroup: state.addGroup,
+  removeGroup: state.removeGroup,
+  updateGroup: state.updateGroup,
+  addNodesToGroup: state.addNodesToGroup,
+  removeNodesFromGroup: state.removeNodesFromGroup,
+  removeNodeFromAllGroups: state.removeNodeFromAllGroups,
+  getGroupForNode: state.getGroupForNode,
+  getSeriesGroups: state.getSeriesGroups,
+}));
 
 export const useUI = () => useStore((state: StoreState) => ({
   sidebarOpen: state.sidebarOpen,

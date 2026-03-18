@@ -87,20 +87,6 @@ function getMonitoringInfo(
   }
 
   if (isMarket(node)) {
-    // Check if this is a series node
-    if (metadata.is_series === true) {
-      const markets = (metadata.series_markets as Array<{ title?: string; is_resolved?: boolean }>) || [];
-      const activeMarkets = markets.filter((m) => !m?.is_resolved);
-      const items = activeMarkets.slice(0, 5).map((m) => m?.title || 'Unknown');
-      if (activeMarkets.length > 5) {
-        items.push(`+${activeMarkets.length - 5} more`);
-      }
-      return {
-        label: `Series Markets (${activeMarkets.length} active)`,
-        items: items.length > 0 ? items : ['No active markets'],
-      };
-    }
-
     const subtype = getNodeSubtype(node.node_type);
     const marketId = metadata.marketId || metadata.market_id;
     const question = metadata.question || metadata.marketQuestion;

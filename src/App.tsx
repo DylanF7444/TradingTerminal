@@ -37,6 +37,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } fro
 
 // Store
 import { useStore, type StoreState } from './store';
+import { createNodeGroup } from './store/groupsSlice';
 
 // Tauri
 import { invoke } from '@tauri-apps/api/core';
@@ -58,6 +59,8 @@ import { useSeriesRefresh } from './hooks/useSeriesRefresh';
 import Canvas from './components/Canvas/Canvas';
 import SourcePanel from './components/InfoSources/SourcePanel';
 import MarketPanel from './components/Markets/MarketPanel';
+import SeriesSearchPanel from './components/Markets/SeriesSearchPanel';
+import { MarketType } from './types/nodes';
 import AnalyzerPanel from './components/Analyzers/AnalyzerPanel';
 import GlobalOrderbookOverlay from './components/Markets/GlobalOrderbookOverlay';
 import { ChartOverlay } from './components/Nodes/ChartOverlay';
@@ -73,7 +76,6 @@ import { NodeDetailsPanelExtracted as NodeDetailsPanel } from './components/Node
 import { RawStreamTab } from './components/Nodes/RawStreamTab';
 import { PanelErrorBoundary } from './components/UI/ErrorBoundary';
 import { UptimeDisplay } from './components/UI/UptimeDisplay';
-import { SeriesMarketPanel } from './components/Markets/SeriesMarketPanel';
 
 // UI components
 import { Modal } from './components/UI/Modal';
@@ -138,11 +140,19 @@ function App(): ReactNode {
 
   const nodes = useStore((s: StoreState) => s.nodes);
   const connections = useStore((s: StoreState) => s.connections);
+  const groups = useStore((s: StoreState) => s.groups);
   const selectedIds = useStore((s: StoreState) => s.selectedIds);
   const selectNode = useStore((s: StoreState) => s.selectNode);
+  const selectNodes = useStore((s: StoreState) => s.selectNodes);
   const clearSelection = useStore((s: StoreState) => s.clearSelection);
   const viewport = useStore((s: StoreState) => s.viewport);
   const setViewport = useStore((s: StoreState) => s.setViewport);
+
+  // Group actions
+  const addGroup = useStore((s: StoreState) => s.addGroup);
+  const removeGroup = useStore((s: StoreState) => s.removeGroup);
+  const addNodesToGroup = useStore((s: StoreState) => s.addNodesToGroup);
+  const removeNodesFromGroup = useStore((s: StoreState) => s.removeNodesFromGroup);
 
   // -------------------------------------------------------------------------
   // Extracted Side-Effect Hooks
@@ -272,6 +282,11 @@ function App(): ReactNode {
     [nodes],
   );
 
+  const groupsArray = useMemo(
+    () => Object.values(groups),
+    [groups],
+  );
+
   const connectionsArray = useMemo(() => connections, [connections]);
 
   const layoutMode: LayoutMode = useMemo(() => {
@@ -348,6 +363,7 @@ function App(): ReactNode {
   }, []);
 
   const handleNodeDelete = useCallback(async (id: string) => {
+    useStore.getState().removeNodeFromAllGroups(id);
     useStore.getState().removeNode(id);
     try {
       const result = await removeNodeFromDb(id);
@@ -380,6 +396,24 @@ function App(): ReactNode {
     [],
   );
   const handleCloseChartOverlay = useCallback(() => setChartOverlay(null), []);
+
+  // Group management callbacks
+  const handleCreateGroup = useCallback((nodeIds: string[], label: string) => {
+    const group = createNodeGroup(label, nodeIds);
+    addGroup(group);
+  }, [addGroup]);
+
+  const handleAddToGroup = useCallback((nodeIds: string[], groupId: string) => {
+    addNodesToGroup(groupId, nodeIds);
+  }, [addNodesToGroup]);
+
+  const handleRemoveFromGroup = useCallback((nodeIds: string[], groupId: string) => {
+    removeNodesFromGroup(groupId, nodeIds);
+  }, [removeNodesFromGroup]);
+
+  const handleDisbandGroup = useCallback((groupId: string) => {
+    removeGroup(groupId);
+  }, [removeGroup]);
 
   const handleCreateConnection = useCallback((sourceId: string, targetId: string) => {
     const { addConnection, connections: conns } = useStore.getState();
@@ -428,8 +462,10 @@ function App(): ReactNode {
     () => ({
       nodes: nodesArray,
       connections: connectionsArray,
+      groups: groupsArray,
       viewport,
       selectedNodeId: selectedNode?.id || null,
+      selectedIds,
       onNodeClick: handleNodeClick,
       onNodeMove: handleNodeMove,
       onNodeDelete: handleNodeDelete,
@@ -440,13 +476,19 @@ function App(): ReactNode {
       connectionMode,
       onCreateConnection: handleCreateConnection,
       onConnectionDelete: handleConnectionDelete,
+      onSelectNodes: selectNodes,
+      onCreateGroup: handleCreateGroup,
+      onAddToGroup: handleAddToGroup,
+      onRemoveFromGroup: handleRemoveFromGroup,
+      onDisbandGroup: handleDisbandGroup,
     }),
     [
-      nodesArray, connectionsArray, viewport, selectedNode?.id,
+      nodesArray, connectionsArray, groupsArray, viewport, selectedNode?.id, selectedIds,
       handleNodeClick, handleNodeMove, handleNodeDelete,
       handleCanvasBackgroundClick, handleViewportChange,
       handleOpenOrderbook, handleNodeResize, connectionMode,
-      handleCreateConnection, handleConnectionDelete,
+      handleCreateConnection, handleConnectionDelete, selectNodes,
+      handleCreateGroup, handleAddToGroup, handleRemoveFromGroup, handleDisbandGroup,
     ],
   );
 
@@ -478,6 +520,12 @@ function App(): ReactNode {
       <PanelErrorBoundary panelName="Market Panel">
         <MarketPanel onAddMarket={handleAddNode} existingMarkets={markets} />
       </PanelErrorBoundary>
+      <PanelErrorBoundary panelName="Polymarket Series">
+        <SeriesSearchPanel platform={MarketType.Polymarket} />
+      </PanelErrorBoundary>
+      <PanelErrorBoundary panelName="Kalshi Series">
+        <SeriesSearchPanel platform={MarketType.Kalshi} />
+      </PanelErrorBoundary>
       <PanelErrorBoundary panelName="Analyzer Panel">
         <AnalyzerPanel onAddAnalyzer={handleAddNode} existingAnalyzers={analyzers} />
       </PanelErrorBoundary>
@@ -507,20 +555,7 @@ function App(): ReactNode {
       <div className="flex-1 overflow-y-auto p-4">
         <PanelErrorBoundary panelName="Node Details">
           {detailPanelTab === 'details' ? (
-            (() => {
-              const meta = selectedNode?.metadata as Record<string, unknown> | undefined;
-              const isSelectedSeries = meta?.is_series === true;
-              return isSelectedSeries ? (
-                <>
-                  <SeriesMarketPanel node={selectedNode} />
-                  <div className="mt-4 pt-4 border-t border-gray-700">
-                    <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
-                  </div>
-                </>
-              ) : (
-                <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
-              );
-            })()
+            <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
           ) : detailPanelTab === 'raw-stream' ? (
             <RawStreamTab nodeId={selectedNode.id} />
           ) : (

@@ -1346,15 +1346,6 @@ export interface SeriesChildMarket {
   is_resolved: boolean;
 }
 
-/**
- * Type guard: checks if a node's metadata indicates it is a series node.
- */
-export function isSeriesNode(node: { metadata: unknown } | null | undefined): boolean {
-  if (!node) return false;
-  const meta = node.metadata as Record<string, unknown> | undefined;
-  return meta?.is_series === true;
-}
-
 // =============================================================================
 // CONSTANTS & ENUMERATIONS
 // =============================================================================

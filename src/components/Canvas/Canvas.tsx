@@ -25,8 +25,9 @@
 // ============================================================================
 
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
-import type { Node } from "../../types/nodes";
+import type { Node, NodeGroup } from "../../types/nodes";
 import NodeComponent from "./Node";
+import ContextMenu from "./ContextMenu";
 
 export interface Connection {
   source: string;
@@ -50,10 +51,12 @@ export interface Viewport {
 export interface CanvasProps {
   nodes: Node[];
   connections: Connection[];
+  groups?: NodeGroup[];
   bounds?: CanvasBounds;
   clampViewportToBounds?: boolean;
   viewport: Viewport;
   selectedNodeId: string | null;
+  selectedIds?: Set<string>;
   onNodeClick: (node: Node) => void;
   onNodeMove: (id: string, position: [number, number]) => void;
   onNodeDelete: (id: string) => void;
@@ -69,15 +72,27 @@ export interface CanvasProps {
   onCreateConnection?: (sourceId: string, targetId: string) => void;
   /** Callback when a connection is deleted */
   onConnectionDelete?: (source: string, target: string) => void;
+  /** Callback when multiple nodes are selected via rubber-band */
+  onSelectNodes?: (nodeIds: string[]) => void;
+  /** Callback to create a new group */
+  onCreateGroup?: (nodeIds: string[], label: string) => void;
+  /** Callback to add nodes to existing group */
+  onAddToGroup?: (nodeIds: string[], groupId: string) => void;
+  /** Callback to remove nodes from group */
+  onRemoveFromGroup?: (nodeIds: string[], groupId: string) => void;
+  /** Callback to disband a group */
+  onDisbandGroup?: (groupId: string) => void;
 }
 
 export default function Canvas({
   nodes,
   connections,
+  groups = [],
   bounds,
   clampViewportToBounds = true,
   viewport,
   selectedNodeId,
+  selectedIds = new Set(),
   onNodeClick,
   onNodeMove,
   onNodeDelete,
@@ -88,6 +103,11 @@ export default function Canvas({
   connectionMode = false,
   onCreateConnection,
   onConnectionDelete,
+  onSelectNodes,
+  onCreateGroup,
+  onAddToGroup,
+  onRemoveFromGroup,
+  onDisbandGroup,
 }: CanvasProps): ReactNode {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -97,11 +117,19 @@ export default function Canvas({
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const didPanRef = useRef(false);
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
+
+  // Rubber-band selection state
+  const [selectionRect, setSelectionRect] = useState<{
+    startX: number; startY: number; endX: number; endY: number;
+  } | null>(null);
   
   // Connection mode state
   const [connectionSource, setConnectionSource] = useState<string | null>(null);
   // Hovered connection for delete button
   const [hoveredConnection, setHoveredConnection] = useState<Connection | null>(null);
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Default bounds if not provided (large canvas area)
   const defaultBounds: CanvasBounds = {
@@ -279,8 +307,99 @@ export default function Canvas({
       ctx.restore();
     });
 
+    // Draw group bounding boxes
+    const NODE_WIDTH = 192;
+    const NODE_HEIGHT = 120;
+
+    groups.forEach((group) => {
+      if (group.memberIds.length === 0) return;
+
+      // Calculate bounding box from member nodes
+      let minX = Infinity, minY = Infinity;
+      let maxX = -Infinity, maxY = -Infinity;
+      let visibleCount = 0;
+
+      for (const nodeId of group.memberIds) {
+        const node = nodeMap.get(nodeId);
+        if (!node?.position) continue;
+        visibleCount++;
+        const [nx, ny] = node.position;
+        const nw = node.size?.width || NODE_WIDTH;
+        const nh = node.size?.height || NODE_HEIGHT;
+        minX = Math.min(minX, nx - nw / 2);
+        minY = Math.min(minY, ny - nh / 2);
+        maxX = Math.max(maxX, nx + nw / 2);
+        maxY = Math.max(maxY, ny + nh / 2);
+      }
+
+      if (visibleCount === 0) return;
+
+      // Add padding
+      const pad = group.padding || 40;
+      minX -= pad;
+      minY -= pad;
+      maxX += pad;
+      maxY += pad;
+
+      const boxWidth = maxX - minX;
+      const boxHeight = maxY - minY;
+
+      // Draw filled background
+      ctx.fillStyle = `${group.color}10`; // 10 = ~6% opacity
+      ctx.beginPath();
+      ctx.roundRect(minX, minY, boxWidth, boxHeight, 12);
+      ctx.fill();
+
+      // Draw dashed border
+      ctx.strokeStyle = group.color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 4]);
+      ctx.beginPath();
+      ctx.roundRect(minX, minY, boxWidth, boxHeight, 12);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw label background
+      const labelPadX = 8;
+      const labelPadY = 4;
+      const fontSize = 12;
+      ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+      const labelWidth = ctx.measureText(group.label).width + labelPadX * 2;
+      const labelHeight = fontSize + labelPadY * 2;
+      const labelX = minX;
+      const labelY = minY - labelHeight - 4;
+
+      ctx.fillStyle = group.color;
+      ctx.beginPath();
+      ctx.roundRect(labelX, labelY, labelWidth, labelHeight, 6);
+      ctx.fill();
+
+      // Draw label text
+      ctx.fillStyle = '#ffffff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(group.label, labelX + labelPadX, labelY + labelHeight / 2);
+    });
+
+    // Draw rubber-band selection rect
+    if (selectionRect) {
+      const minX = Math.min(selectionRect.startX, selectionRect.endX);
+      const maxX = Math.max(selectionRect.startX, selectionRect.endX);
+      const minY = Math.min(selectionRect.startY, selectionRect.endY);
+      const maxY = Math.max(selectionRect.startY, selectionRect.endY);
+      const width = maxX - minX;
+      const height = maxY - minY;
+
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
+      ctx.fillRect(minX, minY, width, height);
+      ctx.strokeStyle = 'rgba(59, 130, 246, 0.8)';
+      ctx.lineWidth = 1 / viewport.zoom;
+      ctx.setLineDash([4 / viewport.zoom, 4 / viewport.zoom]);
+      ctx.strokeRect(minX, minY, width, height);
+      ctx.setLineDash([]);
+    }
+
     ctx.restore();
-  }, [nodes, connections, viewport, canvasSize]);
+  }, [nodes, connections, groups, viewport, canvasSize, nodeMap, selectionRect]);
 
   // Calculate zoom limits based on canvas size and bounds
   const zoomLimits = useMemo(() => {
@@ -356,8 +475,21 @@ export default function Canvas({
   // Handle mouse down for pan or node drag
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      // Left click (button 0) or middle mouse (button 1) for pan
+      // Left click (button 0) or middle mouse (button 1)
       if (e.button === 0 || e.button === 1) {
+        // Shift+click starts rubber-band selection
+        if (e.shiftKey && e.button === 0) {
+          const rect = containerRef.current?.getBoundingClientRect();
+          if (rect) {
+            const screenX = e.clientX - rect.left;
+            const screenY = e.clientY - rect.top;
+            const worldX = (screenX - viewport.x) / viewport.zoom;
+            const worldY = (screenY - viewport.y) / viewport.zoom;
+            setSelectionRect({ startX: worldX, startY: worldY, endX: worldX, endY: worldY });
+          }
+          return;
+        }
+
         didPanRef.current = false;
         setIsPanning(true);
         setDragOffset({
@@ -404,6 +536,11 @@ export default function Canvas({
           }
         }
         setHoveredConnection(nearestConn);
+
+        // Update rubber-band selection rect
+        if (selectionRect) {
+          setSelectionRect({ ...selectionRect, endX: worldX, endY: worldY });
+        }
       }
 
       if (isPanning) {
@@ -432,14 +569,37 @@ export default function Canvas({
         });
       }
     },
-    [isPanning, dragOffset, viewport.zoom, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds, nodeMap, connections]
+    [isPanning, dragOffset, viewport, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds, nodeMap, connections, selectionRect]
   );
 
   // Handle mouse up
   const handleMouseUp = useCallback(() => {
+    // Finalize rubber-band selection
+    if (selectionRect && onSelectNodes) {
+      const minX = Math.min(selectionRect.startX, selectionRect.endX);
+      const maxX = Math.max(selectionRect.startX, selectionRect.endX);
+      const minY = Math.min(selectionRect.startY, selectionRect.endY);
+      const maxY = Math.max(selectionRect.startY, selectionRect.endY);
+
+      const selectedIds: string[] = [];
+      for (const node of nodes) {
+        if (!node?.position) continue;
+        const [nx, ny] = node.position;
+        // Check if node center is within selection rect
+        if (nx >= minX && nx <= maxX && ny >= minY && ny <= maxY) {
+          selectedIds.push(node.id);
+        }
+      }
+
+      if (selectedIds.length > 0) {
+        onSelectNodes(selectedIds);
+      }
+    }
+
+    setSelectionRect(null);
     setIsPanning(false);
     setDraggingNode(null);
-  }, []);
+  }, [selectionRect, onSelectNodes, nodes]);
 
   // Handle mouse leave - hide coordinates
   const handleMouseLeave = useCallback(() => {
@@ -573,6 +733,12 @@ export default function Canvas({
       onClick={handleClick}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (selectedIds.size > 0) {
+          setContextMenu({ x: e.clientX, y: e.clientY });
+        }
+      }}
     >
       {/* Canvas for grid and connections */}
       <canvas
@@ -723,6 +889,37 @@ export default function Canvas({
             </span>
           </div>
         </div>
+      )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          selectedNodes={nodes.filter((n) => selectedIds.has(n.id))}
+          groups={groups}
+          onClose={() => setContextMenu(null)}
+          onCreateGroup={(nodeIds, label) => {
+            onCreateGroup?.(nodeIds, label);
+            setContextMenu(null);
+          }}
+          onAddToGroup={(nodeIds, groupId) => {
+            onAddToGroup?.(nodeIds, groupId);
+            setContextMenu(null);
+          }}
+          onRemoveFromGroup={(nodeIds, groupId) => {
+            onRemoveFromGroup?.(nodeIds, groupId);
+            setContextMenu(null);
+          }}
+          onDisbandGroup={(groupId) => {
+            onDisbandGroup?.(groupId);
+            setContextMenu(null);
+          }}
+          onDeleteNodes={(nodeIds) => {
+            nodeIds.forEach((id) => onNodeDelete(id));
+            setContextMenu(null);
+          }}
+        />
       )}
     </div>
   );
