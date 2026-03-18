@@ -20,7 +20,7 @@
 //
 // ============================================================================
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   TrendingUp,
   Wallet,
@@ -39,13 +39,18 @@ import {
   Key,
   Search,
   Type,
-  X
+  X,
+  Layers,
+  Tag,
+  ChevronDown
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
 import MarketBrowser from './MarketBrowser';
-import type { SelectedEventMarket } from '../../types/markets';
+import type { SelectedEventMarket, EventSearchResult, EventSearchResponse } from '../../types/markets';
+import { useStore, type StoreState } from '../../store';
+import { createNodeGroup } from '../../store/groupsSlice';
 
 // ============================================================================
 // API KEY TYPES
@@ -161,9 +166,26 @@ export default function MarketPanel({
 
   // Form state (sensitive - cleared aggressively)
   const [credentials, setCredentials] = useState<Record<string, string>>({});
-  const [marketInputMode, setMarketInputMode] = useState<'search' | 'manual'>('search');
+  const [marketInputMode, setMarketInputMode] = useState<'search' | 'manual' | 'series'>('search');
   const [environment, setEnvironment] = useState<'demo' | 'production'>('demo');
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
+
+  // Series search state
+  const [seriesQuery, setSeriesQuery] = useState('');
+  const [seriesResults, setSeriesResults] = useState<EventSearchResult[]>([]);
+  const [isSeriesSearching, setIsSeriesSearching] = useState(false);
+  const [seriesError, setSeriesError] = useState<string | null>(null);
+  const [seriesHasSearched, setSeriesHasSearched] = useState(false);
+  const [seriesHasMore, setSeriesHasMore] = useState(false);
+  const [seriesNextCursor, setSeriesNextCursor] = useState<string | null>(null);
+  const [isSeriesLoadingMore, setIsSeriesLoadingMore] = useState(false);
+  const [selectedSeries, setSelectedSeries] = useState<EventSearchResult | null>(null);
+  const seriesDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Store actions for series
+  const addNode = useStore((s: StoreState) => s.addNode);
+  const addGroup = useStore((s: StoreState) => s.addGroup);
+  const viewport = useStore((s: StoreState) => s.viewport);
 
   // Event-based market selection (from search)
   const [selectedEvent, setSelectedEvent] = useState<{
@@ -187,11 +209,11 @@ export default function MarketPanel({
 
   // Backend command hook
   const {
-    execute: addMarket,
+    execute: addMarketRaw,
     loading: isConnecting,
     error: apiError,
     reset: resetAddMarket
-  } = useTauriCommand<Node, {
+  } = useTauriCommand<{ node: Node }, {
     marketType: MarketType;
     apiCredentials: Record<string, any>;
     marketConfig: Record<string, any>;
@@ -209,6 +231,12 @@ export default function MarketPanel({
     } | null;
   }>('add_market_cmd');
 
+  // Wrapper to extract node from response
+  const addMarket = useCallback(async (params: Parameters<typeof addMarketRaw>[0]) => {
+    const result = await addMarketRaw(params);
+    return result?.node;
+  }, [addMarketRaw]);
+
   // Cleanup sensitive data on unmount or modal close
   const clearSensitiveData = useCallback(() => {
     setCredentials({});
@@ -222,8 +250,25 @@ export default function MarketPanel({
     setHasStoredKey(false);
     setUseStoredKey(true);
     setConnectProgress(null);
+    // Clear series state
+    setSeriesQuery('');
+    setSeriesResults([]);
+    setSeriesError(null);
+    setSeriesHasSearched(false);
+    setSeriesHasMore(false);
+    setSeriesNextCursor(null);
+    setSelectedSeries(null);
     resetAddMarket();
   }, [resetAddMarket]);
+
+  // Cleanup series debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (seriesDebounceRef.current) {
+        clearTimeout(seriesDebounceRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isModalOpen) {
@@ -289,6 +334,100 @@ export default function MarketPanel({
     setLocalError(null); // Clear error on input
   };
 
+  // ============================================================================
+  // SERIES SEARCH FUNCTIONALITY
+  // ============================================================================
+
+  const platformName = selectedPlatform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
+
+  // Fetch series results (events)
+  const fetchSeriesResults = useCallback(
+    async (searchQuery: string, cursor: string | null, append: boolean) => {
+      if (!searchQuery.trim() || !selectedPlatform) {
+        setSeriesResults([]);
+        setSeriesHasSearched(false);
+        setSeriesHasMore(false);
+        setSeriesNextCursor(null);
+        setSeriesError(null);
+        return;
+      }
+
+      if (append) {
+        setIsSeriesLoadingMore(true);
+      } else {
+        setIsSeriesSearching(true);
+      }
+      setSeriesError(null);
+      setSeriesHasSearched(true);
+
+      try {
+        const pName = selectedPlatform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
+        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+          platform: pName,
+          query: searchQuery.trim(),
+          cursor,
+        });
+
+        if (append) {
+          setSeriesResults((prev) => [...prev, ...response.results]);
+        } else {
+          setSeriesResults(response.results);
+        }
+
+        setSeriesHasMore(response.has_more);
+        setSeriesNextCursor(response.next_cursor);
+      } catch (err) {
+        console.error('Series search failed:', err);
+        setSeriesError(typeof err === 'string' ? err : 'Search failed. Please try again.');
+        if (!append) {
+          setSeriesResults([]);
+        }
+      } finally {
+        setIsSeriesSearching(false);
+        setIsSeriesLoadingMore(false);
+      }
+    },
+    [selectedPlatform]
+  );
+
+  const performSeriesSearch = useCallback(
+    (searchQuery: string) => {
+      setSeriesNextCursor(null);
+      setSeriesHasMore(false);
+      fetchSeriesResults(searchQuery, null, false);
+    },
+    [fetchSeriesResults]
+  );
+
+  const loadMoreSeries = useCallback(() => {
+    if (isSeriesLoadingMore || !seriesHasMore) return;
+    fetchSeriesResults(seriesQuery, seriesNextCursor, true);
+  }, [seriesQuery, seriesNextCursor, isSeriesLoadingMore, seriesHasMore, fetchSeriesResults]);
+
+  const handleSeriesQueryChange = useCallback(
+    (value: string) => {
+      setSeriesQuery(value);
+      if (seriesDebounceRef.current) {
+        clearTimeout(seriesDebounceRef.current);
+      }
+      seriesDebounceRef.current = setTimeout(() => {
+        performSeriesSearch(value);
+      }, 350);
+    },
+    [performSeriesSearch]
+  );
+
+  const handleSeriesSelect = (event: EventSearchResult) => {
+    setSelectedSeries(event);
+    setLocalError(null);
+  };
+
+  // Series platform color config
+  const SERIES_PLATFORM_CONFIG = {
+    [MarketType.Polymarket]: { seriesColor: '#8b5cf6' },
+    [MarketType.Kalshi]: { seriesColor: '#10b981' },
+  };
+
   // Test connection before saving (optional validation)
   const handleTestConnection = async () => {
     if (!selectedPlatform) return;
@@ -312,11 +451,23 @@ export default function MarketPanel({
     if (marketInputMode === 'search') {
       return !!selectedEvent && selectedEvent.markets.length > 0;
     }
+    if (marketInputMode === 'series') {
+      return !!selectedSeries && selectedSeries.markets.length > 0;
+    }
     return !!manualMarketId.trim();
   };
 
   // Validate credentials format client-side
   const validateCredentials = (platform: MarketType, creds: Record<string, string>): boolean => {
+    // For series mode, check if series is selected
+    if (marketInputMode === 'series') {
+      if (!selectedSeries || selectedSeries.markets.length === 0) {
+        setLocalError('Please select a series');
+        return false;
+      }
+      return true;
+    }
+
     // If using stored key, skip credential validation
     if (hasStoredKey && useStoredKey) {
       if (!hasMarketSelection()) {
@@ -371,6 +522,96 @@ export default function MarketPanel({
           onAddMarket?.(result);
           setIsModalOpen(false);
         }
+      } else if (marketInputMode === 'series' && selectedSeries) {
+        // Series mode: add all markets and create a group
+        const markets = selectedSeries.markets || [];
+        if (markets.length === 0) {
+          setLocalError('No markets found in this series');
+          return;
+        }
+
+        const createdNodeIds: string[] = [];
+        const pName = selectedPlatform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
+
+        // Grid layout for new nodes
+        const GRID_COLS = 3;
+        const SPACING_X = 220;
+        const SPACING_Y = 160;
+        const baseX = -viewport.x / viewport.zoom + 300;
+        const baseY = -viewport.y / viewport.zoom + 200;
+
+        setConnectProgress({ current: 0, total: markets.length });
+
+        // Create individual market nodes
+        for (let i = 0; i < markets.length; i++) {
+          const market = markets[i];
+          const col = i % GRID_COLS;
+          const row = Math.floor(i / GRID_COLS);
+          const posX = baseX + col * SPACING_X;
+          const posY = baseY + row * SPACING_Y;
+
+          setConnectProgress({ current: i + 1, total: markets.length });
+
+          try {
+            const result = await invoke<{ node: Node }>('add_market_cmd', {
+              marketType: selectedPlatform,
+              apiCredentials: credPayload,
+              marketConfig: {
+                market_id: market.id,
+                question: market.title,
+                token_ids: market.token_ids || [],
+                event_group_id: selectedSeries.id,
+                event_title: selectedSeries.title,
+              },
+              marketDetails: {
+                title: market.title,
+                description: market.description || undefined,
+                image_url: selectedSeries.image_url || undefined,
+                category: selectedSeries.category || undefined,
+                end_date: market.end_date || undefined,
+                status: market.status || undefined,
+                slug: market.slug || undefined,
+              },
+            });
+
+            if (result?.node) {
+              const node = {
+                ...result.node,
+                position: [posX, posY] as [number, number],
+              };
+              addNode(node);
+              createdNodeIds.push(node.id);
+              onAddMarket?.(node);
+            }
+          } catch (err) {
+            console.error(`Failed to add market ${market.id}:`, err);
+          }
+        }
+
+        // Create the group
+        if (createdNodeIds.length > 0) {
+          const seriesColor = SERIES_PLATFORM_CONFIG[selectedPlatform]?.seriesColor || '#8b5cf6';
+          const group = createNodeGroup(
+            selectedSeries.title || 'Series',
+            createdNodeIds,
+            {
+              type: 'series',
+              platform: pName,
+              seriesEventId: selectedSeries.id,
+              seriesEventSlug: selectedSeries.slug,
+              seriesEventTitle: selectedSeries.title,
+              seriesImageUrl: selectedSeries.image_url,
+              seriesCategory: selectedSeries.category,
+              seriesRefreshInterval: 60,
+              seriesLastRefreshed: Date.now(),
+            },
+            seriesColor
+          );
+          addGroup(group);
+        }
+
+        setConnectProgress(null);
+        setIsModalOpen(false);
       } else if (selectedEvent) {
         // Event-based: add each selected market
         const markets = selectedEvent.markets;
@@ -614,38 +855,42 @@ export default function MarketPanel({
                     &larr; Back to platforms
                   </button>
 
-                  {/* Stored Key Indicator */}
-                  {isLoadingKey ? (
-                    <div className="flex items-center gap-2 p-3 bg-gray-800/50 rounded-lg">
-                      <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
-                      <span className="text-sm text-gray-400">Checking for stored credentials...</span>
-                    </div>
-                  ) : hasStoredKey ? (
-                    <div className="flex items-center justify-between p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
-                      <div className="flex items-center gap-2">
-                        <Key className="w-4 h-4 text-emerald-400" />
-                        <span className="text-sm text-emerald-300">Stored credentials found</span>
-                      </div>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={useStoredKey}
-                          onChange={(e) => setUseStoredKey(e.target.checked)}
-                          className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-gray-900"
-                        />
-                        <span className="text-sm text-gray-300">Use stored</span>
-                      </label>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 p-3 bg-gray-800/50 rounded-lg">
-                      <Key className="w-4 h-4 text-gray-500" />
-                      <span className="text-sm text-gray-400">
-                        No stored credentials. Enter your API keys below.
-                      </span>
-                    </div>
+                  {/* Stored Key Indicator - hide for series mode */}
+                  {marketInputMode !== 'series' && (
+                    <>
+                      {isLoadingKey ? (
+                        <div className="flex items-center gap-2 p-3 bg-gray-800/50 rounded-lg">
+                          <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+                          <span className="text-sm text-gray-400">Checking for stored credentials...</span>
+                        </div>
+                      ) : hasStoredKey ? (
+                        <div className="flex items-center justify-between p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
+                          <div className="flex items-center gap-2">
+                            <Key className="w-4 h-4 text-emerald-400" />
+                            <span className="text-sm text-emerald-300">Stored credentials found</span>
+                          </div>
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useStoredKey}
+                              onChange={(e) => setUseStoredKey(e.target.checked)}
+                              className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-gray-900"
+                            />
+                            <span className="text-sm text-gray-300">Use stored</span>
+                          </label>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 p-3 bg-gray-800/50 rounded-lg">
+                          <Key className="w-4 h-4 text-gray-500" />
+                          <span className="text-sm text-gray-400">
+                            No stored credentials. Enter your API keys below.
+                          </span>
+                        </div>
+                      )}
+                    </>
                   )}
 
-                  {/* Market Selection - Search or Manual Entry */}
+                  {/* Market Selection - Search, Manual, or Series */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <label className="block text-sm font-medium text-gray-300">
@@ -669,6 +914,7 @@ export default function MarketPanel({
                           onClick={() => {
                             setMarketInputMode('manual');
                             setSelectedEvent(null);
+                            setSelectedSeries(null);
                           }}
                           className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
                             marketInputMode === 'manual'
@@ -678,6 +924,21 @@ export default function MarketPanel({
                         >
                           <Type className="w-3 h-3" />
                           Manual
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMarketInputMode('series');
+                            setSelectedEvent(null);
+                          }}
+                          className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                            marketInputMode === 'series'
+                              ? 'bg-purple-600 text-white'
+                              : 'text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          <Layers className="w-3 h-3" />
+                          Series
                         </button>
                       </div>
                     </div>
@@ -720,6 +981,174 @@ export default function MarketPanel({
                           </div>
                         )}
                       </div>
+                    ) : marketInputMode === 'series' ? (
+                      <div className="space-y-3">
+                        {/* Series search header info */}
+                        <div className="flex items-center gap-2 p-2.5 bg-purple-900/20 border border-purple-500/30 rounded-lg">
+                          <Layers className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                          <p className="text-xs text-purple-300">
+                            Add an entire event series as a grouped collection. All markets in the series will be added and grouped together.
+                          </p>
+                        </div>
+
+                        {/* Series search input */}
+                        <div className="relative">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                          <input
+                            type="text"
+                            value={seriesQuery}
+                            onChange={(e) => handleSeriesQueryChange(e.target.value)}
+                            placeholder={`Search ${platformName} series/events...`}
+                            className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-10 pr-10 py-2.5 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-purple-500 transition-colors text-sm"
+                          />
+                          {seriesQuery && !isSeriesSearching && (
+                            <button
+                              onClick={() => {
+                                setSeriesQuery('');
+                                setSeriesResults([]);
+                                setSeriesHasSearched(false);
+                                setSeriesHasMore(false);
+                                setSeriesNextCursor(null);
+                                setSeriesError(null);
+                                setSelectedSeries(null);
+                              }}
+                              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          )}
+                          {isSeriesSearching && (
+                            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-purple-400 animate-spin" />
+                          )}
+                        </div>
+
+                        {/* Series search results */}
+                        <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
+                          {seriesError ? (
+                            <div className="px-4 py-6 text-center">
+                              <AlertCircle className="w-6 h-6 text-red-400 mx-auto mb-2" />
+                              <p className="text-sm text-red-400">{seriesError}</p>
+                              <button
+                                onClick={() => performSeriesSearch(seriesQuery)}
+                                className="mt-2 text-xs text-gray-400 hover:text-gray-200 underline"
+                              >
+                                Retry
+                              </button>
+                            </div>
+                          ) : seriesResults.length > 0 ? (
+                            <div className="divide-y divide-gray-800">
+                              {seriesResults.map((event) => {
+                                const isSelected = selectedSeries?.id === event.id;
+
+                                return (
+                                  <button
+                                    key={`${event.platform}-${event.id}`}
+                                    onClick={() => handleSeriesSelect(event)}
+                                    className={`w-full text-left px-4 py-3 hover:bg-gray-800/70 transition-colors ${
+                                      isSelected
+                                        ? 'bg-purple-500/10 border-l-2 border-purple-500'
+                                        : ''
+                                    }`}
+                                  >
+                                    <div className="flex items-start gap-3">
+                                      {event.image_url ? (
+                                        <img
+                                          src={event.image_url}
+                                          alt=""
+                                          className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800"
+                                          onError={(e) => {
+                                            (e.target as HTMLImageElement).style.display = 'none';
+                                          }}
+                                        />
+                                      ) : (
+                                        <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
+                                          <Layers className="w-5 h-5 text-gray-600" />
+                                        </div>
+                                      )}
+
+                                      <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-medium text-gray-200 truncate leading-tight">
+                                          {event.title}
+                                        </p>
+                                        <div className="flex items-center gap-3 mt-1.5 text-xs">
+                                          <span className="flex items-center gap-1 text-purple-400">
+                                            <Layers className="w-3 h-3" />
+                                            {event.market_count} market{event.market_count !== 1 ? 's' : ''}
+                                          </span>
+                                          {event.category && (
+                                            <span className="flex items-center gap-1 text-gray-500">
+                                              <Tag className="w-3 h-3" />
+                                              {event.category}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {isSelected && (
+                                        <span className="text-purple-400 text-xs font-medium flex-shrink-0 mt-1">
+                                          Selected
+                                        </span>
+                                      )}
+                                    </div>
+                                  </button>
+                                );
+                              })}
+
+                              {/* Load More button */}
+                              {seriesHasMore && (
+                                <button
+                                  onClick={loadMoreSeries}
+                                  disabled={isSeriesLoadingMore}
+                                  className="w-full px-4 py-3 text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800/50 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                >
+                                  {isSeriesLoadingMore ? (
+                                    <>
+                                      <Loader2 className="w-4 h-4 animate-spin" />
+                                      Loading...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ChevronDown className="w-4 h-4" />
+                                      Load more
+                                    </>
+                                  )}
+                                </button>
+                              )}
+                            </div>
+                          ) : seriesHasSearched && !isSeriesSearching ? (
+                            <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                              <Search className="w-6 h-6 mx-auto mb-2 opacity-50" />
+                              No series found for "{seriesQuery}"
+                            </div>
+                          ) : !seriesHasSearched ? (
+                            <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                              <Search className="w-6 h-6 mx-auto mb-2 opacity-50" />
+                              Type to search {platformName} series
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {/* Selected series indicator */}
+                        {selectedSeries && (
+                          <div className="p-2.5 bg-purple-500/10 border border-purple-500/30 rounded-lg">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-purple-300 truncate">{selectedSeries.title}</p>
+                                <p className="text-xs text-gray-500">
+                                  {selectedSeries.market_count} markets will be added as a grouped series
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => setSelectedSeries(null)}
+                                className="text-gray-500 hover:text-gray-300 flex-shrink-0"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <div>
                         <input
@@ -739,8 +1168,8 @@ export default function MarketPanel({
                     )}
                   </div>
 
-                  {/* Credential Fields - show if no stored key or user wants to enter new */}
-                  {(!hasStoredKey || !useStoredKey) && (
+                  {/* Credential Fields - show if no stored key or user wants to enter new (hide for series mode) */}
+                  {(!hasStoredKey || !useStoredKey) && marketInputMode !== 'series' && (
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
                         <h4 className="text-sm font-medium text-gray-300">API Credentials</h4>
@@ -812,18 +1241,22 @@ export default function MarketPanel({
             {/* Modal Footer */}
             {step === 'configure' && selectedPlatform && (
               <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
-                <button
-                  onClick={handleTestConnection}
-                  disabled={isTesting || isCurrentlyConnecting}
-                  className="text-sm text-gray-400 hover:text-gray-200 disabled:opacity-50 flex items-center gap-2"
-                >
-                  {isTesting ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="w-4 h-4" />
-                  )}
-                  Test Connection
-                </button>
+                {/* Test Connection - hide for series mode */}
+                {marketInputMode !== 'series' && (
+                  <button
+                    onClick={handleTestConnection}
+                    disabled={isTesting || isCurrentlyConnecting}
+                    className="text-sm text-gray-400 hover:text-gray-200 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isTesting ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4" />
+                    )}
+                    Test Connection
+                  </button>
+                )}
+                {marketInputMode === 'series' && <div />}
 
                 <div className="flex items-center gap-3">
                   <button
@@ -834,8 +1267,12 @@ export default function MarketPanel({
                   </button>
                   <button
                     onClick={handleConnect}
-                    disabled={isCurrentlyConnecting}
-                    className="flex items-center gap-2 px-6 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors text-sm font-medium"
+                    disabled={isCurrentlyConnecting || (marketInputMode === 'series' && !selectedSeries)}
+                    className={`flex items-center gap-2 px-6 py-2 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors text-sm font-medium ${
+                      marketInputMode === 'series'
+                        ? 'bg-purple-600 hover:bg-purple-500'
+                        : 'bg-emerald-600 hover:bg-emerald-500'
+                    }`}
                   >
                     {connectProgress ? (
                       <>
@@ -846,6 +1283,11 @@ export default function MarketPanel({
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Connecting...
+                      </>
+                    ) : marketInputMode === 'series' ? (
+                      <>
+                        <Layers className="w-4 h-4" />
+                        Add Series{selectedSeries ? ` (${selectedSeries.market_count} markets)` : ''}
                       </>
                     ) : (
                       <>

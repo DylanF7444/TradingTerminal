@@ -216,7 +216,15 @@ fn main() {
             add_connection_cmd,
             remove_connection_cmd,
             get_all_connections_cmd,
-            
+
+            // Node group commands
+            add_node_group_cmd,
+            update_node_group_cmd,
+            remove_node_group_cmd,
+            get_all_node_groups_cmd,
+            add_nodes_to_group_cmd,
+            remove_nodes_from_group_cmd,
+
             // Market commands
             add_market_cmd,
             remove_market_cmd,
@@ -1122,7 +1130,7 @@ async fn get_all_connections_cmd(
         sqlite::get_all_connections(&conn)
             .map_err(|e| format!("Database error: {}", e))
     })?;
-    
+
     let result: Vec<serde_json::Value> = connections.into_iter().map(|(source, target, strength)| {
         serde_json::json!({
             "source": source,
@@ -1130,8 +1138,211 @@ async fn get_all_connections_cmd(
             "strength": strength,
         })
     }).collect();
-    
+
     Ok(result)
+}
+
+// -------------------------------------------------------------------------
+// Node Group Commands
+// -------------------------------------------------------------------------
+
+/// Add a new node group
+#[tauri::command]
+async fn add_node_group_cmd(
+    id: String,
+    label: String,
+    color: String,
+    padding: i32,
+    origin_type: String,
+    origin_data: Option<serde_json::Value>,
+    member_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    info!("Adding node group: {} ({})", label, id);
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let group = sqlite::NodeGroup {
+        id: id.clone(),
+        label: label.clone(),
+        color: color.clone(),
+        padding,
+        origin_type: origin_type.clone(),
+        origin_data: origin_data.clone(),
+        member_ids: member_ids.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::insert_node_group(&conn, &group)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    // Construct origin: for series groups, merge origin_data with type
+    let origin = if origin_type == "series" {
+        if let Some(ref data) = origin_data {
+            let mut obj = data.as_object().cloned().unwrap_or_default();
+            obj.insert("type".to_string(), serde_json::json!("series"));
+            serde_json::Value::Object(obj)
+        } else {
+            serde_json::json!({ "type": "series" })
+        }
+    } else {
+        serde_json::json!({ "type": "manual" })
+    };
+
+    Ok(serde_json::json!({
+        "id": id,
+        "label": label,
+        "color": color,
+        "padding": padding,
+        "origin": origin,
+        "memberIds": member_ids,
+        "createdAt": now,
+        "updatedAt": now,
+    }))
+}
+
+/// Update an existing node group
+#[tauri::command]
+async fn update_node_group_cmd(
+    id: String,
+    label: String,
+    color: String,
+    padding: i32,
+    origin_type: String,
+    origin_data: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Updating node group: {}", id);
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // First, get existing group to preserve member_ids and created_at
+    let existing = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_node_group_by_id(&conn, &id)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    let existing = existing.ok_or_else(|| format!("Group not found: {}", id))?;
+
+    let group = sqlite::NodeGroup {
+        id,
+        label,
+        color,
+        padding,
+        origin_type,
+        origin_data,
+        member_ids: existing.member_ids,
+        created_at: existing.created_at,
+        updated_at: now,
+    };
+
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::update_node_group(&conn, &group)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    Ok(())
+}
+
+/// Delete a node group
+#[tauri::command]
+async fn remove_node_group_cmd(
+    group_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Removing node group: {}", group_id);
+
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::delete_node_group(&conn, &group_id)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    Ok(())
+}
+
+/// Get all node groups (for restoring on startup)
+#[tauri::command]
+async fn get_all_node_groups_cmd(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let groups = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::get_all_node_groups(&conn)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    let result: Vec<serde_json::Value> = groups.into_iter().map(|g| {
+        // Construct origin: for series groups, merge origin_data with type
+        // For manual groups, just use { type: "manual" }
+        let origin = if g.origin_type == "series" {
+            if let Some(data) = g.origin_data {
+                // origin_data should already contain the full series origin
+                // but ensure type is set
+                let mut obj = data.as_object().cloned().unwrap_or_default();
+                obj.insert("type".to_string(), serde_json::json!("series"));
+                serde_json::Value::Object(obj)
+            } else {
+                serde_json::json!({ "type": "series" })
+            }
+        } else {
+            serde_json::json!({ "type": "manual" })
+        };
+
+        serde_json::json!({
+            "id": g.id,
+            "label": g.label,
+            "color": g.color,
+            "padding": g.padding,
+            "origin": origin,
+            "memberIds": g.member_ids,
+            "createdAt": g.created_at,
+            "updatedAt": g.updated_at,
+        })
+    }).collect();
+
+    Ok(result)
+}
+
+/// Add nodes to a group
+#[tauri::command]
+async fn add_nodes_to_group_cmd(
+    group_id: String,
+    node_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Adding {} nodes to group {}", node_ids.len(), group_id);
+
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::add_nodes_to_group(&conn, &group_id, &node_ids)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    Ok(())
+}
+
+/// Remove nodes from a group
+#[tauri::command]
+async fn remove_nodes_from_group_cmd(
+    group_id: String,
+    node_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    info!("Removing {} nodes from group {}", node_ids.len(), group_id);
+
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        sqlite::remove_nodes_from_group(&conn, &group_id, &node_ids)
+            .map_err(|e| format!("Database error: {}", e))
+    })?;
+
+    Ok(())
 }
 
 // -------------------------------------------------------------------------
@@ -1145,7 +1356,7 @@ async fn add_market_cmd(
     api_credentials: serde_json::Value,
     market_config: serde_json::Value,
     state: State<'_, AppState>,
-) -> Result<models::node::Node, String> {
+) -> Result<serde_json::Value, String> {
     info!("Adding market connection: {:?}", market_type);
     
     // Parse market type
@@ -1216,7 +1427,8 @@ async fn add_market_cmd(
     // 2. Establish WebSocket connection
     // 3. Start market listener task
     
-    Ok(node)
+    // Return wrapped in { node: ... } to match frontend expectations
+    Ok(serde_json::json!({ "node": node }))
 }
 
 /// Remove market connection

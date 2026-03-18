@@ -668,12 +668,19 @@ export async function addMarket(
     created_at?: string;
   }
 ): Promise<Result<Market, ApiError>> {
-  return invokeCommand<Market>('add_market_cmd', { 
+  const result = await invokeCommand<{ node: Node }>('add_market_cmd', { 
     marketType: type, 
     apiCredentials: credentials,
     marketConfig: {},
     marketDetails: marketDetails || null
   });
+  
+  if (!result.ok) {
+    return result;
+  }
+  
+  // Extract node from wrapped response
+  return { ok: true, value: result.value.node as unknown as Market };
 }
 
 /**

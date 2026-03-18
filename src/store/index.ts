@@ -132,8 +132,8 @@ export const useStore = create<StoreState>()(
         ),
         {
           name: 'pmt-storage', // localStorage key
-          version: 1, // For state migrations
-          
+          version: 2, // Bumped for groups migration
+
           // Only persist specific parts of state (UI preferences, not real-time data)
           partialize: (state: StoreState) => ({
             // UI State
@@ -142,11 +142,9 @@ export const useStore = create<StoreState>()(
             activePanel: state.activePanel,
             // Selection state (restore on reload)
             selectedNodeId: state.selectedNodeId,
-            // Groups (persisted to localStorage since no backend table yet)
-            groups: state.groups,
-            // Don't persist: nodes (from DB), markets (reconnect), positions (from DB)
+            // Don't persist: nodes (from DB), markets (reconnect), positions (from DB), groups (now from DB)
           }),
-          
+
           // Migration handling (when version changes)
           migrate: (persistedState: unknown, version: number) => {
             if (version === 0) {
@@ -155,6 +153,12 @@ export const useStore = create<StoreState>()(
                 ...(persistedState as Record<string, unknown>),
                 selectedSourceId: null, // New field in v1
               } as StoreState;
+            }
+            if (version === 1) {
+              // Migration from version 1 to 2: remove groups from localStorage (now in SQLite)
+              const state = { ...(persistedState as Record<string, unknown>) };
+              delete state.groups;
+              return state as unknown as StoreState;
             }
             return persistedState as StoreState;
           },
@@ -314,6 +318,98 @@ if (typeof window !== 'undefined') {
       
       previousConnections = connections;
     },
+  );
+
+  // Track previous groups to detect changes
+  let previousGroups: StoreState['groups'] = {};
+  let groupSyncTimeout: ReturnType<typeof setTimeout>;
+
+  useStore.subscribe(
+    (state: StoreState) => state.groups,
+    (groups) => {
+      // Debounce group sync (300ms)
+      clearTimeout(groupSyncTimeout);
+      groupSyncTimeout = setTimeout(() => {
+        void import('@tauri-apps/api/core').then(({ invoke }) => {
+          const currentIds = new Set(Object.keys(groups));
+          const previousIds = new Set(Object.keys(previousGroups));
+
+          // Detect added groups
+          for (const id of currentIds) {
+            if (!previousIds.has(id)) {
+              const group = groups[id];
+              void invoke('add_node_group_cmd', {
+                id: group.id,
+                label: group.label,
+                color: group.color,
+                padding: group.padding,
+                originType: group.origin.type,
+                originData: group.origin.type === 'series' ? group.origin : null,
+                memberIds: group.memberIds,
+              }).catch(console.error);
+            }
+          }
+
+          // Detect removed groups
+          for (const id of previousIds) {
+            if (!currentIds.has(id)) {
+              void invoke('remove_node_group_cmd', {
+                groupId: id,
+              }).catch(console.error);
+            }
+          }
+
+          // Detect updated groups (existing groups with changes)
+          for (const id of currentIds) {
+            if (previousIds.has(id)) {
+              const current = groups[id];
+              const previous = previousGroups[id];
+
+              // Check if group metadata changed
+              const metadataChanged =
+                current.label !== previous.label ||
+                current.color !== previous.color ||
+                current.padding !== previous.padding;
+
+              if (metadataChanged) {
+                void invoke('update_node_group_cmd', {
+                  id: current.id,
+                  label: current.label,
+                  color: current.color,
+                  padding: current.padding,
+                  originType: current.origin.type,
+                  originData: current.origin.type === 'series' ? current.origin : null,
+                }).catch(console.error);
+              }
+
+              // Check if members changed
+              const currentMembers = new Set(current.memberIds);
+              const previousMembers = new Set(previous.memberIds);
+
+              const added = current.memberIds.filter((id) => !previousMembers.has(id));
+              const removed = previous.memberIds.filter((id) => !currentMembers.has(id));
+
+              if (added.length > 0) {
+                void invoke('add_nodes_to_group_cmd', {
+                  groupId: current.id,
+                  nodeIds: added,
+                }).catch(console.error);
+              }
+
+              if (removed.length > 0) {
+                void invoke('remove_nodes_from_group_cmd', {
+                  groupId: current.id,
+                  nodeIds: removed,
+                }).catch(console.error);
+              }
+            }
+          }
+
+          previousGroups = { ...groups };
+        });
+      }, 300);
+    },
+    { equalityFn: shallow }
   );
 
   // Log state changes in development

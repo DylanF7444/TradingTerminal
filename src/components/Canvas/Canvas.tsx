@@ -118,11 +118,15 @@ export default function Canvas({
   const didPanRef = useRef(false);
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
 
-  // Rubber-band selection state
+  // Rubber-band selection state (triggered by right-click drag)
   const [selectionRect, setSelectionRect] = useState<{
     startX: number; startY: number; endX: number; endY: number;
   } | null>(null);
-  
+  // Track if right mouse button is down (for selection box vs context menu)
+  const [isRightMouseDown, setIsRightMouseDown] = useState(false);
+  const rightClickStartRef = useRef<{ x: number; y: number } | null>(null);
+  const didRightDragRef = useRef(false);
+
   // Connection mode state
   const [connectionSource, setConnectionSource] = useState<string | null>(null);
   // Hovered connection for delete button
@@ -475,21 +479,24 @@ export default function Canvas({
   // Handle mouse down for pan or node drag
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      // Right-click (button 2) starts rubber-band selection
+      if (e.button === 2) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect) {
+          const screenX = e.clientX - rect.left;
+          const screenY = e.clientY - rect.top;
+          const worldX = (screenX - viewport.x) / viewport.zoom;
+          const worldY = (screenY - viewport.y) / viewport.zoom;
+          rightClickStartRef.current = { x: screenX, y: screenY };
+          didRightDragRef.current = false;
+          setIsRightMouseDown(true);
+          // Don't start selection rect immediately - wait for drag
+        }
+        return;
+      }
+
       // Left click (button 0) or middle mouse (button 1)
       if (e.button === 0 || e.button === 1) {
-        // Shift+click starts rubber-band selection
-        if (e.shiftKey && e.button === 0) {
-          const rect = containerRef.current?.getBoundingClientRect();
-          if (rect) {
-            const screenX = e.clientX - rect.left;
-            const screenY = e.clientY - rect.top;
-            const worldX = (screenX - viewport.x) / viewport.zoom;
-            const worldY = (screenY - viewport.y) / viewport.zoom;
-            setSelectionRect({ startX: worldX, startY: worldY, endX: worldX, endY: worldY });
-          }
-          return;
-        }
-
         didPanRef.current = false;
         setIsPanning(true);
         setDragOffset({
@@ -537,31 +544,48 @@ export default function Canvas({
         }
         setHoveredConnection(nearestConn);
 
-        // Update rubber-band selection rect
-        if (selectionRect) {
+        // Handle right-click drag for rubber-band selection
+        if (isRightMouseDown && rightClickStartRef.current) {
+          const dragDistX = Math.abs(screenX - rightClickStartRef.current.x);
+          const dragDistY = Math.abs(screenY - rightClickStartRef.current.y);
+          // Start selection rect only after dragging at least 5 pixels
+          if (dragDistX > 5 || dragDistY > 5) {
+            didRightDragRef.current = true;
+            if (!selectionRect) {
+              // Start the selection rect from the initial click position
+              const startWorldX = (rightClickStartRef.current.x - viewport.x) / viewport.zoom;
+              const startWorldY = (rightClickStartRef.current.y - viewport.y) / viewport.zoom;
+              setSelectionRect({ startX: startWorldX, startY: startWorldY, endX: worldX, endY: worldY });
+            } else {
+              // Update the selection rect end position
+              setSelectionRect({ ...selectionRect, endX: worldX, endY: worldY });
+            }
+          }
+        } else if (selectionRect) {
+          // Update rubber-band selection rect (legacy path)
           setSelectionRect({ ...selectionRect, endX: worldX, endY: worldY });
         }
       }
 
       if (isPanning) {
         didPanRef.current = true;
-        
+
         let newX = e.clientX - dragOffset.x;
         let newY = e.clientY - dragOffset.y;
-        
+
         // Optionally clamp viewport to bounds
         if (clampViewportToBounds && canvasSize.width > 0 && canvasSize.height > 0) {
           // Clamp X: viewport can show from bounds.minX to bounds.maxX
           const minViewportX = canvasSize.width - effectiveBounds.maxX * viewport.zoom;
           const maxViewportX = -effectiveBounds.minX * viewport.zoom;
           newX = Math.max(minViewportX, Math.min(maxViewportX, newX));
-          
+
           // Clamp Y: viewport can show from bounds.minY to bounds.maxY
           const minViewportY = canvasSize.height - effectiveBounds.maxY * viewport.zoom;
           const maxViewportY = -effectiveBounds.minY * viewport.zoom;
           newY = Math.max(minViewportY, Math.min(maxViewportY, newY));
         }
-        
+
         onViewportChange({
           x: newX,
           y: newY,
@@ -569,32 +593,36 @@ export default function Canvas({
         });
       }
     },
-    [isPanning, dragOffset, viewport, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds, nodeMap, connections, selectionRect]
+    [isPanning, dragOffset, viewport, onViewportChange, clampViewportToBounds, canvasSize, effectiveBounds, nodeMap, connections, selectionRect, isRightMouseDown]
   );
 
   // Handle mouse up
-  const handleMouseUp = useCallback(() => {
-    // Finalize rubber-band selection
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    // Finalize rubber-band selection (from right-click drag)
     if (selectionRect && onSelectNodes) {
       const minX = Math.min(selectionRect.startX, selectionRect.endX);
       const maxX = Math.max(selectionRect.startX, selectionRect.endX);
       const minY = Math.min(selectionRect.startY, selectionRect.endY);
       const maxY = Math.max(selectionRect.startY, selectionRect.endY);
 
-      const selectedIds: string[] = [];
+      const selectedNodeIds: string[] = [];
       for (const node of nodes) {
         if (!node?.position) continue;
         const [nx, ny] = node.position;
         // Check if node center is within selection rect
         if (nx >= minX && nx <= maxX && ny >= minY && ny <= maxY) {
-          selectedIds.push(node.id);
+          selectedNodeIds.push(node.id);
         }
       }
 
-      if (selectedIds.length > 0) {
-        onSelectNodes(selectedIds);
+      if (selectedNodeIds.length > 0) {
+        onSelectNodes(selectedNodeIds);
       }
     }
+
+    // Reset right-click state
+    setIsRightMouseDown(false);
+    rightClickStartRef.current = null;
 
     setSelectionRect(null);
     setIsPanning(false);
@@ -735,9 +763,13 @@ export default function Canvas({
       onMouseLeave={handleMouseLeave}
       onContextMenu={(e) => {
         e.preventDefault();
-        if (selectedIds.size > 0) {
+        // Only show context menu if we didn't drag (i.e., it's a simple right-click)
+        // Context menu is shown when: nodes are selected AND we didn't drag
+        if (!didRightDragRef.current && selectedIds.size > 0) {
           setContextMenu({ x: e.clientX, y: e.clientY });
         }
+        // Reset drag tracking
+        didRightDragRef.current = false;
       }}
     >
       {/* Canvas for grid and connections */}
@@ -752,17 +784,17 @@ export default function Canvas({
           // Determine if this node is highlighted for connection mode
           const isConnectionSource = connectionMode && connectionSource === node.id;
           const isValidTarget = !!(connectionMode && connectionSource && connectionSource !== node.id);
-          
+
           return (
             <NodeComponent
               key={node.id}
               node={node}
               viewport={viewport}
-              isSelected={selectedNodeId === node.id}
+              isSelected={selectedIds.has(node.id) || selectedNodeId === node.id}
               isDragging={draggingNode === node.id}
               isConnectionSource={isConnectionSource}
               isValidConnectionTarget={isValidTarget}
-              onClick={() => {
+              onClick={(e) => {
                 if (connectionMode) {
                   // Connection mode: handle connection creation
                   if (!connectionSource) {
@@ -774,8 +806,18 @@ export default function Canvas({
                     // Reset connection mode
                     setConnectionSource(null);
                   }
+                } else if (e.shiftKey && onSelectNodes) {
+                  // Shift+click: toggle multi-select
+                  const currentSelected = Array.from(selectedIds);
+                  if (selectedIds.has(node.id)) {
+                    // Already selected - deselect (toggle off)
+                    onSelectNodes(currentSelected.filter(id => id !== node.id));
+                  } else {
+                    // Not selected - add to selection
+                    onSelectNodes([...currentSelected, node.id]);
+                  }
                 } else {
-                  // Normal mode: select node
+                  // Normal mode: select node (single selection)
                   onNodeClick(node);
                 }
               }}

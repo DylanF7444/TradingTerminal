@@ -35,7 +35,7 @@ export interface NodeComponentProps {
   viewport: { x: number; y: number; zoom: number };
   isSelected: boolean;
   isDragging: boolean;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
   onDelete: () => void;
   /** Callback to open orderbook overlay for market nodes */
@@ -349,7 +349,7 @@ export default function NodeComponent({
   // Handle click with propagation stop to prevent background click clearing selection
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
-    onClick();
+    onClick(e);
   };
 
   // Handle double-click to open orderbook overlay for market nodes

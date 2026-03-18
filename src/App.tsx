@@ -59,8 +59,6 @@ import { useSeriesRefresh } from './hooks/useSeriesRefresh';
 import Canvas from './components/Canvas/Canvas';
 import SourcePanel from './components/InfoSources/SourcePanel';
 import MarketPanel from './components/Markets/MarketPanel';
-import SeriesSearchPanel from './components/Markets/SeriesSearchPanel';
-import { MarketType } from './types/nodes';
 import AnalyzerPanel from './components/Analyzers/AnalyzerPanel';
 import GlobalOrderbookOverlay from './components/Markets/GlobalOrderbookOverlay';
 import { ChartOverlay } from './components/Nodes/ChartOverlay';
@@ -187,7 +185,7 @@ function App(): ReactNode {
         if (!isMounted) return;
 
         const storeState = useStore.getState();
-        const { addNode, addConnection, nodes: existingNodes } = storeState;
+        const { addNode, addConnection, addGroup, nodes: existingNodes } = storeState;
 
         // Skip if nodes already exist (prevents duplicates from React StrictMode)
         if (Object.keys(existingNodes).length > 0) {
@@ -205,7 +203,7 @@ function App(): ReactNode {
             }),
           );
           console.log(`Loaded ${result.length} existing nodes from backend`);
-          
+
           // Load connections from backend
           try {
             const connections = await invoke<any[]>('get_all_connections_cmd');
@@ -222,6 +220,30 @@ function App(): ReactNode {
             }
           } catch (connError) {
             console.error('Failed to load connections:', connError);
+          }
+
+          // Load groups from backend
+          try {
+            const groupsData = await invoke<any[]>('get_all_node_groups_cmd');
+            if (!isMounted) return;
+            if (groupsData?.length) {
+              groupsData.forEach((g) => {
+                addGroup({
+                  id: g.id,
+                  label: g.label,
+                  color: g.color,
+                  padding: g.padding,
+                  collapsed: false,
+                  memberIds: g.memberIds || [],
+                  origin: g.origin || { type: 'manual' },
+                  createdAt: g.createdAt,
+                  updatedAt: g.updatedAt,
+                });
+              });
+              console.log(`Loaded ${groupsData.length} groups from backend`);
+            }
+          } catch (groupError) {
+            console.error('Failed to load groups:', groupError);
           }
         } else {
           console.log('No existing nodes found, creating demo nodes...');
@@ -519,12 +541,6 @@ function App(): ReactNode {
       </PanelErrorBoundary>
       <PanelErrorBoundary panelName="Market Panel">
         <MarketPanel onAddMarket={handleAddNode} existingMarkets={markets} />
-      </PanelErrorBoundary>
-      <PanelErrorBoundary panelName="Polymarket Series">
-        <SeriesSearchPanel platform={MarketType.Polymarket} />
-      </PanelErrorBoundary>
-      <PanelErrorBoundary panelName="Kalshi Series">
-        <SeriesSearchPanel platform={MarketType.Kalshi} />
       </PanelErrorBoundary>
       <PanelErrorBoundary panelName="Analyzer Panel">
         <AnalyzerPanel onAddAnalyzer={handleAddNode} existingAnalyzers={analyzers} />

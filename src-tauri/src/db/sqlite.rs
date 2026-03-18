@@ -297,6 +297,48 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         [],
     )?;
 
+    // =========================================================================
+    // NODE GROUPS TABLE
+    // =========================================================================
+    //
+    // Stores visual node groups for organizing related nodes on the canvas.
+    // Groups can be manually created by users or automatically created when
+    // adding series/events. The origin field tracks group provenance.
+    //
+    // Origin types:
+    //   manual: User-created group via context menu
+    //   series: Auto-created when adding a series/event
+    //
+    // =========================================================================
+
+    // Node groups table - stores group metadata and membership
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS node_groups (
+            id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#8b5cf6',
+            padding INTEGER NOT NULL DEFAULT 40,
+            origin_type TEXT NOT NULL DEFAULT 'manual',
+            origin_data JSON,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Group membership table - tracks which nodes belong to which groups
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS group_members (
+            group_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (group_id, node_id),
+            FOREIGN KEY (group_id) REFERENCES node_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
     // Sessions table - tracks app session start/end times for uptime history
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -422,6 +464,17 @@ fn create_indexes(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_position_legs_market
          ON position_legs(market_id)",
+        [],
+    )?;
+
+    // =========================================================================
+    // Node group indexes
+    // =========================================================================
+
+    // Index for group members by node_id (for fast lookup when deleting nodes)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_members_node
+         ON group_members(node_id)",
         [],
     )?;
 
@@ -1725,6 +1778,221 @@ pub fn get_sessions_since(conn: &Connection, since: i64) -> SqliteResult<Vec<Ses
         })?
         .collect::<SqliteResult<Vec<Session>>>()?;
     Ok(sessions)
+}
+
+// ============================================================================
+// NODE GROUP OPERATIONS
+// ============================================================================
+
+/// Node group record with its members
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeGroup {
+    pub id: String,
+    pub label: String,
+    pub color: String,
+    pub padding: i32,
+    pub origin_type: String,
+    pub origin_data: Option<serde_json::Value>,
+    pub member_ids: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Insert a new node group
+pub fn insert_node_group(conn: &Connection, group: &NodeGroup) -> SqliteResult<()> {
+    let origin_data_str = group.origin_data.as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+
+    conn.execute(
+        "INSERT INTO node_groups (id, label, color, padding, origin_type, origin_data, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            &group.id,
+            &group.label,
+            &group.color,
+            group.padding,
+            &group.origin_type,
+            origin_data_str,
+            group.created_at,
+            group.updated_at,
+        ],
+    )?;
+
+    // Insert all members
+    let now = chrono::Utc::now().timestamp_millis();
+    for member_id in &group.member_ids {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, node_id, added_at)
+             VALUES (?1, ?2, ?3)",
+            params![&group.id, member_id, now],
+        );
+    }
+
+    Ok(())
+}
+
+/// Update an existing node group
+pub fn update_node_group(conn: &Connection, group: &NodeGroup) -> SqliteResult<()> {
+    let origin_data_str = group.origin_data.as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+
+    conn.execute(
+        "UPDATE node_groups
+         SET label = ?2, color = ?3, padding = ?4, origin_type = ?5, origin_data = ?6, updated_at = ?7
+         WHERE id = ?1",
+        params![
+            &group.id,
+            &group.label,
+            &group.color,
+            group.padding,
+            &group.origin_type,
+            origin_data_str,
+            group.updated_at,
+        ],
+    )?;
+
+    Ok(())
+}
+
+/// Delete a node group (members are deleted via cascade)
+pub fn delete_node_group(conn: &Connection, group_id: &str) -> SqliteResult<()> {
+    conn.execute(
+        "DELETE FROM node_groups WHERE id = ?1",
+        params![group_id],
+    )?;
+    Ok(())
+}
+
+/// Get a node group by ID with its members
+pub fn get_node_group_by_id(conn: &Connection, group_id: &str) -> SqliteResult<Option<NodeGroup>> {
+    let result = conn.query_row(
+        "SELECT id, label, color, padding, origin_type, origin_data, created_at, updated_at
+         FROM node_groups WHERE id = ?1",
+        params![group_id],
+        |row| {
+            let origin_data_str: Option<String> = row.get(5)?;
+            let origin_data = origin_data_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(NodeGroup {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                color: row.get(2)?,
+                padding: row.get(3)?,
+                origin_type: row.get(4)?,
+                origin_data,
+                member_ids: vec![], // Will be populated below
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        }
+    );
+
+    match result {
+        Ok(mut group) => {
+            // Get member IDs
+            let mut stmt = conn.prepare(
+                "SELECT node_id FROM group_members WHERE group_id = ?1"
+            )?;
+            let member_ids: Vec<String> = stmt
+                .query_map(params![group_id], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            group.member_ids = member_ids;
+            Ok(Some(group))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Get all node groups
+pub fn get_all_node_groups(conn: &Connection) -> SqliteResult<Vec<NodeGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, color, padding, origin_type, origin_data, created_at, updated_at
+         FROM node_groups"
+    )?;
+
+    let groups: Vec<NodeGroup> = stmt.query_map([], |row| {
+        let origin_data_str: Option<String> = row.get(5)?;
+        let origin_data = origin_data_str.and_then(|s| serde_json::from_str(&s).ok());
+
+        Ok(NodeGroup {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            color: row.get(2)?,
+            padding: row.get(3)?,
+            origin_type: row.get(4)?,
+            origin_data,
+            member_ids: vec![], // Will be populated below
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+
+    // Populate member IDs for each group
+    let mut result = Vec::with_capacity(groups.len());
+    for mut group in groups {
+        let mut member_stmt = conn.prepare(
+            "SELECT node_id FROM group_members WHERE group_id = ?1"
+        )?;
+        let member_ids: Vec<String> = member_stmt
+            .query_map(params![&group.id], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        group.member_ids = member_ids;
+        result.push(group);
+    }
+
+    Ok(result)
+}
+
+/// Add nodes to a group
+pub fn add_nodes_to_group(conn: &Connection, group_id: &str, node_ids: &[String]) -> SqliteResult<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+
+    for node_id in node_ids {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, node_id, added_at)
+             VALUES (?1, ?2, ?3)",
+            params![group_id, node_id, now],
+        );
+    }
+
+    // Update the group's updated_at timestamp
+    conn.execute(
+        "UPDATE node_groups SET updated_at = ?2 WHERE id = ?1",
+        params![group_id, now],
+    )?;
+
+    Ok(())
+}
+
+/// Remove nodes from a group
+pub fn remove_nodes_from_group(conn: &Connection, group_id: &str, node_ids: &[String]) -> SqliteResult<()> {
+    for node_id in node_ids {
+        conn.execute(
+            "DELETE FROM group_members WHERE group_id = ?1 AND node_id = ?2",
+            params![group_id, node_id],
+        )?;
+    }
+
+    // Update the group's updated_at timestamp
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE node_groups SET updated_at = ?2 WHERE id = ?1",
+        params![group_id, now],
+    )?;
+
+    Ok(())
+}
+
+/// Remove a node from all groups it belongs to
+pub fn remove_node_from_all_groups(conn: &Connection, node_id: &str) -> SqliteResult<()> {
+    conn.execute(
+        "DELETE FROM group_members WHERE node_id = ?1",
+        params![node_id],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

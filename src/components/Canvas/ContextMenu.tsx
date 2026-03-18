@@ -6,16 +6,41 @@
 // Appears on right-click when nodes are selected on the canvas.
 //
 // Operations:
-// - Group selected nodes (creates new NodeGroup)
+// - Group selected nodes (creates new NodeGroup) - only for same type
 // - Add selected nodes to existing group
 // - Remove selected nodes from group
 // - Ungroup (disband the group, keep nodes)
 // - Delete selected nodes
 // ============================================================================
 
-import { useState, useEffect, useRef } from 'react';
-import { FolderPlus, FolderMinus, Trash2, Ungroup, ChevronRight } from 'lucide-react';
-import type { Node, NodeGroup } from '../../types/nodes';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { FolderPlus, FolderMinus, Trash2, Ungroup, ChevronRight, AlertCircle } from 'lucide-react';
+import type { Node, NodeGroup, NodeType } from '../../types/nodes';
+
+/**
+ * Get the top-level type key from a NodeType discriminated union.
+ * Returns 'InfoSource', 'Market', 'Analyzer', or 'Alert'.
+ */
+function getTopLevelType(nodeType: NodeType): string {
+  if ('InfoSource' in nodeType) return 'InfoSource';
+  if ('Market' in nodeType) return 'Market';
+  if ('Analyzer' in nodeType) return 'Analyzer';
+  if ('Alert' in nodeType) return 'Alert';
+  return 'Unknown';
+}
+
+/**
+ * Get a user-friendly display name for the top-level type.
+ */
+function getTypeDisplayName(type: string): string {
+  switch (type) {
+    case 'InfoSource': return 'Info Sources';
+    case 'Market': return 'Markets';
+    case 'Analyzer': return 'Analyzers';
+    case 'Alert': return 'Alerts';
+    default: return type;
+  }
+}
 
 export interface ContextMenuProps {
   x: number;
@@ -48,6 +73,27 @@ export default function ContextMenu({
   const [showLabelInput, setShowLabelInput] = useState(false);
 
   const selectedIds = selectedNodes.map((n) => n.id);
+
+  // Check if all selected nodes have the same top-level type (for grouping validation)
+  const { allSameType, commonType, typeCounts } = useMemo(() => {
+    if (selectedNodes.length === 0) {
+      return { allSameType: false, commonType: null, typeCounts: {} };
+    }
+
+    const counts: Record<string, number> = {};
+    for (const node of selectedNodes) {
+      const type = getTopLevelType(node.node_type);
+      counts[type] = (counts[type] || 0) + 1;
+    }
+
+    const types = Object.keys(counts);
+    const allSame = types.length === 1;
+    return {
+      allSameType: allSame,
+      commonType: allSame ? types[0] : null,
+      typeCounts: counts,
+    };
+  }, [selectedNodes]);
 
   // Find if selected nodes belong to a group
   const selectedNodesInGroup = groups.find((g) =>
@@ -117,10 +163,23 @@ export default function ContextMenu({
       className="fixed z-[100] bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[200px]"
       style={{ left: adjustedX, top: adjustedY }}
     >
-      {/* Group selected */}
+      {/* Group selected - only available if all nodes are same type */}
       {selectedNodes.length >= 2 && !allInSameGroup && (
         <div className="relative">
-          {showLabelInput ? (
+          {!allSameType ? (
+            // Mixed types - show disabled message
+            <div className="px-3 py-2 flex items-center gap-2 text-sm text-gray-500 cursor-not-allowed">
+              <AlertCircle className="w-4 h-4 text-gray-600" />
+              <div className="flex flex-col">
+                <span>Cannot group mixed types</span>
+                <span className="text-xs text-gray-600">
+                  {Object.entries(typeCounts)
+                    .map(([type, count]) => `${count} ${getTypeDisplayName(type)}`)
+                    .join(', ')}
+                </span>
+              </div>
+            </div>
+          ) : showLabelInput ? (
             <div className="px-3 py-2">
               <input
                 type="text"
@@ -154,7 +213,7 @@ export default function ContextMenu({
               <FolderPlus className="w-4 h-4 text-blue-400" />
               Group selected
               <span className="ml-auto text-xs text-gray-500">
-                {selectedNodes.length} nodes
+                {selectedNodes.length} {commonType ? getTypeDisplayName(commonType).toLowerCase() : 'nodes'}
               </span>
             </button>
           )}
