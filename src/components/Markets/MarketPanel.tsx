@@ -51,6 +51,7 @@ import MarketBrowser from './MarketBrowser';
 import type { SelectedEventMarket, EventSearchResult, EventSearchResponse } from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
 import { createNodeGroup } from '../../store/groupsSlice';
+import { transformNodeFromBackend } from '../../utils/nodeTransform';
 
 // ============================================================================
 // API KEY TYPES
@@ -575,8 +576,10 @@ export default function MarketPanel({
             });
 
             if (result?.node) {
+              // Transform node from backend format to frontend format
+              const transformedNode = transformNodeFromBackend(result.node as unknown as Record<string, unknown>);
               const node = {
-                ...result.node,
+                ...transformedNode,
                 position: [posX, posY] as [number, number],
               };
               addNode(node);

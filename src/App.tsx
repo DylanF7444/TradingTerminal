@@ -379,6 +379,14 @@ function App(): ReactNode {
     useStore.getState().updateNodePosition(id, position);
   }, []);
 
+  const handleNodesMove = useCallback((positions: Record<string, [number, number]>) => {
+    const updates: Record<string, Partial<Node>> = {};
+    Object.entries(positions).forEach(([id, position]) => {
+      updates[id] = { position };
+    });
+    useStore.getState().updateNodes(updates);
+  }, []);
+
   const handleNodeResize = useCallback((id: string, size: { width: number; height: number | null }) => {
     useStore.getState().updateNodeSize(id, size);
     updateNodeSize(id, size).catch((err: unknown) => console.error('Failed to persist node size:', err));
@@ -490,6 +498,7 @@ function App(): ReactNode {
       selectedIds,
       onNodeClick: handleNodeClick,
       onNodeMove: handleNodeMove,
+      onNodesMove: handleNodesMove,
       onNodeDelete: handleNodeDelete,
       onBackgroundClick: handleCanvasBackgroundClick,
       onViewportChange: handleViewportChange,
@@ -506,7 +515,7 @@ function App(): ReactNode {
     }),
     [
       nodesArray, connectionsArray, groupsArray, viewport, selectedNode?.id, selectedIds,
-      handleNodeClick, handleNodeMove, handleNodeDelete,
+      handleNodeClick, handleNodeMove, handleNodesMove, handleNodeDelete,
       handleCanvasBackgroundClick, handleViewportChange,
       handleOpenOrderbook, handleNodeResize, connectionMode,
       handleCreateConnection, handleConnectionDelete, selectNodes,

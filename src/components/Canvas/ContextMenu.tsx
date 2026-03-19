@@ -162,6 +162,8 @@ export default function ContextMenu({
       ref={menuRef}
       className="fixed z-[100] bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[200px]"
       style={{ left: adjustedX, top: adjustedY }}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
     >
       {/* Group selected - only available if all nodes are same type */}
       {selectedNodes.length >= 2 && !allInSameGroup && (

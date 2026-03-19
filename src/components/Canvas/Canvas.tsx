@@ -59,6 +59,7 @@ export interface CanvasProps {
   selectedIds?: Set<string>;
   onNodeClick: (node: Node) => void;
   onNodeMove: (id: string, position: [number, number]) => void;
+  onNodesMove?: (positions: Record<string, [number, number]>) => void;
   onNodeDelete: (id: string) => void;
   onBackgroundClick: () => void;
   onViewportChange: (viewport: Viewport) => void;
@@ -95,6 +96,7 @@ export default function Canvas({
   selectedIds = new Set(),
   onNodeClick,
   onNodeMove,
+  onNodesMove,
   onNodeDelete,
   onBackgroundClick,
   onViewportChange,
@@ -113,6 +115,7 @@ export default function Canvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [draggingNode, setDraggingNode] = useState<string | null>(null);
+  const [draggingGroupId, setDraggingGroupId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const didPanRef = useRef(false);
@@ -126,6 +129,11 @@ export default function Canvas({
   const [isRightMouseDown, setIsRightMouseDown] = useState(false);
   const rightClickStartRef = useRef<{ x: number; y: number } | null>(null);
   const didRightDragRef = useRef(false);
+  const groupDragStartRef = useRef<{
+    mouseX: number;
+    mouseY: number;
+    initialPositions: Record<string, [number, number]>;
+  } | null>(null);
 
   // Connection mode state
   const [connectionSource, setConnectionSource] = useState<string | null>(null);
@@ -193,6 +201,73 @@ export default function Canvas({
     }
     return map;
   }, [nodes]);
+  const groupRenderData = useMemo(() => {
+    const NODE_WIDTH = 192;
+    const NODE_HEIGHT = 120;
+    const labelPadX = 8;
+    const labelPadY = 4;
+    const fontSize = 12;
+    const font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+    const measureCanvas = document.createElement('canvas');
+    const measureCtx = measureCanvas.getContext('2d');
+    if (measureCtx) measureCtx.font = font;
+
+    return groups
+      .map((group) => {
+        if (group.memberIds.length === 0) return null;
+
+        let minX = Infinity, minY = Infinity;
+        let maxX = -Infinity, maxY = -Infinity;
+        let visibleCount = 0;
+        const memberPositions: Record<string, [number, number]> = {};
+
+        for (const nodeId of group.memberIds) {
+          const node = nodeMap.get(nodeId);
+          if (!node?.position) continue;
+          visibleCount++;
+          const [nx, ny] = node.position;
+          memberPositions[nodeId] = [nx, ny];
+          const nw = node.size?.width || NODE_WIDTH;
+          const nh = node.size?.height || NODE_HEIGHT;
+          minX = Math.min(minX, nx - nw / 2);
+          minY = Math.min(minY, ny - nh / 2);
+          maxX = Math.max(maxX, nx + nw / 2);
+          maxY = Math.max(maxY, ny + nh / 2);
+        }
+
+        if (visibleCount === 0) return null;
+
+        const pad = group.padding || 40;
+        minX -= pad;
+        minY -= pad;
+        maxX += pad;
+        maxY += pad;
+
+        const labelTextWidth = measureCtx
+          ? measureCtx.measureText(group.label).width
+          : group.label.length * 7;
+        const labelWidth = labelTextWidth + labelPadX * 2;
+        const labelHeight = fontSize + labelPadY * 2;
+        const labelX = minX;
+        const labelY = minY - labelHeight - 4;
+
+        return {
+          group,
+          minX,
+          minY,
+          boxWidth: maxX - minX,
+          boxHeight: maxY - minY,
+          labelX,
+          labelY,
+          labelWidth,
+          labelHeight,
+          memberPositions,
+          fontSize,
+          labelPadX,
+        };
+      })
+      .filter((g): g is NonNullable<typeof g> => g !== null);
+  }, [groups, nodeMap]);
   useEffect(() => {
     const updateSize = () => {
       if (containerRef.current) {
@@ -312,76 +387,38 @@ export default function Canvas({
     });
 
     // Draw group bounding boxes
-    const NODE_WIDTH = 192;
-    const NODE_HEIGHT = 120;
-
-    groups.forEach((group) => {
-      if (group.memberIds.length === 0) return;
-
-      // Calculate bounding box from member nodes
-      let minX = Infinity, minY = Infinity;
-      let maxX = -Infinity, maxY = -Infinity;
-      let visibleCount = 0;
-
-      for (const nodeId of group.memberIds) {
-        const node = nodeMap.get(nodeId);
-        if (!node?.position) continue;
-        visibleCount++;
-        const [nx, ny] = node.position;
-        const nw = node.size?.width || NODE_WIDTH;
-        const nh = node.size?.height || NODE_HEIGHT;
-        minX = Math.min(minX, nx - nw / 2);
-        minY = Math.min(minY, ny - nh / 2);
-        maxX = Math.max(maxX, nx + nw / 2);
-        maxY = Math.max(maxY, ny + nh / 2);
-      }
-
-      if (visibleCount === 0) return;
-
-      // Add padding
-      const pad = group.padding || 40;
-      minX -= pad;
-      minY -= pad;
-      maxX += pad;
-      maxY += pad;
-
-      const boxWidth = maxX - minX;
-      const boxHeight = maxY - minY;
-
+    groupRenderData.forEach((groupData) => {
       // Draw filled background
-      ctx.fillStyle = `${group.color}10`; // 10 = ~6% opacity
+      ctx.fillStyle = `${groupData.group.color}10`; // 10 = ~6% opacity
       ctx.beginPath();
-      ctx.roundRect(minX, minY, boxWidth, boxHeight, 12);
+      ctx.roundRect(groupData.minX, groupData.minY, groupData.boxWidth, groupData.boxHeight, 12);
       ctx.fill();
 
       // Draw dashed border
-      ctx.strokeStyle = group.color;
+      ctx.strokeStyle = groupData.group.color;
       ctx.lineWidth = 2;
       ctx.setLineDash([8, 4]);
       ctx.beginPath();
-      ctx.roundRect(minX, minY, boxWidth, boxHeight, 12);
+      ctx.roundRect(groupData.minX, groupData.minY, groupData.boxWidth, groupData.boxHeight, 12);
       ctx.stroke();
       ctx.setLineDash([]);
 
       // Draw label background
-      const labelPadX = 8;
-      const labelPadY = 4;
-      const fontSize = 12;
-      ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
-      const labelWidth = ctx.measureText(group.label).width + labelPadX * 2;
-      const labelHeight = fontSize + labelPadY * 2;
-      const labelX = minX;
-      const labelY = minY - labelHeight - 4;
+      ctx.font = `600 ${groupData.fontSize}px Inter, system-ui, sans-serif`;
 
-      ctx.fillStyle = group.color;
+      ctx.fillStyle = groupData.group.color;
       ctx.beginPath();
-      ctx.roundRect(labelX, labelY, labelWidth, labelHeight, 6);
+      ctx.roundRect(groupData.labelX, groupData.labelY, groupData.labelWidth, groupData.labelHeight, 6);
       ctx.fill();
 
       // Draw label text
       ctx.fillStyle = '#ffffff';
       ctx.textBaseline = 'middle';
-      ctx.fillText(group.label, labelX + labelPadX, labelY + labelHeight / 2);
+      ctx.fillText(
+        groupData.group.label,
+        groupData.labelX + groupData.labelPadX,
+        groupData.labelY + groupData.labelHeight / 2,
+      );
     });
 
     // Draw rubber-band selection rect
@@ -403,7 +440,7 @@ export default function Canvas({
     }
 
     ctx.restore();
-  }, [nodes, connections, groups, viewport, canvasSize, nodeMap, selectionRect]);
+  }, [nodes, connections, viewport, canvasSize, selectionRect, groupRenderData]);
 
   // Calculate zoom limits based on canvas size and bounds
   const zoomLimits = useMemo(() => {
@@ -485,8 +522,6 @@ export default function Canvas({
         if (rect) {
           const screenX = e.clientX - rect.left;
           const screenY = e.clientY - rect.top;
-          const worldX = (screenX - viewport.x) / viewport.zoom;
-          const worldY = (screenY - viewport.y) / viewport.zoom;
           rightClickStartRef.current = { x: screenX, y: screenY };
           didRightDragRef.current = false;
           setIsRightMouseDown(true);
@@ -497,6 +532,29 @@ export default function Canvas({
 
       // Left click (button 0) or middle mouse (button 1)
       if (e.button === 0 || e.button === 1) {
+        if (e.button === 0 && onNodesMove) {
+          const rect = containerRef.current?.getBoundingClientRect();
+          if (rect) {
+            const worldX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+            const worldY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+            for (let i = groupRenderData.length - 1; i >= 0; i--) {
+              const groupData = groupRenderData[i];
+              const inLabelX = worldX >= groupData.labelX && worldX <= groupData.labelX + groupData.labelWidth;
+              const inLabelY = worldY >= groupData.labelY && worldY <= groupData.labelY + groupData.labelHeight;
+              if (inLabelX && inLabelY) {
+                e.preventDefault();
+                e.stopPropagation();
+                setDraggingGroupId(groupData.group.id);
+                groupDragStartRef.current = {
+                  mouseX: worldX,
+                  mouseY: worldY,
+                  initialPositions: { ...groupData.memberPositions },
+                };
+                return;
+              }
+            }
+          }
+        }
         didPanRef.current = false;
         setIsPanning(true);
         setDragOffset({
@@ -505,7 +563,7 @@ export default function Canvas({
         });
       }
     },
-    [viewport]
+    [viewport, groupRenderData, onNodesMove]
   );
 
   // Handle mouse move for pan or drag
@@ -597,7 +655,7 @@ export default function Canvas({
   );
 
   // Handle mouse up
-  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+  const handleMouseUp = useCallback(() => {
     // Finalize rubber-band selection (from right-click drag)
     if (selectionRect && onSelectNodes) {
       const minX = Math.min(selectionRect.startX, selectionRect.endX);
@@ -627,6 +685,8 @@ export default function Canvas({
     setSelectionRect(null);
     setIsPanning(false);
     setDraggingNode(null);
+    setDraggingGroupId(null);
+    groupDragStartRef.current = null;
   }, [selectionRect, onSelectNodes, nodes]);
 
   // Handle mouse leave - hide coordinates
@@ -701,14 +761,33 @@ export default function Canvas({
         // Clamp position to bounds
         const [clampedX, clampedY] = clampToBounds(rawX, rawY);
         onNodeMove(draggingNode, [clampedX, clampedY]);
+      } else if (draggingGroupId && groupDragStartRef.current && onNodesMove) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const worldX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+        const worldY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+        const deltaX = worldX - groupDragStartRef.current.mouseX;
+        const deltaY = worldY - groupDragStartRef.current.mouseY;
+
+        if (deltaX !== 0 || deltaY !== 0) {
+          didPanRef.current = true;
+        }
+
+        const updates: Record<string, [number, number]> = {};
+        Object.entries(groupDragStartRef.current.initialPositions).forEach(([nodeId, [startX, startY]]) => {
+          updates[nodeId] = clampToBounds(startX + deltaX, startY + deltaY);
+        });
+        onNodesMove(updates);
       }
     };
 
     const handleGlobalMouseUp = () => {
       setDraggingNode(null);
+      setDraggingGroupId(null);
+      groupDragStartRef.current = null;
     };
 
-    if (draggingNode) {
+    if (draggingNode || draggingGroupId) {
       window.addEventListener("mousemove", handleGlobalMouseMove);
       window.addEventListener("mouseup", handleGlobalMouseUp);
     }
@@ -717,7 +796,7 @@ export default function Canvas({
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [draggingNode, viewport, dragOffset, onNodeMove, clampToBounds]);
+  }, [draggingNode, draggingGroupId, viewport, dragOffset, onNodeMove, onNodesMove, clampToBounds]);
 
   // Handle keyboard delete for selected node and Escape for connection mode
   useEffect(() => {
@@ -753,7 +832,7 @@ export default function Canvas({
     <div
       ref={containerRef}
       className={`absolute inset-0 overflow-hidden bg-gray-950 ${
-        isPanning ? "cursor-grabbing" : "cursor-crosshair"
+        (isPanning || draggingGroupId) ? "cursor-grabbing" : "cursor-crosshair"
       }`}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}

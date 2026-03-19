@@ -28,6 +28,7 @@ import { MarketType, type Node } from '../../types/nodes';
 import type { EventSearchResult, EventSearchResponse } from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
 import { createNodeGroup } from '../../store/groupsSlice';
+import { transformNodeFromBackend } from '../../utils/nodeTransform';
 
 interface SeriesSearchPanelProps {
   platform: MarketType;
@@ -215,8 +216,10 @@ export default function SeriesSearchPanel({
             });
 
             if (result?.node) {
+              // Transform node from backend format to frontend format
+              const transformedNode = transformNodeFromBackend(result.node as unknown as Record<string, unknown>);
               const node = {
-                ...result.node,
+                ...transformedNode,
                 position: [posX, posY] as [number, number],
               };
               addNode(node);

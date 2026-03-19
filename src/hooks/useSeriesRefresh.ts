@@ -13,6 +13,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useStore, type StoreState } from '../store';
 import type { EventSearchResponse, EventSearchResult } from '../types/markets';
 import type { Node, NodeGroup } from '../types/nodes';
+import { transformNodeFromBackend } from '../utils/nodeTransform';
 
 /**
  * Hook that periodically refreshes all series groups.
@@ -123,8 +124,10 @@ export function useSeriesRefresh() {
               });
 
               if (result?.node) {
+                // Transform node from backend format to frontend format
+                const transformedNode = transformNodeFromBackend(result.node as unknown as Record<string, unknown>);
                 const node = {
-                  ...result.node,
+                  ...transformedNode,
                   position: [baseX, baseY + i * 160] as [number, number],
                 };
                 addNode(node);
