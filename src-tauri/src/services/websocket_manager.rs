@@ -1580,6 +1580,42 @@ impl WebSocketManager {
         
         result
     }
+    
+    /// Reconnect a specific platform's WebSocket connection
+    /// 
+    /// Sends a Reconnect command to the platform's connection task, which will
+    /// close the current connection and re-establish it while preserving subscriptions.
+    pub async fn reconnect(&self, platform: PlatformType) -> Result<()> {
+        let connections = self.connections.read().await;
+        
+        if let Some(conn) = connections.get(&platform) {
+            conn.command_tx.send(ConnectionCommand::Reconnect).await
+                .map_err(|e| anyhow!("Failed to send reconnect command: {}", e))?;
+            println!("[WebSocketManager] Reconnect command sent to {:?}", platform);
+            Ok(())
+        } else {
+            Err(anyhow!("No active connection for platform {:?}", platform))
+        }
+    }
+    
+    /// Check if a platform has an active connection
+    pub async fn is_connected(&self, platform: PlatformType) -> bool {
+        let connections = self.connections.read().await;
+        connections.contains_key(&platform)
+    }
+    
+    /// Get connection status for all platforms
+    pub async fn get_connection_status(&self) -> Vec<(PlatformType, bool, usize)> {
+        let connections = self.connections.read().await;
+        let mut result = Vec::new();
+        
+        for (platform, conn) in connections.iter() {
+            let subs = conn.subscribed_markets.read().await;
+            result.push((*platform, !conn.task_handle.is_finished(), subs.len()));
+        }
+        
+        result
+    }
 }
 
 /// Create a new WebSocket manager wrapped in Arc for sharing

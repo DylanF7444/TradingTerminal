@@ -15,6 +15,16 @@ pnpm tauri build          # Build production binary
 pnpm dev                  # Start Vite dev server only (no Rust)
 ```
 
+### Test Commands
+
+```bash
+cd src-tauri && cargo test              # Run all backend tests
+cd src-tauri && cargo test test_name    # Run single test by name
+cd src-tauri && cargo test module::     # Run all tests in a module
+```
+
+Tests use `tempfile` for DB isolation and `wiremock` for HTTP mocking. No frontend test runner is configured.
+
 ### Tech Stack
 
 | Layer | Tech |
@@ -74,6 +84,65 @@ Frontend (React 19)          Tauri IPC              Backend (Rust + Tokio)
 
 **Data Pipeline:** Scraper → Analyzer → Executor (each service can fail independently)
 
+## Analyzer Pipeline
+
+The analyzer pipeline routes data events to analyzer instances and forwards signals to the executor:
+
+```
+DataEvent (from Scraper)
+    ↓
+AnalyzerPipeline.process_event()
+    ↓
+AnalyzerInstance.process_event() → Option<TradingSignal>
+    ↓
+signal_tx.send() → Executor
+```
+
+**Key concepts:**
+- `AnalyzerInstance` trait: All analyzers implement `process_event()`, `get_latest_result()`, `update_config()`
+- Analyzers are attached to nodes: `node_analyzers: HashMap<node_id, Vec<AnalyzerInstance>>`
+- **Chaining**: Output of one analyzer can feed another via `process_chained_input()`
+- Factory: `analyzers::create_analyzer(AnalyzerNode)` creates instances by type
+
+**Available analyzer types:** Correlation, Momentum, Arbitrage, Sentiment, RSI, Volatility
+
+**Adding a new analyzer:**
+1. Create `src-tauri/src/services/analyzers/your_analyzer.rs`
+2. Implement `AnalyzerInstance` trait
+3. Add to `create_analyzer()` match in `analyzers/mod.rs`
+4. Add `AnalyzerType::YourType` variant to `models/analyzer_node.rs`
+
+## WebSocket Patterns
+
+**Consolidated connections** (one per platform, not per market):
+
+```
+WebSocketManager
+├── connections: HashMap<PlatformType, PlatformConnection>
+│   └── PlatformConnection { task_handle, command_tx, subscribed_markets }
+└── subscribe_market(platform, id) → AddSubscription command → WS message
+```
+
+**Supported platforms:** Polymarket, Kalshi, Binance, Coinbase
+
+**Frontend subscription pattern:**
+```typescript
+// Hook manages lifecycle automatically
+const { subscribe, unsubscribe } = useConsolidatedWebSocket();
+await subscribe('polymarket', '0x123...');
+
+// Listen for updates
+listen('orderbook:update', (event) => { ... });
+listen('infosource:update', (event) => { ... });
+```
+
+**Key events emitted by backend:**
+| Event | Payload | Source |
+|-------|---------|--------|
+| `orderbook:update` | `OrderbookUpdate` | `websocket_manager.rs` |
+| `infosource:update` | Price/data updates | `websocket_scraper.rs` |
+| `position:update` | Position changes | `executor.rs` |
+
 ## Key Files
 
 | Purpose | Location |
@@ -129,3 +198,4 @@ Frontend (React 19)          Tauri IPC              Backend (Rust + Tokio)
 - **Type guards:** Use helpers from `src/utils/nodeHelpers.ts`, don't duplicate inline
 - **Error handling:** Always use Result pattern, never bare try/catch for IPC calls
 - **Components:** Each panel wrapped in `PanelErrorBoundary` for isolated crash recovery
+- **Comments:** Update comment sections of files to reflect any changes made

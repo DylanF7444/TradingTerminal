@@ -349,6 +349,48 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
         [],
     )?;
 
+    // Trades table - records all executed trades for history
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trades (
+            id TEXT PRIMARY KEY,
+            position_id TEXT,
+            market_id TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            requested_size REAL NOT NULL,
+            filled_size REAL NOT NULL,
+            price REAL NOT NULL,
+            fees REAL NOT NULL DEFAULT 0.0,
+            status TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            metadata JSON,
+            FOREIGN KEY (position_id) REFERENCES positions(id),
+            FOREIGN KEY (market_id) REFERENCES nodes(id)
+        )",
+        [],
+    )?;
+
+    // Orders table - tracks pending/open orders
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS orders (
+            id TEXT PRIMARY KEY,
+            market_id TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            size REAL NOT NULL,
+            price REAL,
+            filled_size REAL NOT NULL DEFAULT 0.0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            metadata JSON,
+            FOREIGN KEY (market_id) REFERENCES nodes(id)
+        )",
+        [],
+    )?;
+
     // Create indexes for performance
     create_indexes(conn)?;
 
@@ -988,6 +1030,306 @@ pub fn get_positions(
 
     println!("Retrieved {} positions", positions.len());
     Ok(positions)
+}
+
+/// Get a position by ID
+pub fn get_position_by_id(conn: &Connection, position_id: &str) -> SqliteResult<Option<Position>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM positions WHERE id = ?1"
+    )?;
+    
+    let mut rows = stmt.query(params![position_id])?;
+    
+    if let Some(row) = rows.next()? {
+        Ok(Some(Position {
+            id: row.get(0)?,
+            market_id: row.get(1)?,
+            market_type: row.get(2)?,
+            position_type: row.get(3)?,
+            quantity: row.get(4)?,
+            entry_price: row.get(5)?,
+            exit_price: row.get(6)?,
+            entry_time: row.get(7)?,
+            exit_time: row.get(8)?,
+            realized_pnl: row.get(9)?,
+            fees: row.get(10)?,
+            status: row.get(11)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Update a position (for closing or modifying)
+pub fn update_position(conn: &Connection, position: &Position) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE positions SET 
+            exit_price = ?1, exit_time = ?2, realized_pnl = ?3, 
+            fees = ?4, status = ?5, metadata = ?6
+         WHERE id = ?7",
+        params![
+            position.exit_price,
+            position.exit_time,
+            position.realized_pnl,
+            position.fees,
+            &position.status,
+            serde_json::to_string(&position.metadata).unwrap(),
+            &position.id,
+        ],
+    )?;
+    Ok(())
+}
+
+// ============================================================================
+// TRADE HISTORY OPERATIONS
+// ============================================================================
+
+/// Trade record structure for database storage
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TradeRecord {
+    pub id: String,
+    pub position_id: Option<String>,
+    pub market_id: String,
+    pub market_type: String,
+    pub side: String,
+    pub order_type: String,
+    pub requested_size: f64,
+    pub filled_size: f64,
+    pub price: f64,
+    pub fees: f64,
+    pub status: String,
+    pub timestamp: i64,
+    pub metadata: serde_json::Value,
+}
+
+/// Insert a trade record
+pub fn insert_trade(conn: &Connection, trade: &TradeRecord) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO trades (id, position_id, market_id, market_type, side, order_type, 
+                            requested_size, filled_size, price, fees, status, timestamp, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            &trade.id,
+            &trade.position_id,
+            &trade.market_id,
+            &trade.market_type,
+            &trade.side,
+            &trade.order_type,
+            trade.requested_size,
+            trade.filled_size,
+            trade.price,
+            trade.fees,
+            &trade.status,
+            trade.timestamp,
+            serde_json::to_string(&trade.metadata).unwrap(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get trade history with optional limit
+pub fn get_trade_history(conn: &Connection, limit: Option<usize>) -> SqliteResult<Vec<TradeRecord>> {
+    let limit_clause = limit.map(|l| format!(" LIMIT {}", l)).unwrap_or_default();
+    let query = format!(
+        "SELECT id, position_id, market_id, market_type, side, order_type, 
+                requested_size, filled_size, price, fees, status, timestamp, metadata
+         FROM trades ORDER BY timestamp DESC{}",
+        limit_clause
+    );
+    
+    let mut stmt = conn.prepare(&query)?;
+    let trades = stmt
+        .query_map([], |row| {
+            Ok(TradeRecord {
+                id: row.get(0)?,
+                position_id: row.get(1)?,
+                market_id: row.get(2)?,
+                market_type: row.get(3)?,
+                side: row.get(4)?,
+                order_type: row.get(5)?,
+                requested_size: row.get(6)?,
+                filled_size: row.get(7)?,
+                price: row.get(8)?,
+                fees: row.get(9)?,
+                status: row.get(10)?,
+                timestamp: row.get(11)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
+            })
+        })?
+        .collect::<SqliteResult<Vec<TradeRecord>>>()?;
+    
+    Ok(trades)
+}
+
+// ============================================================================
+// ORDER OPERATIONS
+// ============================================================================
+
+/// Order record structure for database storage
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OrderRecord {
+    pub id: String,
+    pub market_id: String,
+    pub market_type: String,
+    pub side: String,
+    pub order_type: String,
+    pub size: f64,
+    pub price: Option<f64>,
+    pub filled_size: f64,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub metadata: serde_json::Value,
+}
+
+/// Insert a new order
+pub fn insert_order(conn: &Connection, order: &OrderRecord) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO orders (id, market_id, market_type, side, order_type, size, price, 
+                            filled_size, status, created_at, updated_at, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            &order.id,
+            &order.market_id,
+            &order.market_type,
+            &order.side,
+            &order.order_type,
+            order.size,
+            order.price,
+            order.filled_size,
+            &order.status,
+            order.created_at,
+            order.updated_at,
+            serde_json::to_string(&order.metadata).unwrap(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get an order by ID
+pub fn get_order_by_id(conn: &Connection, order_id: &str) -> SqliteResult<Option<OrderRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, market_id, market_type, side, order_type, size, price, 
+                filled_size, status, created_at, updated_at, metadata
+         FROM orders WHERE id = ?1"
+    )?;
+    
+    let mut rows = stmt.query(params![order_id])?;
+    
+    if let Some(row) = rows.next()? {
+        Ok(Some(OrderRecord {
+            id: row.get(0)?,
+            market_id: row.get(1)?,
+            market_type: row.get(2)?,
+            side: row.get(3)?,
+            order_type: row.get(4)?,
+            size: row.get(5)?,
+            price: row.get(6)?,
+            filled_size: row.get(7)?,
+            status: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Update an order
+pub fn update_order(conn: &Connection, order: &OrderRecord) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE orders SET 
+            size = ?1, price = ?2, filled_size = ?3, status = ?4, 
+            updated_at = ?5, metadata = ?6
+         WHERE id = ?7",
+        params![
+            order.size,
+            order.price,
+            order.filled_size,
+            &order.status,
+            order.updated_at,
+            serde_json::to_string(&order.metadata).unwrap(),
+            &order.id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Cancel an order by setting status to 'cancelled'
+pub fn cancel_order(conn: &Connection, order_id: &str) -> SqliteResult<bool> {
+    let updated = conn.execute(
+        "UPDATE orders SET status = 'cancelled', updated_at = ?1 WHERE id = ?2 AND status = 'pending'",
+        params![Utc::now().timestamp(), order_id],
+    )?;
+    Ok(updated > 0)
+}
+
+/// Get pending orders for a market
+pub fn get_pending_orders(conn: &Connection, market_id: Option<&str>) -> SqliteResult<Vec<OrderRecord>> {
+    let query = if market_id.is_some() {
+        "SELECT id, market_id, market_type, side, order_type, size, price, 
+                filled_size, status, created_at, updated_at, metadata
+         FROM orders WHERE status = 'pending' AND market_id = ?1 ORDER BY created_at DESC"
+    } else {
+        "SELECT id, market_id, market_type, side, order_type, size, price, 
+                filled_size, status, created_at, updated_at, metadata
+         FROM orders WHERE status = 'pending' ORDER BY created_at DESC"
+    };
+    
+    let mut stmt = conn.prepare(query)?;
+    let orders = if let Some(mid) = market_id {
+        stmt.query_map(params![mid], |row| {
+            Ok(OrderRecord {
+                id: row.get(0)?,
+                market_id: row.get(1)?,
+                market_type: row.get(2)?,
+                side: row.get(3)?,
+                order_type: row.get(4)?,
+                size: row.get(5)?,
+                price: row.get(6)?,
+                filled_size: row.get(7)?,
+                status: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+            })
+        })?
+        .collect::<SqliteResult<Vec<OrderRecord>>>()?
+    } else {
+        stmt.query_map([], |row| {
+            Ok(OrderRecord {
+                id: row.get(0)?,
+                market_id: row.get(1)?,
+                market_type: row.get(2)?,
+                side: row.get(3)?,
+                order_type: row.get(4)?,
+                size: row.get(5)?,
+                price: row.get(6)?,
+                filled_size: row.get(7)?,
+                status: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+            })
+        })?
+        .collect::<SqliteResult<Vec<OrderRecord>>>()?
+    };
+    
+    Ok(orders)
+}
+
+/// Calculate balance from positions for a market type
+/// Returns the sum of realized P&L from closed positions
+pub fn calculate_balance(conn: &Connection, market_type: &str) -> SqliteResult<f64> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(realized_pnl), 0.0) FROM positions 
+         WHERE market_type = ?1 AND status = 'closed'"
+    )?;
+    
+    let balance: f64 = stmt.query_row(params![market_type], |row| row.get(0))?;
+    Ok(balance)
 }
 
 // ============================================================================

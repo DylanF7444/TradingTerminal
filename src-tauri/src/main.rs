@@ -1528,38 +1528,98 @@ async fn get_markets_cmd(
 }
 
 /// Get current orderbook for a market
+/// 
+/// Queries the persistent orderbook cache for real-time data.
+/// Returns cached data if available, otherwise returns empty orderbook.
 #[tauri::command]
 async fn get_orderbook_cmd(
     market_id: String,
-    state: State<'_, AppState>,
+    state: State<'_, PersistentOrderbookState>,
 ) -> Result<models::market::Orderbook, String> {
-    // TODO: Fetch from cache or API
-    // Dummy data for testing:
-    Ok(models::market::Orderbook {
-        market_id,
-        bids: vec![[0.52, 1000.0], [0.51, 500.0]],
-        asks: vec![[0.53, 800.0], [0.54, 1200.0]],
-        timestamp: chrono::Utc::now().timestamp(),
-        liquidity: 25000.0,
-        spread: 0.01,
-        last_price: Some(0.52),
-        last_size: Some(100.0),
-        last_trade_at: Some(chrono::Utc::now().timestamp()),
-        sequence: 1,
-    })
+    info!("Get orderbook requested for market: {}", market_id);
+    
+    // Query the persistent orderbook cache
+    if let Some(cached) = state.get_orderbook(&market_id).await {
+        // Convert CachedOrderbook to Orderbook model
+        let bids: Vec<[f64; 2]> = cached.bids.iter()
+            .map(|level| [level.price, level.size])
+            .collect();
+        let asks: Vec<[f64; 2]> = cached.asks.iter()
+            .map(|level| [level.price, level.size])
+            .collect();
+        
+        // Calculate spread
+        let best_bid = cached.bids.first().map(|l| l.price).unwrap_or(0.0);
+        let best_ask = cached.asks.first().map(|l| l.price).unwrap_or(1.0);
+        let spread = best_ask - best_bid;
+        
+        // Calculate total liquidity
+        let liquidity: f64 = cached.bids.iter().map(|l| l.size).sum::<f64>()
+            + cached.asks.iter().map(|l| l.size).sum::<f64>();
+        
+        Ok(models::market::Orderbook {
+            market_id: cached.market_id,
+            bids,
+            asks,
+            timestamp: cached.last_updated / 1000, // Convert millis to seconds
+            liquidity,
+            spread,
+            last_price: cached.last_price,
+            last_size: cached.last_size,
+            last_trade_at: cached.recent_trades.first().map(|t| t.timestamp / 1000),
+            sequence: cached.sequence as i64,
+        })
+    } else {
+        // Return empty orderbook if not cached
+        Ok(models::market::Orderbook {
+            market_id,
+            bids: vec![],
+            asks: vec![],
+            timestamp: chrono::Utc::now().timestamp(),
+            liquidity: 0.0,
+            spread: 0.0,
+            last_price: None,
+            last_size: None,
+            last_trade_at: None,
+            sequence: 0,
+        })
+    }
 }
 
 /// Refresh market WebSocket connection
+/// 
+/// Triggers a reconnection for the market's WebSocket subscription.
 #[tauri::command]
 async fn refresh_market_connection_cmd(
     node_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    info!("Refreshing market connection: {}", node_id);
+    info!("Refreshing market connection for node: {}", node_id);
     
-    // TODO: Reconnect WebSocket
+    // Get the node to determine its market type
+    let platform_type = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        if let Ok(node) = sqlite::get_node_by_id(&conn, &node_id) {
+            match node.node_type {
+                models::node::NodeType::Market(models::node::MarketType::Polymarket) => {
+                    Some(crate::services::websocket_manager::PlatformType::Polymarket)
+                }
+                models::node::NodeType::Market(models::node::MarketType::Kalshi) => {
+                    Some(crate::services::websocket_manager::PlatformType::Kalshi)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    });
     
-    Ok(())
+    if let Some(platform) = platform_type {
+        state.ws_manager.reconnect(platform).await
+            .map_err(|e| format!("Failed to reconnect: {}", e))
+    } else {
+        Err(format!("Node {} is not a market node or does not exist", node_id))
+    }
 }
 
 /// Search for markets on Polymarket or Kalshi
@@ -1591,6 +1651,9 @@ async fn search_events_cmd(
 // -------------------------------------------------------------------------
 
 /// Place a trade order
+/// 
+/// Creates an order and records a trade. For limit orders, the order is stored
+/// as pending. For market orders, we simulate immediate fill with the given price.
 #[tauri::command]
 async fn place_order_cmd(
     market_id: String,
@@ -1600,29 +1663,144 @@ async fn place_order_cmd(
     order_type: String, // "limit" or "market"
     state: State<'_, AppState>,
 ) -> Result<models::market::TradeResult, String> {
-    // TODO:
-    // 1. Validate inputs
-    // 2. Check balance
-    // 3. Send to market API
-    // 4. Record position
-    // 5. Return result
+    info!("Place order: market={}, side={}, size={}, price={:?}, type={}", 
+          market_id, side, size, price, order_type);
     
-    // Dummy implementation
+    // Validate inputs
+    if size <= 0.0 {
+        return Err("Size must be positive".to_string());
+    }
+    
+    if !["buy", "sell"].contains(&side.to_lowercase().as_str()) {
+        return Err("Side must be 'buy' or 'sell'".to_string());
+    }
+    
+    if !["limit", "market"].contains(&order_type.to_lowercase().as_str()) {
+        return Err("Order type must be 'limit' or 'market'".to_string());
+    }
+    
+    let is_limit = order_type.to_lowercase() == "limit";
+    
+    if is_limit && price.is_none() {
+        return Err("Limit orders require a price".to_string());
+    }
+    
+    if let Some(p) = price {
+        if p < 0.0 || p > 1.0 {
+            return Err("Price must be between 0 and 1".to_string());
+        }
+    }
+    
+    let trade_id = uuid::Uuid::new_v4().to_string();
+    let order_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+    let fill_price = price.unwrap_or(0.5);
+    let fees = size * fill_price * 0.02; // 2% fee estimate
+    
+    // Get market type from node
+    let market_type = tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        if let Ok(node) = sqlite::get_node_by_id(&conn, &market_id) {
+            match node.node_type {
+                models::node::NodeType::Market(models::node::MarketType::Polymarket) => "Polymarket".to_string(),
+                models::node::NodeType::Market(models::node::MarketType::Kalshi) => "Kalshi".to_string(),
+                _ => "Unknown".to_string(),
+            }
+        } else {
+            "Unknown".to_string()
+        }
+    });
+    
+    // For market orders, simulate immediate fill and create position
+    // For limit orders, create pending order
+    let (status, filled_size) = if is_limit {
+        ("pending".to_string(), 0.0)
+    } else {
+        ("filled".to_string(), size)
+    };
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        // Create order record
+        let order = sqlite::OrderRecord {
+            id: order_id.clone(),
+            market_id: market_id.clone(),
+            market_type: market_type.clone(),
+            side: side.clone(),
+            order_type: order_type.clone(),
+            size,
+            price,
+            filled_size,
+            status: status.clone(),
+            created_at: now,
+            updated_at: now,
+            metadata: serde_json::json!({}),
+        };
+        
+        sqlite::insert_order(&conn, &order)
+            .map_err(|e| format!("Failed to insert order: {}", e))?;
+        
+        // For filled orders (market orders), create trade record and position
+        if status == "filled" {
+            // Create trade record
+            let trade = sqlite::TradeRecord {
+                id: trade_id.clone(),
+                position_id: None, // Will be linked to position
+                market_id: market_id.clone(),
+                market_type: market_type.clone(),
+                side: side.clone(),
+                order_type: order_type.clone(),
+                requested_size: size,
+                filled_size: size,
+                price: fill_price,
+                fees,
+                status: "filled".to_string(),
+                timestamp: now,
+                metadata: serde_json::json!({"order_id": order_id}),
+            };
+            
+            sqlite::insert_trade(&conn, &trade)
+                .map_err(|e| format!("Failed to insert trade: {}", e))?;
+            
+            // Create position
+            let position_type = if side.to_lowercase() == "buy" { "long" } else { "short" };
+            let position = models::position::Position::new(
+                market_id.clone(),
+                market_type.clone(),
+                position_type.to_string(),
+                size,
+                fill_price,
+                now,
+                fees,
+            );
+            
+            sqlite::insert_position(&conn, &position)
+                .map_err(|e| format!("Failed to insert position: {}", e))?;
+        }
+        
+        Ok::<(), String>(())
+    })?;
+    
     Ok(models::market::TradeResult {
-        trade_id: uuid::Uuid::new_v4().to_string(),
+        trade_id,
         market_id,
-        side: if side == "buy" { models::market::TradeSide::Buy } else { models::market::TradeSide::Sell },
-        order_type: if order_type == "limit" { 
-            models::market::OrderType::Limit(price.unwrap_or(0.5)) 
+        side: if side.to_lowercase() == "buy" { 
+            models::market::TradeSide::Buy 
+        } else { 
+            models::market::TradeSide::Sell 
+        },
+        order_type: if is_limit { 
+            models::market::OrderType::Limit(price.unwrap()) 
         } else { 
             models::market::OrderType::Market 
         },
         requested_size: size,
-        filled_size: size,
-        avg_price: price.unwrap_or(0.5),
-        fees_paid: size * price.unwrap_or(0.5) * 0.02, // 2% fee
-        status: "filled".to_string(),
-        timestamp: chrono::Utc::now().timestamp(),
+        filled_size,
+        avg_price: fill_price,
+        fees_paid: if status == "filled" { fees } else { 0.0 },
+        status,
+        timestamp: now,
         metadata: serde_json::json!({}),
     })
 }
@@ -1636,30 +1814,130 @@ async fn get_positions_cmd(
 ) -> Result<Vec<models::position::Position>, String> {
     tokio::task::block_in_place(|| {
         let conn = state.db.blocking_lock();
-        sqlite::get_positions(&conn, market_id.as_deref(), status.as_deref())
+        let status_filter = status.as_deref().filter(|s| *s != "all");
+        sqlite::get_positions(&conn, market_id.as_deref(), status_filter)
             .map_err(|e| format!("Database error: {}", e))
     })
 }
 
 /// Close an existing position
+/// 
+/// Closes an open position at the specified exit price.
+/// Creates a closing trade record and updates the position status.
 #[tauri::command]
 async fn close_position_cmd(
     position_id: String,
     exit_price: Option<f64>,
     state: State<'_, AppState>,
 ) -> Result<models::market::TradeResult, String> {
-    // TODO: Place closing order, update position
-    Err("Not implemented".to_string())
+    info!("Close position requested: {} at price {:?}", position_id, exit_price);
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        // Get the position
+        let mut position = sqlite::get_position_by_id(&conn, &position_id)
+            .map_err(|e| format!("Database error: {}", e))?
+            .ok_or_else(|| format!("Position not found: {}", position_id))?;
+        
+        if position.status != "open" {
+            return Err(format!("Position {} is not open (status: {})", position_id, position.status));
+        }
+        
+        let now = chrono::Utc::now().timestamp();
+        let price = exit_price.unwrap_or(position.entry_price); // Default to entry price if not specified
+        let exit_fees = position.quantity * price * 0.02; // 2% fee
+        
+        // Close the position
+        position.close(price, now, exit_fees);
+        
+        // Update in database
+        sqlite::update_position(&conn, &position)
+            .map_err(|e| format!("Failed to update position: {}", e))?;
+        
+        // Create closing trade record
+        let trade_id = uuid::Uuid::new_v4().to_string();
+        let closing_side = if position.position_type == "long" { "sell" } else { "buy" };
+        
+        let trade = sqlite::TradeRecord {
+            id: trade_id.clone(),
+            position_id: Some(position_id.clone()),
+            market_id: position.market_id.clone(),
+            market_type: position.market_type.clone(),
+            side: closing_side.to_string(),
+            order_type: "market".to_string(),
+            requested_size: position.quantity,
+            filled_size: position.quantity,
+            price,
+            fees: exit_fees,
+            status: "filled".to_string(),
+            timestamp: now,
+            metadata: serde_json::json!({"action": "close_position", "position_id": position_id}),
+        };
+        
+        sqlite::insert_trade(&conn, &trade)
+            .map_err(|e| format!("Failed to insert closing trade: {}", e))?;
+        
+        Ok(models::market::TradeResult {
+            trade_id,
+            market_id: position.market_id,
+            side: if closing_side == "buy" { 
+                models::market::TradeSide::Buy 
+            } else { 
+                models::market::TradeSide::Sell 
+            },
+            order_type: models::market::OrderType::Market,
+            requested_size: position.quantity,
+            filled_size: position.quantity,
+            avg_price: price,
+            fees_paid: exit_fees,
+            status: "filled".to_string(),
+            timestamp: now,
+            metadata: serde_json::json!({
+                "realized_pnl": position.realized_pnl,
+                "position_id": position_id,
+            }),
+        })
+    })
 }
 
 /// Get trade history
+/// 
+/// Returns recent trades from the database.
 #[tauri::command]
 async fn get_trade_history_cmd(
     limit: Option<usize>,
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    // TODO: Query trade history
-    Ok(vec![])
+    info!("Get trade history requested, limit: {:?}", limit);
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        let trades = sqlite::get_trade_history(&conn, limit)
+            .map_err(|e| format!("Database error: {}", e))?;
+        
+        // Convert to JSON values
+        let json_trades: Vec<serde_json::Value> = trades.into_iter()
+            .map(|t| serde_json::json!({
+                "id": t.id,
+                "position_id": t.position_id,
+                "market_id": t.market_id,
+                "market_type": t.market_type,
+                "side": t.side,
+                "order_type": t.order_type,
+                "requested_size": t.requested_size,
+                "filled_size": t.filled_size,
+                "price": t.price,
+                "fees": t.fees,
+                "status": t.status,
+                "timestamp": t.timestamp,
+                "metadata": t.metadata,
+            }))
+            .collect();
+        
+        Ok(json_trades)
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -1787,6 +2065,9 @@ async fn query_timeseries_cmd(
 }
 
 /// Get correlation between two data sources
+/// 
+/// Calculates Pearson correlation coefficient from stored timeseries data.
+/// Returns a value between -1 (perfect negative correlation) and 1 (perfect positive).
 #[tauri::command]
 async fn get_correlation_data_cmd(
     source_a: String,
@@ -1794,9 +2075,65 @@ async fn get_correlation_data_cmd(
     hours: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<f64, String> {
-    // TODO: Calculate Pearson correlation from time-series data
-    // Dummy: return random correlation
-    Ok(0.75)
+    info!("Calculating correlation between {} and {} over {:?} hours", source_a, source_b, hours);
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        // Calculate time range
+        let end_time = chrono::Utc::now().timestamp();
+        let start_time = end_time - (hours.unwrap_or(24) * 3600);
+        
+        // Get timeseries data for both sources
+        let data_a = sqlite::query_timeseries(&conn, Some(&source_a), None, Some(start_time), Some(end_time), None)
+            .map_err(|e| format!("Failed to query source A: {}", e))?;
+        
+        let data_b = sqlite::query_timeseries(&conn, Some(&source_b), None, Some(start_time), Some(end_time), None)
+            .map_err(|e| format!("Failed to query source B: {}", e))?;
+        
+        if data_a.is_empty() || data_b.is_empty() {
+            return Err("Insufficient data for correlation calculation".to_string());
+        }
+        
+        // Align the data by timestamp (within 60 second windows)
+        let mut aligned_pairs: Vec<(f64, f64)> = Vec::new();
+        let window_size = 60; // seconds
+        
+        for point_a in &data_a {
+            // Find closest point in B within window
+            for point_b in &data_b {
+                if (point_a.timestamp - point_b.timestamp).abs() <= window_size {
+                    aligned_pairs.push((point_a.value, point_b.value));
+                    break;
+                }
+            }
+        }
+        
+        if aligned_pairs.len() < 3 {
+            return Err("Not enough aligned data points for correlation (need at least 3)".to_string());
+        }
+        
+        // Calculate Pearson correlation coefficient
+        let n = aligned_pairs.len() as f64;
+        
+        let sum_a: f64 = aligned_pairs.iter().map(|(a, _)| a).sum();
+        let sum_b: f64 = aligned_pairs.iter().map(|(_, b)| b).sum();
+        let sum_ab: f64 = aligned_pairs.iter().map(|(a, b)| a * b).sum();
+        let sum_a2: f64 = aligned_pairs.iter().map(|(a, _)| a * a).sum();
+        let sum_b2: f64 = aligned_pairs.iter().map(|(_, b)| b * b).sum();
+        
+        let numerator = n * sum_ab - sum_a * sum_b;
+        let denominator = ((n * sum_a2 - sum_a * sum_a) * (n * sum_b2 - sum_b * sum_b)).sqrt();
+        
+        if denominator == 0.0 {
+            return Ok(0.0); // No variance in one or both series
+        }
+        
+        let correlation = numerator / denominator;
+        
+        // Clamp to valid range due to floating point precision
+        Ok(correlation.max(-1.0).min(1.0))
+    })
 }
 
 /// Get storage statistics
@@ -2499,54 +2836,150 @@ async fn get_orderbook_monitoring_summary_cmd(
 }
 
 // -------------------------------------------------------------------------
-// WebSocket Commands (Stub implementations for frontend compatibility)
+// WebSocket Commands
 // -------------------------------------------------------------------------
 
-/// Reconnect a WebSocket channel (stub implementation)
+/// Reconnect a WebSocket channel
+/// 
+/// Triggers a reconnection for the specified platform's WebSocket connection.
+/// The channel parameter should be one of: "polymarket", "kalshi", "binance", "coinbase"
 #[tauri::command]
-async fn reconnect_websocket_cmd(channel: String) -> Result<(), String> {
+async fn reconnect_websocket_cmd(
+    channel: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     info!("WebSocket reconnect requested for channel: {}", channel);
-    // TODO: Implement actual WebSocket reconnection logic
-    Ok(())
+    
+    let platform = match channel.to_lowercase().as_str() {
+        "polymarket" => crate::services::websocket_manager::PlatformType::Polymarket,
+        "kalshi" => crate::services::websocket_manager::PlatformType::Kalshi,
+        "binance" => crate::services::websocket_manager::PlatformType::Binance,
+        "coinbase" => crate::services::websocket_manager::PlatformType::Coinbase,
+        _ => return Err(format!("Unknown platform: {}. Valid options: polymarket, kalshi, binance, coinbase", channel)),
+    };
+    
+    state.ws_manager.reconnect(platform).await
+        .map_err(|e| format!("Failed to reconnect {}: {}", channel, e))
 }
 
-/// Disconnect a WebSocket channel (stub implementation)
+/// Disconnect a WebSocket channel
+/// 
+/// Disconnects and removes all subscriptions for the specified platform.
+/// The channel parameter should be one of: "polymarket", "kalshi", "binance", "coinbase"
 #[tauri::command]
-async fn disconnect_websocket_cmd(channel: String) -> Result<(), String> {
+async fn disconnect_websocket_cmd(
+    channel: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     info!("WebSocket disconnect requested for channel: {}", channel);
-    // TODO: Implement actual WebSocket disconnection logic
-    Ok(())
+    
+    let platform = match channel.to_lowercase().as_str() {
+        "polymarket" => crate::services::websocket_manager::PlatformType::Polymarket,
+        "kalshi" => crate::services::websocket_manager::PlatformType::Kalshi,
+        "binance" => crate::services::websocket_manager::PlatformType::Binance,
+        "coinbase" => crate::services::websocket_manager::PlatformType::Coinbase,
+        _ => return Err(format!("Unknown platform: {}. Valid options: polymarket, kalshi, binance, coinbase", channel)),
+    };
+    
+    state.ws_manager.unsubscribe_all(platform).await
+        .map_err(|e| format!("Failed to disconnect {}: {}", channel, e))
 }
 
 // -------------------------------------------------------------------------
-// Order Management Commands (Stub implementations for frontend compatibility)
+// Order Management Commands
 // -------------------------------------------------------------------------
 
-/// Modify an existing order (stub implementation)
+/// Modify an existing order
+/// 
+/// Updates an order's size or price. Only pending orders can be modified.
 #[tauri::command]
 async fn modify_order_cmd(
-    position_id: String,
+    order_id: String,
     updates: serde_json::Value,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    info!("Modify order requested for position: {} with updates: {:?}", position_id, updates);
-    // TODO: Implement actual order modification logic
-    Ok(())
+    info!("Modify order requested for order: {} with updates: {:?}", order_id, updates);
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        // Get the existing order
+        let mut order = sqlite::get_order_by_id(&conn, &order_id)
+            .map_err(|e| format!("Database error: {}", e))?
+            .ok_or_else(|| format!("Order not found: {}", order_id))?;
+        
+        // Only pending orders can be modified
+        if order.status != "pending" {
+            return Err(format!("Cannot modify order with status '{}'. Only pending orders can be modified.", order.status));
+        }
+        
+        // Apply updates
+        if let Some(new_size) = updates.get("size").and_then(|v| v.as_f64()) {
+            if new_size <= 0.0 {
+                return Err("Size must be positive".to_string());
+            }
+            order.size = new_size;
+        }
+        
+        if let Some(new_price) = updates.get("price").and_then(|v| v.as_f64()) {
+            if new_price < 0.0 || new_price > 1.0 {
+                return Err("Price must be between 0 and 1".to_string());
+            }
+            order.price = Some(new_price);
+        }
+        
+        order.updated_at = chrono::Utc::now().timestamp();
+        
+        sqlite::update_order(&conn, &order)
+            .map_err(|e| format!("Failed to update order: {}", e))?;
+        
+        info!("Order {} modified successfully", order_id);
+        Ok(())
+    })
 }
 
-/// Cancel an order (stub implementation)
+/// Cancel an order
+/// 
+/// Cancels a pending order. Only pending orders can be cancelled.
 #[tauri::command]
-async fn cancel_order_cmd(order_id: String) -> Result<(), String> {
+async fn cancel_order_cmd(
+    order_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     info!("Cancel order requested for order: {}", order_id);
-    // TODO: Implement actual order cancellation logic
-    Ok(())
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        let cancelled = sqlite::cancel_order(&conn, &order_id)
+            .map_err(|e| format!("Database error: {}", e))?;
+        
+        if cancelled {
+            info!("Order {} cancelled successfully", order_id);
+            Ok(())
+        } else {
+            Err(format!("Order {} not found or not in pending status", order_id))
+        }
+    })
 }
 
-/// Get balance for a market (stub implementation)
+/// Get balance for a market type
+/// 
+/// Returns the sum of realized P&L from closed positions for the specified market type.
+/// Market should be one of: "Polymarket", "Kalshi"
 #[tauri::command]
-async fn get_balance_cmd(market: String) -> Result<f64, String> {
+async fn get_balance_cmd(
+    market: String,
+    state: State<'_, AppState>,
+) -> Result<f64, String> {
     info!("Get balance requested for market: {}", market);
-    // TODO: Implement actual balance retrieval logic
-    Ok(0.0)
+    
+    tokio::task::block_in_place(|| {
+        let conn = state.db.blocking_lock();
+        
+        sqlite::calculate_balance(&conn, &market)
+            .map_err(|e| format!("Database error: {}", e))
+    })
 }
 
 // -------------------------------------------------------------------------
