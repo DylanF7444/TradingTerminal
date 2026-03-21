@@ -867,6 +867,56 @@ export default function SourcePanel({
           </div>
         );
 
+      case InfoSourceType.PolymarketUserTrades:
+        return (
+          <div className="space-y-4">
+            <div>
+              <label className={labelClass}>Wallet Address</label>
+              <input
+                type="text"
+                value={config.user_address || ''}
+                onChange={(e) => handleConfigChange('user_address', e.target.value)}
+                placeholder="0x1234abcd5678efgh9012ijkl3456mnop"
+                className={commonInputClass}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Ethereum wallet address to track (must be 0x followed by 40 hex characters)
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>Update Interval (seconds)</label>
+              <input
+                type="range"
+                min="10"
+                max="300"
+                step="10"
+                value={config.update_interval_seconds || 30}
+                onChange={(e) => handleConfigChange('update_interval_seconds', parseInt(e.target.value))}
+                className="w-full"
+              />
+              <span className="text-sm text-gray-500">{config.update_interval_seconds || 30}s</span>
+              <p className="text-xs text-gray-500 mt-1">
+                How often to fetch new trades (lower = more API calls)
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="include_small_trades"
+                checked={config.include_small_trades || false}
+                onChange={(e) => handleConfigChange('include_small_trades', e.target.checked)}
+                className="rounded bg-gray-800 border-gray-700 text-blue-500"
+              />
+              <label htmlFor="include_small_trades" className="text-sm text-gray-400">
+                Include Small Trades (under $100)
+              </label>
+              <p className="text-xs text-gray-500">
+                More data but more noise
+              </p>
+            </div>
+          </div>
+        );
+
       default:
         return (
           <div className="space-y-4">
