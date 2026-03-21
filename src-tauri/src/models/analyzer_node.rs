@@ -71,6 +71,8 @@ pub enum AnalyzerType {
     Volatility,
     /// User-defined analysis via custom configuration
     Custom,
+    /// Detects whale activity and trade spikes
+    WhaleActivity,
 }
 
 impl std::fmt::Display for AnalyzerType {
@@ -83,6 +85,7 @@ impl std::fmt::Display for AnalyzerType {
             AnalyzerType::RSI => write!(f, "RSI"),
             AnalyzerType::Volatility => write!(f, "Volatility"),
             AnalyzerType::Custom => write!(f, "Custom"),
+            AnalyzerType::WhaleActivity => write!(f, "WhaleActivity"),
         }
     }
 }
@@ -98,6 +101,7 @@ impl AnalyzerType {
             "RSI" => Some(AnalyzerType::RSI),
             "Volatility" => Some(AnalyzerType::Volatility),
             "Custom" => Some(AnalyzerType::Custom),
+            "WhaleActivity" => Some(AnalyzerType::WhaleActivity),
             _ => None,
         }
     }
@@ -253,6 +257,31 @@ impl Default for VolatilityConfig {
     }
 }
 
+/// Configuration for WhaleActivity analyzer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhaleActivityConfig {
+    /// Trade size in USD to flag as "whale" activity
+    pub threshold: f64,
+    /// Rolling window size in minutes for analysis
+    pub window_size: usize,
+    /// Sensitivity for spike detection (0.0 - 1.0)
+    /// Higher values require larger deviations to trigger
+    pub sensitivity: f64,
+    /// Minimum number of trades before analysis
+    pub min_trades: usize,
+}
+
+impl Default for WhaleActivityConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 10000.0, // $10k threshold for whale activity
+            window_size: 60,    // 60 minute window
+            sensitivity: 0.5,   // Medium sensitivity
+            min_trades: 10,     // Need at least 10 trades for meaningful stats
+        }
+    }
+}
+
 /// Cached analysis result for UI display
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzerResult {
@@ -320,6 +349,7 @@ impl AnalyzerNode {
             AnalyzerType::RSI => serde_json::to_value(RSIConfig::default()).unwrap(),
             AnalyzerType::Volatility => serde_json::to_value(VolatilityConfig::default()).unwrap(),
             AnalyzerType::Custom => serde_json::json!({}),
+            AnalyzerType::WhaleActivity => serde_json::to_value(WhaleActivityConfig::default()).unwrap(),
         }
     }
 }

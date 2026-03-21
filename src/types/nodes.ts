@@ -67,6 +67,9 @@ export enum InfoSourceType {
   
   /** Custom API endpoint (user-defined) */
   CustomAPI = 'CustomAPI',
+  
+  /** Polymarket user trade history (whale tracking) */
+  PolymarketUserTrades = 'PolymarketUserTrades',
 }
 
 /**
@@ -141,6 +144,9 @@ export enum AnalyzerType {
   
   /** Custom formula/expression */
   Custom = 'Custom',
+  
+  /** Whale activity and trade spike detector */
+  WhaleActivity = 'WhaleActivity',
 }
 
 /**
@@ -1023,6 +1029,7 @@ export const DEFAULT_UPDATE_INTERVALS: Record<InfoSourceType, number> = {
   [InfoSourceType.EconomicIndicators]: 3600,
   [InfoSourceType.OnChainData]: 15,
   [InfoSourceType.CustomAPI]: 60,
+  [InfoSourceType.PolymarketUserTrades]: 30,
 };
 
 /** Maximum connections per node type */

@@ -45,6 +45,9 @@
 
 use crate::models::node::InfoSourceType;
 use crate::db::sqlite::{insert_timeseries, Connection};
+use crate::services::consolidated_scraper_manager::{
+    ConsolidatedScraperManager, ScraperProviderType,
+};
 use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -72,18 +75,26 @@ pub struct ScraperConfig {
 
 /// Handle to a running scraper for management
 pub struct ScraperHandle {
-    /// Task handle for await/join
+    /// Task handle for await/join (None for consolidated scrapers which don't have their own task)
     pub join_handle: std::sync::Arc<tokio::task::JoinHandle<()>>,
     /// Channel to signal graceful shutdown
     pub shutdown_tx: mpsc::Sender<()>,
     /// Channel to send commands (for WebSocket scrapers)
     pub command_tx: Option<mpsc::Sender<super::websocket_scraper::ScraperCommand>>,
+    /// If this scraper uses consolidated manager, store provider type for cleanup
+    pub consolidated_provider: Option<ScraperProviderType>,
 }
 
 /// Spawn a new scraper task for the given data source
 /// 
-/// This is the main entry point called by commands::data_sources::add_data_source
-/// For WebSocket-capable sources (Coinbase crypto), spawns a WebSocket scraper instead
+/// This is the main entry point called by commands::data_sources::add_data_source.
+/// 
+/// For WebSocket-capable sources, uses consolidated connections:
+/// - Coinbase (CryptoPrices) -> ConsolidatedScraperManager
+/// - Finnhub (FinancialPrices, CommodityPrices) -> ConsolidatedScraperManager
+/// - Binance (CommodityPrices) -> ConsolidatedScraperManager
+/// 
+/// Multiple nodes sharing the same provider will share a single WebSocket connection.
 pub async fn spawn_scraper(
     node_id: String,
     source_type: InfoSourceType,
@@ -147,7 +158,87 @@ pub async fn spawn_scraper(
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
         command_tx: None, // HTTP scrapers don't support dynamic commands
+        consolidated_provider: None, // Not using consolidated manager
     })
+}
+
+/// Spawn a scraper using the consolidated WebSocket manager
+/// 
+/// This is the preferred method for WebSocket-capable sources.
+/// Multiple nodes can share a single WebSocket connection per provider.
+pub async fn spawn_consolidated_scraper(
+    node_id: String,
+    source_type: InfoSourceType,
+    config: JsonValue,
+    consolidated_manager: Arc<ConsolidatedScraperManager>,
+) -> Result<ScraperHandle, anyhow::Error> {
+    println!("[SCRAPER] spawn_consolidated_scraper called for node {} with source_type {:?}", node_id, source_type);
+    
+    let provider = config.get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("coingecko");
+
+    // Determine provider type
+    let provider_type = match (source_type.clone(), provider) {
+        (InfoSourceType::CryptoPrices, "coinbase") => ScraperProviderType::Coinbase,
+        (InfoSourceType::FinancialPrices, "finnhub") => ScraperProviderType::Finnhub,
+        (InfoSourceType::CommodityPrices, "finnhub") => ScraperProviderType::Finnhub,
+        (InfoSourceType::CommodityPrices, "binance") => ScraperProviderType::Binance,
+        _ => return Err(anyhow::anyhow!(
+            "Provider '{}' for source type '{:?}' not supported for consolidated scraping",
+            provider, source_type
+        )),
+    };
+
+    // Parse symbols from config
+    let symbols: Vec<String> = config.get("symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    if symbols.is_empty() {
+        return Err(anyhow::anyhow!("No symbols configured for scraper"));
+    }
+
+    // Parse storage interval
+    let storage_interval_ms = config.get("storageIntervalMs")
+        .and_then(|v| v.as_u64())
+        .or_else(|| config.get("storage_interval_seconds").and_then(|v| v.as_u64()).map(|s| s * 1000))
+        .unwrap_or(1000);
+
+    // Subscribe to the consolidated manager
+    consolidated_manager.subscribe(
+        provider_type,
+        node_id.clone(),
+        symbols,
+        storage_interval_ms,
+    ).await?;
+
+    println!("[SCRAPER] Node {} registered with consolidated {} manager", node_id, provider_type.as_str());
+
+    // Create a dummy shutdown channel (consolidated scrapers use remove_node for cleanup)
+    let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+
+    // Create a dummy task handle (consolidated scrapers don't have their own task)
+    let join_handle = tokio::spawn(async {});
+
+    Ok(ScraperHandle {
+        join_handle: std::sync::Arc::new(join_handle),
+        shutdown_tx,
+        command_tx: None,
+        consolidated_provider: Some(provider_type),
+    })
+}
+
+/// Check if a source type and provider should use consolidated scraping
+pub fn should_use_consolidated(source_type: &InfoSourceType, provider: &str) -> bool {
+    matches!(
+        (source_type, provider),
+        (InfoSourceType::CryptoPrices, "coinbase") |
+        (InfoSourceType::FinancialPrices, "finnhub") |
+        (InfoSourceType::CommodityPrices, "finnhub") |
+        (InfoSourceType::CommodityPrices, "binance")
+    )
 }
 
 /// Spawn a WebSocket-based scraper for real-time data sources
@@ -226,6 +317,7 @@ async fn spawn_websocket_scraper(
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
         command_tx: Some(command_tx), // WebSocket scrapers support dynamic commands
+        consolidated_provider: None, // Legacy individual scraper
     })
 }
 
@@ -302,6 +394,7 @@ async fn spawn_finnhub_scraper(
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
         command_tx: Some(command_tx),
+        consolidated_provider: None, // Legacy individual scraper
     })
 }
 
@@ -360,6 +453,7 @@ async fn spawn_binance_scraper(
         join_handle: std::sync::Arc::new(join_handle),
         shutdown_tx,
         command_tx: Some(command_tx),
+        consolidated_provider: None, // Legacy individual scraper
     })
 }
 
@@ -490,6 +584,9 @@ async fn scrape_once(
         }
         &InfoSourceType::OnChainData => {
             scrape_onchain(client, config).await?
+        }
+        &InfoSourceType::PolymarketUserTrades => {
+            scrape_polymarket_user_trades(client, config).await?
         }
     };
     
@@ -1661,6 +1758,142 @@ async fn scrape_onchain(_client: &Client, config: &ScraperConfig) -> Result<Scra
 }
 
 // ============================================================================
+// POLYMARKET USER TRADES SCRAPING
+// ============================================================================
+
+/// Scrape Polymarket user trade history from the CLOB API
+/// 
+/// Fetches recent trades for a specific wallet address to track whale activity.
+/// API endpoint: https://clob.polymarket.com/trades?maker={address}
+async fn scrape_polymarket_user_trades(client: &Client, config: &ScraperConfig) -> Result<ScrapedData, anyhow::Error> {
+    let user_address: String = serde_json::from_value(
+        config.params.get("user_address").cloned().unwrap_or(serde_json::json!(""))
+    )?;
+    
+    if user_address.is_empty() {
+        return Err(anyhow::anyhow!("user_address is required for PolymarketUserTrades source"));
+    }
+    
+    // Polymarket CLOB API for user trades
+    let url = format!(
+        "https://clob.polymarket.com/trades?maker={}",
+        user_address
+    );
+    
+    let response = client.get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Polymarket API error: {} - {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ));
+    }
+    
+    let data: JsonValue = response.json().await?;
+    let mut points = Vec::new();
+    
+    // Parse trades array from response
+    if let Some(trades) = data.as_array() {
+        let mut total_volume_usd = 0.0;
+        let mut trade_count = 0;
+        let mut largest_trade = 0.0;
+        let mut buy_volume = 0.0;
+        let mut sell_volume = 0.0;
+        
+        for trade in trades {
+            // Extract trade fields
+            let size = trade.get("size")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            
+            let price = trade.get("price")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            
+            let side = trade.get("side")
+                .and_then(|v| v.as_str())
+                .unwrap_or("BUY");
+            
+            let trade_value = size * price;
+            total_volume_usd += trade_value;
+            trade_count += 1;
+            
+            if trade_value > largest_trade {
+                largest_trade = trade_value;
+            }
+            
+            if side == "BUY" {
+                buy_volume += trade_value;
+            } else {
+                sell_volume += trade_value;
+            }
+            
+            // Add individual trade data point
+            points.push(DataPoint {
+                metric_type: "trade".to_string(),
+                value: trade_value,
+                metadata: Some(serde_json::json!({
+                    "side": side,
+                    "size": size,
+                    "price": price,
+                    "market_id": trade.get("asset_id").and_then(|v| v.as_str()),
+                    "timestamp": trade.get("timestamp").and_then(|v| v.as_str()),
+                    "trade_id": trade.get("id").and_then(|v| v.as_str()),
+                })),
+            });
+        }
+        
+        // Add summary metrics
+        points.push(DataPoint {
+            metric_type: "total_volume_usd".to_string(),
+            value: total_volume_usd,
+            metadata: Some(serde_json::json!({
+                "user_address": user_address,
+                "trade_count": trade_count,
+            })),
+        });
+        
+        points.push(DataPoint {
+            metric_type: "largest_trade_usd".to_string(),
+            value: largest_trade,
+            metadata: None,
+        });
+        
+        points.push(DataPoint {
+            metric_type: "buy_volume_usd".to_string(),
+            value: buy_volume,
+            metadata: None,
+        });
+        
+        points.push(DataPoint {
+            metric_type: "sell_volume_usd".to_string(),
+            value: sell_volume,
+            metadata: None,
+        });
+        
+        points.push(DataPoint {
+            metric_type: "trade_count".to_string(),
+            value: trade_count as f64,
+            metadata: None,
+        });
+    }
+    
+    Ok(ScrapedData {
+        points,
+        metadata: serde_json::json!({
+            "user_address": user_address,
+            "source": "polymarket_clob",
+        }),
+    })
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
@@ -1679,6 +1912,7 @@ fn parse_config(source_type: &InfoSourceType, config: &JsonValue) -> Result<Scra
             &InfoSourceType::Livestream => 30,
             &InfoSourceType::EconomicIndicators => 3600,
             &InfoSourceType::OnChainData => 60,
+            &InfoSourceType::PolymarketUserTrades => 30, // 30 second default for trade tracking
         });
     
     Ok(ScraperConfig {
@@ -1750,6 +1984,7 @@ fn source_type_to_string(source_type: &InfoSourceType) -> String {
         &InfoSourceType::Livestream => "Livestream",
         &InfoSourceType::EconomicIndicators => "EconomicIndicators",
         &InfoSourceType::OnChainData => "OnChainData",
+        &InfoSourceType::PolymarketUserTrades => "PolymarketUserTrades",
     }.to_string()
 }
 

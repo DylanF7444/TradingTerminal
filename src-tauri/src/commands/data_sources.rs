@@ -358,6 +358,9 @@ async fn start_scraper_service(
             InfoSourceType::OnChainData => {
                 println!("Scraper Task: Would poll on-chain data for {:?}", config);
             },
+            InfoSourceType::PolymarketUserTrades => {
+                println!("Scraper Task: Would poll Polymarket user trades for {:?}", config);
+            },
         }
         
         // Simulate continuous scraping

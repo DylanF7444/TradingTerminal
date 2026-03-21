@@ -68,6 +68,9 @@ use crate::commands::{
 use crate::db::sqlite::{self, Connection, create_connection, setup_schema, apply_optimizations};
 use crate::services::{scraper, startup};
 use crate::services::websocket_manager::{WebSocketManager, create_websocket_manager, NetworkMetricsSnapshot};
+use crate::services::consolidated_scraper_manager::{
+    ConsolidatedScraperManager, create_consolidated_scraper_manager,
+};
 use crate::services::remote_gateway::{RemoteConnectionManager, create_remote_manager};
 use crate::services::persistent_orderbook::{
     PersistentOrderbookState,
@@ -125,6 +128,12 @@ pub struct AppState {
     
     /// WebSocket manager for market data streams
     pub ws_manager: Arc<WebSocketManager>,
+    
+    /// Consolidated scraper manager for InfoSource WebSocket streams
+    /// 
+    /// Pools WebSocket connections for InfoSource nodes (Coinbase, Finnhub, Binance).
+    /// Multiple nodes sharing the same provider share a single connection.
+    pub consolidated_scraper_manager: Arc<ConsolidatedScraperManager>,
     
     /// Remote connection manager for remote desktop gateway
     ///
@@ -411,6 +420,13 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         }
     }
 
+    // Create consolidated scraper manager for InfoSource WebSocket pooling
+    let consolidated_scraper_manager = create_consolidated_scraper_manager(
+        app.handle().clone(),
+        db.clone(),
+        ws_manager.network_metrics(),
+    );
+
     let state = AppState {
         db: db.clone(),
         http_client,
@@ -419,6 +435,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         executor_handle: Arc::new(Mutex::new(None)),
         config: Arc::new(Mutex::new(AppConfig::default())),
         ws_manager: ws_manager.clone(),
+        consolidated_scraper_manager: consolidated_scraper_manager.clone(),
         remote_manager: create_remote_manager(app.handle().clone()),
         session_id,
     };
@@ -441,7 +458,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     
     // 6. Start background services (scraper supervisor, analyzer, executor)
     // Initialize all saved nodes and start their websockets/scrapers
-    tauri::async_runtime::spawn(start_background_services(app.handle().clone(), ws_manager, persistent_monitor));
+    tauri::async_runtime::spawn(start_background_services(app.handle().clone(), ws_manager, persistent_monitor, consolidated_scraper_manager));
     
     info!("Application initialization complete");
     Ok(())
@@ -451,7 +468,12 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
 /// 
 /// Spawns analyzer and executor services. Scrapers are started on-demand
 /// when users add data sources.
-async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc<WebSocketManager>, persistent_monitor: PersistentOrderbookState) {
+async fn start_background_services(
+    app_handle: tauri::AppHandle, 
+    ws_manager: Arc<WebSocketManager>, 
+    persistent_monitor: PersistentOrderbookState,
+    consolidated_scraper_manager: Arc<ConsolidatedScraperManager>,
+) {
     info!("Starting background services...");
     
     let state: State<'_, AppState> = app_handle.state();
@@ -460,6 +482,7 @@ async fn start_background_services(app_handle: tauri::AppHandle, ws_manager: Arc
     match startup::initialize_saved_nodes(
         state.db.clone(),
         ws_manager,
+        consolidated_scraper_manager,
         app_handle.clone(),
     ).await {
         Ok(active_services) => {
@@ -733,6 +756,7 @@ async fn add_data_source_cmd(
         "FinancialPrices" => models::node::InfoSourceType::FinancialPrices,
         "CommodityPrices" => models::node::InfoSourceType::CommodityPrices,
         "Livestream" => models::node::InfoSourceType::Livestream,
+        "PolymarketUserTrades" => models::node::InfoSourceType::PolymarketUserTrades,
         _ => return Err(format!("Unknown source type: {}", source_type)),
     };
     
@@ -754,17 +778,33 @@ async fn add_data_source_cmd(
         Ok(node)
     })?;
     
-    // Start scraper
-    let db = state.db.clone();
-    let network_metrics = state.ws_manager.network_metrics();
-    let scraper_handle = scraper::spawn_scraper(
-        node.id.clone(),
-        source_type,
-        config,
-        db,
-        window,
-        network_metrics,
-    ).await.map_err(|e| e.to_string())?;
+    // Check if this source should use consolidated scraping
+    let provider = config.get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("coingecko");
+    
+    let scraper_handle = if scraper::should_use_consolidated(&source_type, provider) {
+        // Use consolidated scraper manager for WebSocket-capable sources
+        info!("Using consolidated {} scraper for node {}", provider, node.id);
+        scraper::spawn_consolidated_scraper(
+            node.id.clone(),
+            source_type,
+            config,
+            state.consolidated_scraper_manager.clone(),
+        ).await.map_err(|e| e.to_string())?
+    } else {
+        // Use individual scraper for non-WebSocket sources
+        let db = state.db.clone();
+        let network_metrics = state.ws_manager.network_metrics();
+        scraper::spawn_scraper(
+            node.id.clone(),
+            source_type,
+            config,
+            db,
+            window,
+            network_metrics,
+        ).await.map_err(|e| e.to_string())?
+    };
     
     // Store handle for later shutdown
     state.active_scrapers.lock().await.insert(node.id.clone(), scraper_handle);
@@ -795,9 +835,17 @@ async fn remove_data_source_cmd(
     if let Some(ref node) = node_info {
         match &node.node_type {
             models::node::NodeType::InfoSource(_) => {
-                // Stop scraper
+                // Stop scraper - check if it's using consolidated or individual scraper
                 if let Some(handle) = state.active_scrapers.lock().await.remove(&node_id) {
-                    scraper::stop_scraper(&handle).await.map_err(|e| e.to_string())?;
+                    if handle.consolidated_provider.is_some() {
+                        // Remove from consolidated scraper manager
+                        if let Err(e) = state.consolidated_scraper_manager.remove_node(&node_id).await {
+                            eprintln!("Failed to remove node {} from consolidated scraper: {}", node_id, e);
+                        }
+                    } else {
+                        // Stop individual scraper
+                        scraper::stop_scraper(&handle).await.map_err(|e| e.to_string())?;
+                    }
                 }
             }
             models::node::NodeType::Market(market_type) => {
@@ -1015,6 +1063,7 @@ async fn add_node_cmd(
                 "FinancialPrices" => models::node::InfoSourceType::FinancialPrices,
                 "CommodityPrices" => models::node::InfoSourceType::CommodityPrices,
                 "Livestream" => models::node::InfoSourceType::Livestream,
+                "PolymarketUserTrades" => models::node::InfoSourceType::PolymarketUserTrades,
                 _ => return Err(format!("Unknown InfoSource type: {}", node_subtype)),
             };
             models::node::NodeType::InfoSource(info_type)
@@ -1036,6 +1085,7 @@ async fn add_node_cmd(
                 "RSI" => models::analyzer_node::AnalyzerType::RSI,
                 "Volatility" => models::analyzer_node::AnalyzerType::Volatility,
                 "Custom" => models::analyzer_node::AnalyzerType::Custom,
+                "WhaleActivity" => models::analyzer_node::AnalyzerType::WhaleActivity,
                 _ => return Err(format!("Unknown Analyzer type: {}", node_subtype)),
             };
             models::node::NodeType::Analyzer(analyzer_type)

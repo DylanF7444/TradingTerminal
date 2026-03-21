@@ -1213,6 +1213,7 @@ export const MAX_SOURCES_PER_TYPE: Record<InfoSourceType, number> = {
   [InfoSourceType.EconomicIndicators]: 3,
   [InfoSourceType.OnChainData]: 5,
   [InfoSourceType.CustomAPI]: 10,
+  [InfoSourceType.PolymarketUserTrades]: 10,
 };
 
 /** Default rate limits (requests per minute) by provider */

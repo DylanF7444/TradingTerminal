@@ -98,6 +98,17 @@ export interface VolatilityConfig {
   low_threshold: number;
 }
 
+export interface WhaleActivityConfig {
+  /** Trade size in USD to flag as whale activity */
+  threshold: number;
+  /** Rolling window size in minutes */
+  window_size: number;
+  /** Sensitivity for spike detection (0-1, higher = more sensitive) */
+  sensitivity: number;
+  /** Minimum trades before analysis */
+  min_trades: number;
+}
+
 export type AnalyzerConfig =
   | CorrelationConfig
   | MomentumConfig
@@ -105,6 +116,7 @@ export type AnalyzerConfig =
   | SentimentConfig
   | RSIConfig
   | VolatilityConfig
+  | WhaleActivityConfig
   | Record<string, unknown>;
 
 // ============================================================================

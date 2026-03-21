@@ -12,6 +12,7 @@ pub mod arbitrage;
 pub mod sentiment;
 pub mod rsi;
 pub mod volatility;
+pub mod whale_activity;
 
 use crate::models::analyzer_node::{AnalyzerNode, AnalyzerResult, AnalyzerType};
 use crate::models::TradingSignal;
@@ -123,6 +124,15 @@ pub fn create_analyzer(analyzer_node: &AnalyzerNode) -> Result<Box<dyn AnalyzerI
         }
         AnalyzerType::Custom => {
             Err("Custom analyzer requires a specific implementation".to_string())
+        }
+        AnalyzerType::WhaleActivity => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid whale activity config: {}", e))?;
+            Ok(Box::new(whale_activity::WhaleActivityAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
         }
     }
 }

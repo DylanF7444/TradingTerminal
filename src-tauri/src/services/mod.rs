@@ -48,6 +48,7 @@ pub mod executor;
 pub mod orderbook;
 pub mod websocket_manager;
 pub mod websocket_scraper;
+pub mod consolidated_scraper_manager;
 pub mod startup;
 pub mod analyzers;
 pub mod analyzer_pipeline;

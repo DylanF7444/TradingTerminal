@@ -75,6 +75,7 @@ const TYPE_DISPLAY_NAMES: Record<string, string> = {
   EconomicIndicators: 'Economic Indicators',
   OnChainData: 'On-Chain Data',
   CustomAPI: 'Custom API',
+  PolymarketUserTrades: 'Polymarket User Trades',
   // Markets
   Polymarket: 'Polymarket',
   Kalshi: 'Kalshi',
@@ -84,6 +85,7 @@ const TYPE_DISPLAY_NAMES: Record<string, string> = {
   Sentiment: 'Sentiment Analyzer',
   Arbitrage: 'Arbitrage Detector',
   Custom: 'Custom Analyzer',
+  WhaleActivity: 'Whale Activity Detector',
   // Alerts
   PriceThreshold: 'Price Threshold Alert',
   CorrelationChange: 'Correlation Change Alert',

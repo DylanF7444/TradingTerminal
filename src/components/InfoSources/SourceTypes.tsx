@@ -24,6 +24,7 @@ import {
   MessageCircle, 
   Cloud, 
   Video, 
+  Users,
   type LucideIcon 
 } from 'lucide-react';
 import { InfoSourceType } from '../../types/nodes';
@@ -739,6 +740,64 @@ export const SOURCE_TYPE_DEFINITIONS: Record<InfoSourceType, SourceTypeDefinitio
       if (!config.endpoint_url) errors.endpoint_url = 'Endpoint URL required';
       if (config.endpoint_url && !config.endpoint_url.startsWith('http')) {
         errors.endpoint_url = 'Invalid URL format';
+      }
+      return { valid: Object.keys(errors).length === 0, errors };
+    }
+  },
+
+  [InfoSourceType.PolymarketUserTrades]: {
+    metadata: {
+      label: 'Polymarket User Trades',
+      icon: Users,
+      description: 'Track trade history from specific Polymarket wallet addresses (whale tracking)',
+      color: 'text-violet-400',
+      bgColor: 'bg-violet-500'
+    },
+    configSchema: [
+      {
+        field: 'user_address',
+        type: 'text',
+        label: 'Wallet Address',
+        placeholder: '0x1234...abcd',
+        required: true,
+        validation: (val: string) => {
+          if (!val) return 'Wallet address required';
+          if (!val.startsWith('0x') || val.length !== 42) {
+            return 'Invalid Ethereum address format (must be 0x followed by 40 hex characters)';
+          }
+          return null;
+        },
+        helpText: 'Ethereum wallet address to track (e.g., 0x1234...)'
+      },
+      {
+        field: 'update_interval_seconds',
+        type: 'range',
+        label: 'Update Interval (seconds)',
+        min: 10,
+        max: 300,
+        step: 10,
+        helpText: 'How often to fetch new trades (lower = more API calls)'
+      },
+      {
+        field: 'include_small_trades',
+        type: 'checkbox',
+        label: 'Include Small Trades',
+        helpText: 'Include trades under $100 (more data, more noise)',
+        advanced: true
+      }
+    ],
+    defaults: {
+      user_address: '',
+      update_interval_seconds: 30,
+      include_small_trades: false
+    },
+    validator: (config) => {
+      const errors: Record<string, string> = {};
+      if (!config.user_address) {
+        errors.user_address = 'Wallet address required';
+      }
+      if (config.user_address && (!config.user_address.startsWith('0x') || config.user_address.length !== 42)) {
+        errors.user_address = 'Invalid Ethereum address format';
       }
       return { valid: Object.keys(errors).length === 0, errors };
     }

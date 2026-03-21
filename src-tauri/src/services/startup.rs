@@ -26,8 +26,9 @@ use chrono::Utc;
 
 use crate::db::sqlite::{Connection, get_all_active_nodes};
 use crate::models::node::{Node, NodeType, InfoSourceType, MarketType};
-use crate::services::scraper::{spawn_scraper, ScraperHandle};
+use crate::services::scraper::{spawn_scraper, spawn_consolidated_scraper, should_use_consolidated, ScraperHandle};
 use crate::services::websocket_manager::{WebSocketManager, PlatformType};
+use crate::services::consolidated_scraper_manager::ConsolidatedScraperManager;
 use crate::services::orderbook::KalshiCredentials;
 
 /// Holds all running service handles
@@ -36,6 +37,8 @@ pub struct ActiveServices {
     pub scrapers: std::collections::HashMap<String, ScraperHandle>,
     /// WebSocket manager reference
     pub ws_manager: Arc<WebSocketManager>,
+    /// Consolidated scraper manager reference
+    pub consolidated_scraper_manager: Arc<ConsolidatedScraperManager>,
     /// Market subscriptions info for persistent orderbook monitoring
     pub market_subscriptions: Vec<MarketSubscriptionInfo>,
 }
@@ -57,6 +60,7 @@ pub struct MarketSubscriptionInfo {
 pub async fn initialize_saved_nodes(
     db: Arc<Mutex<Connection>>,
     ws_manager: Arc<WebSocketManager>,
+    consolidated_scraper_manager: Arc<ConsolidatedScraperManager>,
     app_handle: AppHandle,
 ) -> Result<ActiveServices> {
     println!("[Startup] Initializing saved nodes from database...");
@@ -113,7 +117,15 @@ pub async fn initialize_saved_nodes(
             }
             NodeType::InfoSource(source_type) => {
                 // Start scraper for info source nodes
-                match start_info_source_scraper(&node, source_type, &db, &app_handle, &ws_manager).await {
+                // Use consolidated manager for WebSocket-capable sources
+                match start_info_source_scraper(
+                    &node, 
+                    source_type, 
+                    &db, 
+                    &app_handle, 
+                    &ws_manager,
+                    &consolidated_scraper_manager,
+                ).await {
                     Ok(handle) => {
                         source_count += 1;
                         scrapers.insert(node.id.clone(), handle);
@@ -143,6 +155,7 @@ pub async fn initialize_saved_nodes(
     Ok(ActiveServices {
         scrapers,
         ws_manager,
+        consolidated_scraper_manager,
         market_subscriptions,
     })
 }
@@ -180,11 +193,29 @@ async fn start_info_source_scraper(
     db: &Arc<Mutex<Connection>>,
     app_handle: &AppHandle,
     ws_manager: &Arc<WebSocketManager>,
+    consolidated_scraper_manager: &Arc<ConsolidatedScraperManager>,
 ) -> Result<ScraperHandle> {
     use tauri::Manager;
     use tauri::WebviewWindow;
     
-    // Get the main window for emitting events
+    // Check if this source should use consolidated scraping
+    let provider = node.metadata.get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("coingecko");
+    
+    if should_use_consolidated(source_type, provider) {
+        // Use consolidated scraper manager
+        println!("[Startup] Using consolidated {} scraper for node {}", provider, node.id);
+        let handle = spawn_consolidated_scraper(
+            node.id.clone(),
+            source_type.clone(),
+            node.metadata.clone(),
+            consolidated_scraper_manager.clone(),
+        ).await?;
+        return Ok(handle);
+    }
+    
+    // Fall back to individual scraper for non-WebSocket sources
     let window: WebviewWindow = app_handle.get_webview_window("main")
         .ok_or_else(|| anyhow::anyhow!("Main window not found"))?;
     
@@ -221,7 +252,14 @@ pub async fn stop_node_services(
         }
         NodeType::InfoSource(_) => {
             if let Some(handle) = services.scrapers.remove(node_id) {
-                crate::services::scraper::stop_scraper(&handle).await?;
+                // Check if this was using consolidated scraper
+                if handle.consolidated_provider.is_some() {
+                    // Remove from consolidated manager
+                    services.consolidated_scraper_manager.remove_node(node_id).await?;
+                } else {
+                    // Stop individual scraper
+                    crate::services::scraper::stop_scraper(&handle).await?;
+                }
             }
         }
         NodeType::Analyzer(_) => {
@@ -235,13 +273,19 @@ pub async fn stop_node_services(
 pub async fn shutdown_all_services(services: &mut ActiveServices) -> Result<()> {
     println!("[Startup] Shutting down all services...");
     
-    // Stop all scrapers
+    // Stop all individual scrapers
     for (node_id, handle) in services.scrapers.drain() {
-        match crate::services::scraper::stop_scraper(&handle).await {
-            Ok(_) => println!("[Startup] Stopped scraper for {}", node_id),
-            Err(e) => eprintln!("[Startup] Error stopping scraper {}: {}", node_id, e),
+        if handle.consolidated_provider.is_none() {
+            // Only stop non-consolidated scrapers here
+            match crate::services::scraper::stop_scraper(&handle).await {
+                Ok(_) => println!("[Startup] Stopped scraper for {}", node_id),
+                Err(e) => eprintln!("[Startup] Error stopping scraper {}: {}", node_id, e),
+            }
         }
     }
+    
+    // Shutdown consolidated scraper manager (closes all provider connections)
+    services.consolidated_scraper_manager.shutdown_all().await;
     
     // Shutdown all websockets
     services.ws_manager.shutdown().await;

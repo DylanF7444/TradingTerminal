@@ -1493,6 +1493,7 @@ fn deserialize_node(row: &Row) -> Node {
                 "SocialMedia" => InfoSourceType::SocialMedia,
                 "Weather" => InfoSourceType::Weather,
                 "Livestream" => InfoSourceType::Livestream,
+                "PolymarketUserTrades" => InfoSourceType::PolymarketUserTrades,
                 _ => InfoSourceType::CryptoPrices, // Default fallback
             };
             NodeType::InfoSource(info_type)
@@ -1514,6 +1515,7 @@ fn deserialize_node(row: &Row) -> Node {
                 "RSI" => AnalyzerType::RSI,
                 "Volatility" => AnalyzerType::Volatility,
                 "Custom" => AnalyzerType::Custom,
+                "WhaleActivity" => AnalyzerType::WhaleActivity,
                 _ => AnalyzerType::Correlation, // Default fallback
             };
             NodeType::Analyzer(analyzer_type)

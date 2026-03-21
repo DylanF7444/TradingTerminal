@@ -197,6 +197,7 @@ pub fn get_analyzer_types() -> Vec<JsonValue> {
         AnalyzerType::Sentiment,
         AnalyzerType::RSI,
         AnalyzerType::Volatility,
+        AnalyzerType::WhaleActivity,
     ];
 
     types.iter().map(|t| {
@@ -211,6 +212,7 @@ pub fn get_analyzer_types() -> Vec<JsonValue> {
                 AnalyzerType::RSI => "Overbought/oversold detection (0-100)",
                 AnalyzerType::Volatility => "Price volatility measurement",
                 AnalyzerType::Custom => "User-defined analysis",
+                AnalyzerType::WhaleActivity => "Detects whale trades and trade spikes",
             }
         })
     }).collect()

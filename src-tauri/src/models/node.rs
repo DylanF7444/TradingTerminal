@@ -97,6 +97,9 @@ pub enum InfoSourceType {
 
     /// On-chain metrics (transaction volume, gas fees)
     OnChainData,
+
+    /// Polymarket user trade history (whale tracking)
+    PolymarketUserTrades,
 }
 
 /// Supported prediction market platforms

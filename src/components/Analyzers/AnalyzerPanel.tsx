@@ -10,7 +10,8 @@ import {
   Zap,
   Gauge,
   GitBranch,
-  Calculator
+  Calculator,
+  Waves
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { AnalyzerType, Node, NodeId, NodeType } from '../../types/nodes';
@@ -77,6 +78,13 @@ const ANALYZER_TYPE_METADATA: Record<AnalyzerType, {
     description: 'Create custom analysis formula',
     color: 'text-gray-400',
     defaultConfig: { formula: '', inputs: [] }
+  },
+  [AnalyzerType.WhaleActivity]: {
+    label: 'Whale Activity',
+    icon: Waves,
+    description: 'Detect large trades and trade spikes',
+    color: 'text-violet-400',
+    defaultConfig: { threshold: 10000, windowSize: 60, sensitivity: 0.5, minTrades: 10 }
   }
 };
 

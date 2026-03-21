@@ -34,7 +34,8 @@ import {
   X,
   CheckCircle2,
   AlertCircle,
-  Loader2
+  Loader2,
+  Users
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { InfoSourceType, Node } from '../../types/nodes';
@@ -123,6 +124,13 @@ const SOURCE_TYPE_METADATA: Record<InfoSourceType, {
     description: 'User-defined API endpoint',
     color: 'text-gray-400',
     defaultConfig: { endpoint: '', headers: {}, refresh_interval: 60 }
+  },
+  [InfoSourceType.PolymarketUserTrades]: {
+    label: 'Polymarket User Trades',
+    icon: Users,
+    description: 'Track trades from specific Polymarket wallets (whale tracking)',
+    color: 'text-violet-400',
+    defaultConfig: { user_address: '', update_interval_seconds: 30 }
   }
 };
 
