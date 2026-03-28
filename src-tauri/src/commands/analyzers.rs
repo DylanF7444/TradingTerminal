@@ -198,6 +198,14 @@ pub fn get_analyzer_types() -> Vec<JsonValue> {
         AnalyzerType::RSI,
         AnalyzerType::Volatility,
         AnalyzerType::WhaleActivity,
+        AnalyzerType::EnsembleProbability,
+        AnalyzerType::BiasCorrection,
+        AnalyzerType::BlackScholes,
+        AnalyzerType::Poisson,
+        AnalyzerType::NowcastDeviation,
+        AnalyzerType::FedSentiment,
+        AnalyzerType::FundingRegime,
+        AnalyzerType::SpreadScanner,
     ];
 
     types.iter().map(|t| {
@@ -213,6 +221,14 @@ pub fn get_analyzer_types() -> Vec<JsonValue> {
                 AnalyzerType::Volatility => "Price volatility measurement",
                 AnalyzerType::Custom => "User-defined analysis",
                 AnalyzerType::WhaleActivity => "Detects whale trades and trade spikes",
+                AnalyzerType::EnsembleProbability => "Weather ensemble forecast to probability",
+                AnalyzerType::BiasCorrection => "Historical forecast bias correction",
+                AnalyzerType::BlackScholes => "Options-implied probability via N(d2)",
+                AnalyzerType::Poisson => "Count process modeling for events",
+                AnalyzerType::NowcastDeviation => "Economic nowcast vs market deviation",
+                AnalyzerType::FedSentiment => "Fed speech hawkish/dovish classifier",
+                AnalyzerType::FundingRegime => "Crypto funding rate regime detection",
+                AnalyzerType::SpreadScanner => "Cross-platform arbitrage spread scanner",
             }
         })
     }).collect()

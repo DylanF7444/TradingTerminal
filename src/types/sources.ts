@@ -339,6 +339,15 @@ export enum CryptoProvider {
   
   /** Custom API endpoint */
   Custom = 'custom',
+  
+  /** Deribit Options - Options chain for IV surface and probability pricing (FREE) */
+  DeribitOptions = 'deribit_options',
+  
+  /** Deribit DVOL - 30-day implied volatility index (FREE) */
+  DeribitDVOL = 'deribit_dvol',
+  
+  /** Binance Funding - Perpetual funding rate + open interest (FREE) */
+  BinanceFunding = 'binance_funding',
 }
 
 /**
@@ -470,6 +479,12 @@ export enum NewsProvider {
   Reuters = 'reuters',
   Bloomberg = 'bloomberg',
   WSJ = 'wsj',
+  
+  /** Federal Reserve Speeches - Official Fed speech RSS (FREE) */
+  FedSpeeches = 'fed_speeches',
+  
+  /** ADP Employment Report - Pre-NFP employment data (FREE) */
+  ADPReport = 'adp_report',
 }
 
 /**
@@ -539,6 +554,12 @@ export enum SocialPlatform {
   
   /** StockTwits - investor-focused */
   StockTwits = 'stocktwits',
+  
+  /** Twitter API v2 - Official X API for tweet counts (PAID $100/mo) */
+  TwitterAPI = 'twitter_api',
+  
+  /** Nitter RSS - Unofficial tweet feed (FREE fallback) */
+  NitterRSS = 'nitter_rss',
 }
 
 // =============================================================================
@@ -585,6 +606,18 @@ export enum WeatherProvider {
   
   /** Weather Underground - crowd-sourced */
   Wunderground = 'wunderground',
+  
+  /** Open-Meteo Ensemble - 31-member GFS ensemble for probability estimation (FREE) */
+  OpenMeteoEnsemble = 'openmeteo_ensemble',
+  
+  /** Open-Meteo HRRR - Rapid-update model for US cities, final 12h refinement (FREE) */
+  OpenMeteoHRRR = 'openmeteo_hrrr',
+  
+  /** NWS Climate Report - CF6 daily reports, Kalshi settlement source (FREE) */
+  NWSClimateReport = 'nws_climate',
+  
+  /** Open-Meteo Archive - Historical data for bias correction (FREE) */
+  OpenMeteoArchive = 'openmeteo_archive',
 }
 
 /**
@@ -668,6 +701,18 @@ export enum EconomicSource {
   
   /** Trading Economics - aggregated */
   TradingEconomics = 'tradingeconomics',
+  
+  /** Cleveland Fed Nowcast - Daily CPI/PCE nowcast (FREE) */
+  ClevelandFedNowcast = 'cleveland_fed',
+  
+  /** EIA Gasoline - Weekly gasoline prices (FREE, key required) */
+  EIAGasoline = 'eia_gasoline',
+  
+  /** BLS Calendar - Release schedule for CPI/NFP events */
+  BLSCalendar = 'bls_calendar',
+  
+  /** CME FedWatch - Implied rate probabilities (PAID, optional) */
+  CMEFedWatch = 'cme_fedwatch',
 }
 
 /**

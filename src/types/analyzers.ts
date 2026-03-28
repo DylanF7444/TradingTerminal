@@ -109,6 +109,94 @@ export interface WhaleActivityConfig {
   min_trades: number;
 }
 
+// ============================================================================
+// NEW PIPELINE ANALYZER CONFIGS
+// ============================================================================
+
+export interface EnsembleProbabilityConfig {
+  /** Number of ensemble members (GFS = 31) */
+  ensemble_count: number;
+  /** Lower bound of target bucket (e.g., 75°F) */
+  bucket_min: number;
+  /** Upper bound of target bucket (e.g., 80°F) */
+  bucket_max: number;
+  /** Minimum edge (probability difference) to generate signal */
+  min_edge_threshold: number;
+}
+
+export interface BiasCorrectionConfig {
+  /** Correction mode: "additive" or "multiplicative" */
+  mode: 'additive' | 'multiplicative';
+  /** City-specific bias corrections (e.g., { "NYC": { "Jan": 1.2, "Feb": 0.8 } }) */
+  city_corrections: Record<string, Record<string, number>>;
+  /** Days of historical data to use for adaptive bias */
+  lookback_days: number;
+}
+
+export interface BlackScholesConfig {
+  /** Risk-free rate (annualized, e.g., 0.05 for 5%) */
+  risk_free_rate: number;
+  /** Use implied volatility from options chain if available */
+  use_implied_vol: boolean;
+  /** Fallback realized volatility lookback period in days */
+  vol_lookback_days: number;
+  /** Minimum edge (5 cents = 0.05) */
+  min_edge_threshold: number;
+}
+
+export interface PoissonConfig {
+  /** Rate parameter λ (expected events per period) */
+  lambda: number;
+  /** Bucket lower bound for probability calculation */
+  bucket_min: number;
+  /** Bucket upper bound for probability calculation */
+  bucket_max: number;
+  /** Decay factor for exponential smoothing of rate estimate */
+  decay_factor: number;
+}
+
+export interface NowcastDeviationConfig {
+  /** Data source: "ClevelandFed" or "ADP" */
+  nowcast_source: 'ClevelandFed' | 'ADP';
+  /** Assumed standard deviation for probability calculation */
+  assumed_std: number;
+  /** Minimum deviation from consensus to generate signal */
+  min_deviation: number;
+}
+
+export interface FedSentimentConfig {
+  /** Keywords classified as hawkish */
+  hawkish_keywords: string[];
+  /** Keywords classified as dovish */
+  dovish_keywords: string[];
+  /** Time decay factor for older statements (half-life in hours) */
+  decay_half_life: number;
+  /** Minimum net sentiment score to generate signal */
+  min_signal_threshold: number;
+}
+
+export interface FundingRegimeConfig {
+  /** Annualized funding rate above which market is "extreme long" (e.g., 0.55 = 55%) */
+  extreme_positive: number;
+  /** Annualized funding rate below which market is "extreme short" (e.g., -0.30 = -30%) */
+  extreme_negative: number;
+  /** Probability adjustment when in extreme regime */
+  probability_adjustment: number;
+  /** Assets to track (e.g., ["BTC", "ETH"]) */
+  assets: string[];
+}
+
+export interface SpreadScannerConfig {
+  /** Polymarket fee rate (typically 0, maker rebate) */
+  polymarket_fee: number;
+  /** Kalshi fee rate (7% of payout) */
+  kalshi_fee: number;
+  /** Minimum net spread after fees to alert (e.g., 0.02 = 2 cents) */
+  min_spread: number;
+  /** Market equivalence pairs to scan */
+  market_pairs: Array<{ polymarket_id: string; kalshi_id: string }>;
+}
+
 export type AnalyzerConfig =
   | CorrelationConfig
   | MomentumConfig
@@ -117,6 +205,14 @@ export type AnalyzerConfig =
   | RSIConfig
   | VolatilityConfig
   | WhaleActivityConfig
+  | EnsembleProbabilityConfig
+  | BiasCorrectionConfig
+  | BlackScholesConfig
+  | PoissonConfig
+  | NowcastDeviationConfig
+  | FedSentimentConfig
+  | FundingRegimeConfig
+  | SpreadScannerConfig
   | Record<string, unknown>;
 
 // ============================================================================

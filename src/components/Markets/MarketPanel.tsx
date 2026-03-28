@@ -187,6 +187,7 @@ export default function MarketPanel({
   const addNode = useStore((s: StoreState) => s.addNode);
   const addGroup = useStore((s: StoreState) => s.addGroup);
   const viewport = useStore((s: StoreState) => s.viewport);
+  const removeNode = useStore((s: StoreState) => s.removeNode);
 
   // Event-based market selection (from search)
   const [selectedEvent, setSelectedEvent] = useState<{
@@ -665,6 +666,7 @@ export default function MarketPanel({
 
     try {
       await invoke('remove_market_cmd', { nodeId });
+      removeNode(nodeId);
     } catch (err) {
       console.error('Failed to remove market:', err);
       alert('Failed to disconnect. Please try again.');

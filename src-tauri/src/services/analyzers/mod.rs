@@ -13,6 +13,14 @@ pub mod sentiment;
 pub mod rsi;
 pub mod volatility;
 pub mod whale_activity;
+pub mod ensemble_probability;
+pub mod bias_correction;
+pub mod black_scholes;
+pub mod poisson;
+pub mod nowcast_deviation;
+pub mod fed_sentiment;
+pub mod funding_regime;
+pub mod spread_scanner;
 
 use crate::models::analyzer_node::{AnalyzerNode, AnalyzerResult, AnalyzerType};
 use crate::models::TradingSignal;
@@ -129,6 +137,78 @@ pub fn create_analyzer(analyzer_node: &AnalyzerNode) -> Result<Box<dyn AnalyzerI
             let config = serde_json::from_value(analyzer_node.config.clone())
                 .map_err(|e| format!("Invalid whale activity config: {}", e))?;
             Ok(Box::new(whale_activity::WhaleActivityAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::EnsembleProbability => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid ensemble probability config: {}", e))?;
+            Ok(Box::new(ensemble_probability::EnsembleProbabilityAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::BiasCorrection => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid bias correction config: {}", e))?;
+            Ok(Box::new(bias_correction::BiasCorrectionAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::BlackScholes => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid Black-Scholes config: {}", e))?;
+            Ok(Box::new(black_scholes::BlackScholesAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::Poisson => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid Poisson config: {}", e))?;
+            Ok(Box::new(poisson::PoissonAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::NowcastDeviation => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid nowcast deviation config: {}", e))?;
+            Ok(Box::new(nowcast_deviation::NowcastDeviationAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::FedSentiment => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid Fed sentiment config: {}", e))?;
+            Ok(Box::new(fed_sentiment::FedSentimentAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::FundingRegime => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid funding regime config: {}", e))?;
+            Ok(Box::new(funding_regime::FundingRegimeAnalyzer::new(
+                analyzer_node.id.clone(),
+                analyzer_node.node_id.clone(),
+                config,
+            )))
+        }
+        AnalyzerType::SpreadScanner => {
+            let config = serde_json::from_value(analyzer_node.config.clone())
+                .map_err(|e| format!("Invalid spread scanner config: {}", e))?;
+            Ok(Box::new(spread_scanner::SpreadScannerAnalyzer::new(
                 analyzer_node.id.clone(),
                 analyzer_node.node_id.clone(),
                 config,

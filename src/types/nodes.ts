@@ -147,6 +147,30 @@ export enum AnalyzerType {
   
   /** Whale activity and trade spike detector */
   WhaleActivity = 'WhaleActivity',
+  
+  /** Ensemble Probability - Weather ensemble → probability calculation */
+  EnsembleProbability = 'EnsembleProbability',
+  
+  /** Bias Correction - Historical model bias adjustment */
+  BiasCorrection = 'BiasCorrection',
+  
+  /** Black-Scholes - Options-based probability pricing */
+  BlackScholes = 'BlackScholes',
+  
+  /** Poisson - Count process modeling (tweets, events) */
+  Poisson = 'Poisson',
+  
+  /** Nowcast Deviation - Cleveland Fed vs market deviation */
+  NowcastDeviation = 'NowcastDeviation',
+  
+  /** Fed Sentiment - Hawkish/dovish classification */
+  FedSentiment = 'FedSentiment',
+  
+  /** Funding Regime - Crypto funding rate regime detection */
+  FundingRegime = 'FundingRegime',
+  
+  /** Spread Scanner - Cross-platform arbitrage spread detection */
+  SpreadScanner = 'SpreadScanner',
 }
 
 /**

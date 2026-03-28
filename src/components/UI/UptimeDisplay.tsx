@@ -71,16 +71,43 @@ function SessionTimeline({ sessions, period, currentSessionId }: {
   const now = Date.now();
   const rangeStart = now - period * 86400 * 1000;
 
+  // Merge overlapping sessions to avoid double-counting
+  const mergedSessions = useMemo(() => {
+    const sorted = [...sessions].sort((a, b) => a.started_at - b.started_at);
+    if (sorted.length === 0) return [];
+    
+    const merged: Session[] = [];
+    let current = { ...sorted[0] };
+    
+    for (let i = 1; i < sorted.length; i++) {
+      const next = sorted[i];
+      const currentEnd = current.ended_at ?? Infinity;
+      const nextStart = next.started_at;
+      
+      if (nextStart <= currentEnd) {
+        // Overlap - extend current session if next ends later
+        if (next.ended_at && next.ended_at > (current.ended_at ?? -1)) {
+          current.ended_at = next.ended_at;
+        }
+      } else {
+        merged.push(current);
+        current = { ...next };
+      }
+    }
+    merged.push(current);
+    return merged;
+  }, [sessions]);
+
   // Compute total uptime within the period
   const totalUptimeMs = useMemo(() => {
     let total = 0;
-    for (const s of sessions) {
+    for (const s of mergedSessions) {
       const start = Math.max(s.started_at * 1000, rangeStart);
       const end = s.ended_at ? Math.min(s.ended_at * 1000, now) : now;
       if (end > start) total += end - start;
     }
     return total;
-  }, [sessions, rangeStart, now]);
+  }, [mergedSessions, rangeStart, now]);
 
   const totalPeriodMs = period * 86400 * 1000;
   const uptimePercent = totalPeriodMs > 0 ? ((totalUptimeMs / totalPeriodMs) * 100).toFixed(1) : '0.0';
@@ -94,8 +121,8 @@ function SessionTimeline({ sessions, period, currentSessionId }: {
     labels.push({ x, text: formatDateShort(new Date(t)) });
   }
 
-  // Render session bars
-  const bars = sessions.map((s) => {
+  // Render session bars (using merged sessions)
+  const bars = mergedSessions.map((s) => {
     const startMs = Math.max(s.started_at * 1000, rangeStart);
     const endMs = s.ended_at ? Math.min(s.ended_at * 1000, now) : now;
     if (endMs <= startMs) return null;

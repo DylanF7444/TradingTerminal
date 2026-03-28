@@ -11,7 +11,16 @@ import {
   Gauge,
   GitBranch,
   Calculator,
-  Waves
+  Waves,
+  Cloud,
+  Target,
+  LineChart,
+  Hash,
+  Scale,
+  DollarSign,
+  Coins,
+  ArrowLeftRight,
+  Trash2
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { AnalyzerType, Node, NodeId, NodeType } from '../../types/nodes';
@@ -85,6 +94,62 @@ const ANALYZER_TYPE_METADATA: Record<AnalyzerType, {
     description: 'Detect large trades and trade spikes',
     color: 'text-violet-400',
     defaultConfig: { threshold: 10000, windowSize: 60, sensitivity: 0.5, minTrades: 10 }
+  },
+  [AnalyzerType.EnsembleProbability]: {
+    label: 'Ensemble Probability',
+    icon: Cloud,
+    description: 'Convert weather ensemble forecasts to probability distributions',
+    color: 'text-cyan-400',
+    defaultConfig: { ensembleCount: 31, bucketMin: 75, bucketMax: 80, minEdgeThreshold: 0.08 }
+  },
+  [AnalyzerType.BiasCorrection]: {
+    label: 'Bias Correction',
+    icon: Target,
+    description: 'Apply historical bias corrections to forecasts',
+    color: 'text-teal-400',
+    defaultConfig: { mode: 'additive', cityCorrections: {}, lookbackDays: 30 }
+  },
+  [AnalyzerType.BlackScholes]: {
+    label: 'Black-Scholes',
+    icon: LineChart,
+    description: 'Options-implied probability via N(d2) calculation',
+    color: 'text-emerald-400',
+    defaultConfig: { riskFreeRate: 0.05, useImpliedVol: true, volLookbackDays: 30, minEdgeThreshold: 0.05 }
+  },
+  [AnalyzerType.Poisson]: {
+    label: 'Poisson',
+    icon: Hash,
+    description: 'Count process modeling for events (tweets, transactions)',
+    color: 'text-pink-400',
+    defaultConfig: { lambda: 50, bucketMin: 45, bucketMax: 55, decayFactor: 0.3 }
+  },
+  [AnalyzerType.NowcastDeviation]: {
+    label: 'Nowcast Deviation',
+    icon: Scale,
+    description: 'Compare economic nowcasts to market expectations',
+    color: 'text-amber-400',
+    defaultConfig: { nowcastSource: 'ClevelandFed', assumedStd: 0.1, minDeviation: 0.05 }
+  },
+  [AnalyzerType.FedSentiment]: {
+    label: 'Fed Sentiment',
+    icon: DollarSign,
+    description: 'Classify Fed speeches as hawkish or dovish',
+    color: 'text-rose-400',
+    defaultConfig: { hawkishKeywords: ['inflation', 'tightening'], dovishKeywords: ['employment', 'accommodative'], decayHalfLife: 72, minSignalThreshold: 0.3 }
+  },
+  [AnalyzerType.FundingRegime]: {
+    label: 'Funding Regime',
+    icon: Coins,
+    description: 'Detect extreme funding rate regimes in crypto perpetuals',
+    color: 'text-lime-400',
+    defaultConfig: { extremePositive: 0.55, extremeNegative: -0.30, probabilityAdjustment: 0.05, assets: ['BTC', 'ETH'] }
+  },
+  [AnalyzerType.SpreadScanner]: {
+    label: 'Spread Scanner',
+    icon: ArrowLeftRight,
+    description: 'Scan for cross-platform arbitrage spreads',
+    color: 'text-fuchsia-400',
+    defaultConfig: { polymarketFee: 0, kalshiFee: 0.07, minSpread: 0.02, marketPairs: [] }
   }
 };
 
@@ -100,6 +165,12 @@ export default function AnalyzerPanel({
   
   const addNode = useStore((state) => state.addNode);
   const selectNode = useStore((state) => state.selectNode);
+  const removeNode = useStore((state) => state.removeNode);
+
+  const handleRemove = useCallback(async (nodeId: string) => {
+    if (!confirm('Are you sure you want to remove this analyzer?')) return;
+    removeNode(nodeId);
+  }, [removeNode]);
 
   const handleTypeSelect = useCallback((type: AnalyzerType) => {
     setSelectedType(type);
@@ -446,8 +517,15 @@ export default function AnalyzerPanel({
                       <div className="text-xs text-gray-500 flex items-center gap-1">
                         <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
                         {meta?.label || 'Analyzer'}
-                      </div>
                     </div>
+                    <button
+                      onClick={() => handleRemove(analyzer.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded transition-all"
+                      title="Remove analyzer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                   </div>
                 </div>
               );

@@ -79,13 +79,25 @@ const TYPE_DISPLAY_NAMES: Record<string, string> = {
   // Markets
   Polymarket: 'Polymarket',
   Kalshi: 'Kalshi',
-  // Analyzers
+  // Analyzers - existing
   Correlation: 'Correlation Analyzer',
+  Momentum: 'Momentum Analyzer',
   MovingAverage: 'Moving Average',
   Sentiment: 'Sentiment Analyzer',
   Arbitrage: 'Arbitrage Detector',
+  RSI: 'RSI Oscillator',
+  Volatility: 'Volatility Analyzer',
   Custom: 'Custom Analyzer',
   WhaleActivity: 'Whale Activity Detector',
+  // Analyzers - new pipeline types
+  EnsembleProbability: 'Ensemble Probability',
+  BiasCorrection: 'Bias Correction',
+  BlackScholes: 'Black-Scholes Pricer',
+  Poisson: 'Poisson Counter',
+  NowcastDeviation: 'Nowcast Deviation',
+  FedSentiment: 'Fed Sentiment',
+  FundingRegime: 'Funding Regime',
+  SpreadScanner: 'Spread Scanner',
   // Alerts
   PriceThreshold: 'Price Threshold Alert',
   CorrelationChange: 'Correlation Change Alert',

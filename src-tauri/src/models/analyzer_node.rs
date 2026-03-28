@@ -73,6 +73,22 @@ pub enum AnalyzerType {
     Custom,
     /// Detects whale activity and trade spikes
     WhaleActivity,
+    /// Weather ensemble → probability calculation
+    EnsembleProbability,
+    /// Historical model bias adjustment
+    BiasCorrection,
+    /// Options-based probability pricing (Black-Scholes N(d2))
+    BlackScholes,
+    /// Count process modeling (tweets, events)
+    Poisson,
+    /// Cleveland Fed vs market deviation
+    NowcastDeviation,
+    /// Hawkish/dovish Fed speech classification
+    FedSentiment,
+    /// Crypto funding rate regime detection
+    FundingRegime,
+    /// Cross-platform arbitrage spread detection
+    SpreadScanner,
 }
 
 impl std::fmt::Display for AnalyzerType {
@@ -86,6 +102,14 @@ impl std::fmt::Display for AnalyzerType {
             AnalyzerType::Volatility => write!(f, "Volatility"),
             AnalyzerType::Custom => write!(f, "Custom"),
             AnalyzerType::WhaleActivity => write!(f, "WhaleActivity"),
+            AnalyzerType::EnsembleProbability => write!(f, "EnsembleProbability"),
+            AnalyzerType::BiasCorrection => write!(f, "BiasCorrection"),
+            AnalyzerType::BlackScholes => write!(f, "BlackScholes"),
+            AnalyzerType::Poisson => write!(f, "Poisson"),
+            AnalyzerType::NowcastDeviation => write!(f, "NowcastDeviation"),
+            AnalyzerType::FedSentiment => write!(f, "FedSentiment"),
+            AnalyzerType::FundingRegime => write!(f, "FundingRegime"),
+            AnalyzerType::SpreadScanner => write!(f, "SpreadScanner"),
         }
     }
 }
@@ -102,6 +126,14 @@ impl AnalyzerType {
             "Volatility" => Some(AnalyzerType::Volatility),
             "Custom" => Some(AnalyzerType::Custom),
             "WhaleActivity" => Some(AnalyzerType::WhaleActivity),
+            "EnsembleProbability" => Some(AnalyzerType::EnsembleProbability),
+            "BiasCorrection" => Some(AnalyzerType::BiasCorrection),
+            "BlackScholes" => Some(AnalyzerType::BlackScholes),
+            "Poisson" => Some(AnalyzerType::Poisson),
+            "NowcastDeviation" => Some(AnalyzerType::NowcastDeviation),
+            "FedSentiment" => Some(AnalyzerType::FedSentiment),
+            "FundingRegime" => Some(AnalyzerType::FundingRegime),
+            "SpreadScanner" => Some(AnalyzerType::SpreadScanner),
             _ => None,
         }
     }
@@ -282,6 +314,229 @@ impl Default for WhaleActivityConfig {
     }
 }
 
+// ============================================================================
+// NEW ANALYZER CONFIGS FOR PREDICTION MARKET PIPELINES
+// ============================================================================
+
+/// Configuration for EnsembleProbability analyzer (Weather markets)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsembleProbabilityConfig {
+    /// Number of ensemble members (default: 31 for GFS)
+    pub ensemble_size: usize,
+    /// Temperature unit: "fahrenheit" or "celsius"
+    pub temperature_unit: String,
+    /// Target bucket boundaries [lower, upper] for probability calculation
+    pub target_buckets: Vec<(f64, f64)>,
+    /// Minimum probability edge vs market (e.g., 0.08 = 8%)
+    pub min_edge_threshold: f64,
+    /// City station codes for NWS verification
+    pub station_codes: Vec<String>,
+}
+
+impl Default for EnsembleProbabilityConfig {
+    fn default() -> Self {
+        Self {
+            ensemble_size: 31,
+            temperature_unit: "fahrenheit".to_string(),
+            target_buckets: vec![(75.0, 80.0), (80.0, 85.0), (85.0, 90.0)],
+            min_edge_threshold: 0.08,
+            station_codes: vec!["OKX".to_string()], // NYC
+        }
+    }
+}
+
+/// Configuration for BiasCorrection analyzer (Weather markets)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BiasCorrectionConfig {
+    /// Lookback period in days for bias calculation
+    pub lookback_days: usize,
+    /// City identifier for per-city bias
+    pub city: String,
+    /// Month for seasonal adjustment (1-12, 0 = all)
+    pub month: u8,
+    /// Minimum samples required for valid bias estimate
+    pub min_samples: usize,
+    /// Apply additive or multiplicative correction
+    pub correction_type: String,
+}
+
+impl Default for BiasCorrectionConfig {
+    fn default() -> Self {
+        Self {
+            lookback_days: 730, // 2 years
+            city: "NYC".to_string(),
+            month: 0, // All months
+            min_samples: 30,
+            correction_type: "additive".to_string(),
+        }
+    }
+}
+
+/// Configuration for BlackScholes analyzer (Crypto options pricing)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlackScholesConfig {
+    /// Risk-free rate (annualized, e.g., 0.05 = 5%)
+    pub risk_free_rate: f64,
+    /// Default IV to use if market IV unavailable (e.g., 0.80 = 80%)
+    pub default_iv: f64,
+    /// Minimum probability edge vs market price
+    pub min_edge_threshold: f64,
+    /// Asset for pricing (BTC, ETH, etc.)
+    pub asset: String,
+    /// Use DVOL index as IV source
+    pub use_dvol: bool,
+}
+
+impl Default for BlackScholesConfig {
+    fn default() -> Self {
+        Self {
+            risk_free_rate: 0.05,
+            default_iv: 0.80,
+            min_edge_threshold: 0.05, // 5 cents
+            asset: "BTC".to_string(),
+            use_dvol: true,
+        }
+    }
+}
+
+/// Configuration for Poisson analyzer (Tweet/event count markets)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoissonConfig {
+    /// Historical window for λ estimation (days)
+    pub lookback_days: usize,
+    /// Exponential decay factor for recent data (0.0-1.0)
+    pub decay_factor: f64,
+    /// Bucket boundaries for count probability
+    pub buckets: Vec<(u64, u64)>,
+    /// Minimum edge threshold
+    pub min_edge_threshold: f64,
+    /// Account/entity being tracked
+    pub entity_id: String,
+}
+
+impl Default for PoissonConfig {
+    fn default() -> Self {
+        Self {
+            lookback_days: 28, // 4 weeks
+            decay_factor: 0.3,
+            buckets: vec![(200, 249), (250, 299), (300, 349)],
+            min_edge_threshold: 0.10, // 10 cents for tweet markets
+            entity_id: "elonmusk".to_string(),
+        }
+    }
+}
+
+/// Configuration for NowcastDeviation analyzer (CPI/NFP markets)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NowcastDeviationConfig {
+    /// Indicator type: "cpi", "core_cpi", "pce", "core_pce", "nfp"
+    pub indicator: String,
+    /// Standard deviation for probability distribution
+    pub std_dev: f64,
+    /// Minimum deviation to trigger signal (percentage points)
+    pub min_deviation: f64,
+    /// Days before release to start monitoring
+    pub pre_release_days: usize,
+}
+
+impl Default for NowcastDeviationConfig {
+    fn default() -> Self {
+        Self {
+            indicator: "cpi".to_string(),
+            std_dev: 0.15, // ~0.15% for CPI
+            min_deviation: 0.10, // 0.1 percentage points
+            pre_release_days: 7,
+        }
+    }
+}
+
+/// Configuration for FedSentiment analyzer (FOMC markets)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedSentimentConfig {
+    /// Hawkish keywords and their weights
+    pub hawkish_keywords: Vec<(String, f64)>,
+    /// Dovish keywords and their weights
+    pub dovish_keywords: Vec<(String, f64)>,
+    /// Threshold for classification (-1.0 to 1.0)
+    pub hawkish_threshold: f64,
+    pub dovish_threshold: f64,
+    /// Decay factor for older speeches
+    pub decay_factor: f64,
+}
+
+impl Default for FedSentimentConfig {
+    fn default() -> Self {
+        Self {
+            hawkish_keywords: vec![
+                ("inflation".to_string(), 0.3),
+                ("rate hike".to_string(), 0.5),
+                ("tighten".to_string(), 0.4),
+                ("restrictive".to_string(), 0.4),
+            ],
+            dovish_keywords: vec![
+                ("rate cut".to_string(), 0.5),
+                ("accommodate".to_string(), 0.4),
+                ("labor market slack".to_string(), 0.4),
+                ("pause".to_string(), 0.3),
+            ],
+            hawkish_threshold: 0.3,
+            dovish_threshold: -0.3,
+            decay_factor: 0.9,
+        }
+    }
+}
+
+/// Configuration for FundingRegime analyzer (Crypto funding rate)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingRegimeConfig {
+    /// Extreme positive funding threshold (annualized %)
+    pub extreme_positive: f64,
+    /// Extreme negative funding threshold (annualized %)
+    pub extreme_negative: f64,
+    /// Probability adjustment when funding is extreme
+    pub probability_adjustment: f64,
+    /// Assets to monitor
+    pub assets: Vec<String>,
+}
+
+impl Default for FundingRegimeConfig {
+    fn default() -> Self {
+        Self {
+            extreme_positive: 0.55, // 55% annualized
+            extreme_negative: -0.30, // -30% annualized
+            probability_adjustment: 0.05, // Adjust by 5%
+            assets: vec!["BTC".to_string(), "ETH".to_string()],
+        }
+    }
+}
+
+/// Configuration for SpreadScanner analyzer (Cross-platform arb)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpreadScannerConfig {
+    /// Market pairs to scan (Polymarket slug, Kalshi ticker)
+    pub market_pairs: Vec<(String, String)>,
+    /// Minimum spread after fees to trigger signal
+    pub min_spread: f64,
+    /// Kalshi fee rate (e.g., 0.07 for 7% of P*(1-P))
+    pub kalshi_fee_rate: f64,
+    /// Polymarket fee rate (usually 0)
+    pub polymarket_fee_rate: f64,
+    /// Scan interval in seconds
+    pub scan_interval_seconds: u64,
+}
+
+impl Default for SpreadScannerConfig {
+    fn default() -> Self {
+        Self {
+            market_pairs: Vec::new(),
+            min_spread: 0.03, // 3 cents minimum
+            kalshi_fee_rate: 0.07,
+            polymarket_fee_rate: 0.0,
+            scan_interval_seconds: 60,
+        }
+    }
+}
+
 /// Cached analysis result for UI display
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzerResult {
@@ -350,6 +605,14 @@ impl AnalyzerNode {
             AnalyzerType::Volatility => serde_json::to_value(VolatilityConfig::default()).unwrap(),
             AnalyzerType::Custom => serde_json::json!({}),
             AnalyzerType::WhaleActivity => serde_json::to_value(WhaleActivityConfig::default()).unwrap(),
+            AnalyzerType::EnsembleProbability => serde_json::to_value(EnsembleProbabilityConfig::default()).unwrap(),
+            AnalyzerType::BiasCorrection => serde_json::to_value(BiasCorrectionConfig::default()).unwrap(),
+            AnalyzerType::BlackScholes => serde_json::to_value(BlackScholesConfig::default()).unwrap(),
+            AnalyzerType::Poisson => serde_json::to_value(PoissonConfig::default()).unwrap(),
+            AnalyzerType::NowcastDeviation => serde_json::to_value(NowcastDeviationConfig::default()).unwrap(),
+            AnalyzerType::FedSentiment => serde_json::to_value(FedSentimentConfig::default()).unwrap(),
+            AnalyzerType::FundingRegime => serde_json::to_value(FundingRegimeConfig::default()).unwrap(),
+            AnalyzerType::SpreadScanner => serde_json::to_value(SpreadScannerConfig::default()).unwrap(),
         }
     }
 }

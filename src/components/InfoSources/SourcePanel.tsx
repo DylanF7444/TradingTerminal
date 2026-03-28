@@ -40,6 +40,7 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { InfoSourceType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
+import { useStore, type StoreState } from '../../store';
 
 interface SourcePanelProps {
   onAddSource?: (node: Node) => void;
@@ -252,17 +253,20 @@ export default function SourcePanel({
     }
   }, [selectedType, config, addSource, onAddSource]);
 
+  // Store actions
+  const removeNode = useStore((state: StoreState) => state.removeNode);
+
   // Remove source handler
   const handleRemove = useCallback(async (nodeId: string) => {
     if (!confirm('Are you sure you want to remove this data source?')) return;
     
     try {
       await invoke('remove_data_source_cmd', { nodeId });
-      // Parent should refresh the existingSources prop
+      removeNode(nodeId);
     } catch (err) {
       console.error('Failed to remove source:', err);
     }
-  }, []);
+  }, [removeNode]);
 
   // Render configuration form based on type
   const renderConfigForm = () => {

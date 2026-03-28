@@ -81,7 +81,10 @@ pub fn setup_schema(conn: &Connection) -> SqliteResult<()> {
     let _ = conn.execute("ALTER TABLE nodes ADD COLUMN size_height REAL", []);
 
     // Add retention_seconds column for auto-deletion (migration)
-    let _ = conn.execute("ALTER TABLE nodes ADD COLUMN retention_seconds INTEGER DEFAULT NULL", []);
+    let _ = conn.execute(
+        "ALTER TABLE nodes ADD COLUMN retention_seconds INTEGER DEFAULT NULL",
+        [],
+    );
 
     // Connections table - stores edges between nodes
     conn.execute(
@@ -606,7 +609,6 @@ pub fn update_node(conn: &Connection, node: &Node) -> SqliteResult<()> {
         ],
     )?;
 
-    
     Ok(())
 }
 
@@ -1034,12 +1036,10 @@ pub fn get_positions(
 
 /// Get a position by ID
 pub fn get_position_by_id(conn: &Connection, position_id: &str) -> SqliteResult<Option<Position>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM positions WHERE id = ?1"
-    )?;
-    
+    let mut stmt = conn.prepare("SELECT * FROM positions WHERE id = ?1")?;
+
     let mut rows = stmt.query(params![position_id])?;
-    
+
     if let Some(row) = rows.next()? {
         Ok(Some(Position {
             id: row.get(0)?,
@@ -1129,7 +1129,10 @@ pub fn insert_trade(conn: &Connection, trade: &TradeRecord) -> SqliteResult<()> 
 }
 
 /// Get trade history with optional limit
-pub fn get_trade_history(conn: &Connection, limit: Option<usize>) -> SqliteResult<Vec<TradeRecord>> {
+pub fn get_trade_history(
+    conn: &Connection,
+    limit: Option<usize>,
+) -> SqliteResult<Vec<TradeRecord>> {
     let limit_clause = limit.map(|l| format!(" LIMIT {}", l)).unwrap_or_default();
     let query = format!(
         "SELECT id, position_id, market_id, market_type, side, order_type, 
@@ -1137,7 +1140,7 @@ pub fn get_trade_history(conn: &Connection, limit: Option<usize>) -> SqliteResul
          FROM trades ORDER BY timestamp DESC{}",
         limit_clause
     );
-    
+
     let mut stmt = conn.prepare(&query)?;
     let trades = stmt
         .query_map([], |row| {
@@ -1158,7 +1161,7 @@ pub fn get_trade_history(conn: &Connection, limit: Option<usize>) -> SqliteResul
             })
         })?
         .collect::<SqliteResult<Vec<TradeRecord>>>()?;
-    
+
     Ok(trades)
 }
 
@@ -1212,11 +1215,11 @@ pub fn get_order_by_id(conn: &Connection, order_id: &str) -> SqliteResult<Option
     let mut stmt = conn.prepare(
         "SELECT id, market_id, market_type, side, order_type, size, price, 
                 filled_size, status, created_at, updated_at, metadata
-         FROM orders WHERE id = ?1"
+         FROM orders WHERE id = ?1",
     )?;
-    
+
     let mut rows = stmt.query(params![order_id])?;
-    
+
     if let Some(row) = rows.next()? {
         Ok(Some(OrderRecord {
             id: row.get(0)?,
@@ -1267,7 +1270,10 @@ pub fn cancel_order(conn: &Connection, order_id: &str) -> SqliteResult<bool> {
 }
 
 /// Get pending orders for a market
-pub fn get_pending_orders(conn: &Connection, market_id: Option<&str>) -> SqliteResult<Vec<OrderRecord>> {
+pub fn get_pending_orders(
+    conn: &Connection,
+    market_id: Option<&str>,
+) -> SqliteResult<Vec<OrderRecord>> {
     let query = if market_id.is_some() {
         "SELECT id, market_id, market_type, side, order_type, size, price, 
                 filled_size, status, created_at, updated_at, metadata
@@ -1277,7 +1283,7 @@ pub fn get_pending_orders(conn: &Connection, market_id: Option<&str>) -> SqliteR
                 filled_size, status, created_at, updated_at, metadata
          FROM orders WHERE status = 'pending' ORDER BY created_at DESC"
     };
-    
+
     let mut stmt = conn.prepare(query)?;
     let orders = if let Some(mid) = market_id {
         stmt.query_map(params![mid], |row| {
@@ -1316,7 +1322,7 @@ pub fn get_pending_orders(conn: &Connection, market_id: Option<&str>) -> SqliteR
         })?
         .collect::<SqliteResult<Vec<OrderRecord>>>()?
     };
-    
+
     Ok(orders)
 }
 
@@ -1325,9 +1331,9 @@ pub fn get_pending_orders(conn: &Connection, market_id: Option<&str>) -> SqliteR
 pub fn calculate_balance(conn: &Connection, market_type: &str) -> SqliteResult<f64> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(SUM(realized_pnl), 0.0) FROM positions 
-         WHERE market_type = ?1 AND status = 'closed'"
+         WHERE market_type = ?1 AND status = 'closed'",
     )?;
-    
+
     let balance: f64 = stmt.query_row(params![market_type], |row| row.get(0))?;
     Ok(balance)
 }
@@ -1544,7 +1550,11 @@ fn deserialize_node(row: &Row) -> Node {
 
 /// Set the retention period (in seconds) for a node's stored data.
 /// Pass None to disable auto-deletion (keep data forever).
-pub fn set_node_retention(conn: &Connection, node_id: &str, retention_seconds: Option<i64>) -> SqliteResult<()> {
+pub fn set_node_retention(
+    conn: &Connection,
+    node_id: &str,
+    retention_seconds: Option<i64>,
+) -> SqliteResult<()> {
     let now = Utc::now().timestamp();
     conn.execute(
         "UPDATE nodes SET retention_seconds = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1571,9 +1581,12 @@ pub fn prune_expired_data(conn: &Connection) -> SqliteResult<usize> {
         "SELECT id, retention_seconds FROM nodes WHERE retention_seconds IS NOT NULL AND archived = 0"
     )?;
 
-    let nodes: Vec<(String, i64)> = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?.filter_map(|r| r.ok()).collect();
+    let nodes: Vec<(String, i64)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     let mut total_deleted = 0usize;
 
@@ -2090,7 +2103,13 @@ pub struct Session {
 }
 
 /// Insert a new session when the app starts
+/// Also closes any sessions that were left open (e.g., from a crash)
 pub fn insert_session(conn: &Connection, id: &str, started_at: i64) -> SqliteResult<()> {
+    // Close any sessions that don't have an ended_at (left open from previous run)
+    conn.execute(
+        "UPDATE sessions SET ended_at = ?1 WHERE ended_at IS NULL",
+        params![started_at],
+    )?;
     conn.execute(
         "INSERT INTO sessions (id, started_at) VALUES (?1, ?2)",
         params![id, started_at],
@@ -2144,7 +2163,9 @@ pub struct NodeGroup {
 
 /// Insert a new node group
 pub fn insert_node_group(conn: &Connection, group: &NodeGroup) -> SqliteResult<()> {
-    let origin_data_str = group.origin_data.as_ref()
+    let origin_data_str = group
+        .origin_data
+        .as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_default());
 
     conn.execute(
@@ -2177,7 +2198,9 @@ pub fn insert_node_group(conn: &Connection, group: &NodeGroup) -> SqliteResult<(
 
 /// Update an existing node group
 pub fn update_node_group(conn: &Connection, group: &NodeGroup) -> SqliteResult<()> {
-    let origin_data_str = group.origin_data.as_ref()
+    let origin_data_str = group
+        .origin_data
+        .as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_default());
 
     conn.execute(
@@ -2200,10 +2223,7 @@ pub fn update_node_group(conn: &Connection, group: &NodeGroup) -> SqliteResult<(
 
 /// Delete a node group (members are deleted via cascade)
 pub fn delete_node_group(conn: &Connection, group_id: &str) -> SqliteResult<()> {
-    conn.execute(
-        "DELETE FROM node_groups WHERE id = ?1",
-        params![group_id],
-    )?;
+    conn.execute("DELETE FROM node_groups WHERE id = ?1", params![group_id])?;
     Ok(())
 }
 
@@ -2228,15 +2248,13 @@ pub fn get_node_group_by_id(conn: &Connection, group_id: &str) -> SqliteResult<O
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
             })
-        }
+        },
     );
 
     match result {
         Ok(mut group) => {
             // Get member IDs
-            let mut stmt = conn.prepare(
-                "SELECT node_id FROM group_members WHERE group_id = ?1"
-            )?;
+            let mut stmt = conn.prepare("SELECT node_id FROM group_members WHERE group_id = ?1")?;
             let member_ids: Vec<String> = stmt
                 .query_map(params![group_id], |row| row.get(0))?
                 .filter_map(|r| r.ok())
@@ -2253,32 +2271,34 @@ pub fn get_node_group_by_id(conn: &Connection, group_id: &str) -> SqliteResult<O
 pub fn get_all_node_groups(conn: &Connection) -> SqliteResult<Vec<NodeGroup>> {
     let mut stmt = conn.prepare(
         "SELECT id, label, color, padding, origin_type, origin_data, created_at, updated_at
-         FROM node_groups"
+         FROM node_groups",
     )?;
 
-    let groups: Vec<NodeGroup> = stmt.query_map([], |row| {
-        let origin_data_str: Option<String> = row.get(5)?;
-        let origin_data = origin_data_str.and_then(|s| serde_json::from_str(&s).ok());
+    let groups: Vec<NodeGroup> = stmt
+        .query_map([], |row| {
+            let origin_data_str: Option<String> = row.get(5)?;
+            let origin_data = origin_data_str.and_then(|s| serde_json::from_str(&s).ok());
 
-        Ok(NodeGroup {
-            id: row.get(0)?,
-            label: row.get(1)?,
-            color: row.get(2)?,
-            padding: row.get(3)?,
-            origin_type: row.get(4)?,
-            origin_data,
-            member_ids: vec![], // Will be populated below
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+            Ok(NodeGroup {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                color: row.get(2)?,
+                padding: row.get(3)?,
+                origin_type: row.get(4)?,
+                origin_data,
+                member_ids: vec![], // Will be populated below
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Populate member IDs for each group
     let mut result = Vec::with_capacity(groups.len());
     for mut group in groups {
-        let mut member_stmt = conn.prepare(
-            "SELECT node_id FROM group_members WHERE group_id = ?1"
-        )?;
+        let mut member_stmt =
+            conn.prepare("SELECT node_id FROM group_members WHERE group_id = ?1")?;
         let member_ids: Vec<String> = member_stmt
             .query_map(params![&group.id], |row| row.get(0))?
             .filter_map(|r| r.ok())
@@ -2291,7 +2311,11 @@ pub fn get_all_node_groups(conn: &Connection) -> SqliteResult<Vec<NodeGroup>> {
 }
 
 /// Add nodes to a group
-pub fn add_nodes_to_group(conn: &Connection, group_id: &str, node_ids: &[String]) -> SqliteResult<()> {
+pub fn add_nodes_to_group(
+    conn: &Connection,
+    group_id: &str,
+    node_ids: &[String],
+) -> SqliteResult<()> {
     let now = chrono::Utc::now().timestamp_millis();
 
     for node_id in node_ids {
@@ -2312,7 +2336,11 @@ pub fn add_nodes_to_group(conn: &Connection, group_id: &str, node_ids: &[String]
 }
 
 /// Remove nodes from a group
-pub fn remove_nodes_from_group(conn: &Connection, group_id: &str, node_ids: &[String]) -> SqliteResult<()> {
+pub fn remove_nodes_from_group(
+    conn: &Connection,
+    group_id: &str,
+    node_ids: &[String],
+) -> SqliteResult<()> {
     for node_id in node_ids {
         conn.execute(
             "DELETE FROM group_members WHERE group_id = ?1 AND node_id = ?2",
