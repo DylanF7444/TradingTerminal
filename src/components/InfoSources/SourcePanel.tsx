@@ -146,8 +146,18 @@ export default function SourcePanel({
   const [config, setConfig] = useState<any>({});
   const [localError, setLocalError] = useState<string | null>(null);
   
+  // Weather location validation state
+  const [locationValidation, setLocationValidation] = useState<{
+    status: 'idle' | 'validating' | 'valid' | 'invalid';
+    resolvedLocation?: string;
+    country?: string;
+    lat?: number;
+    lon?: number;
+    error?: string;
+  }>({ status: 'idle' });
+  
   // Use custom hook for backend communication
-  const { execute: addSource, loading: isSubmitting, error: apiError } = useTauriCommand<Node, {
+  const { execute: addSource, loading: isSubmitting, error: apiError, reset: resetAddSource } = useTauriCommand<Node, {
     sourceType: string;
     config: Record<string, any>;
   }>('add_data_source_cmd');
@@ -158,18 +168,59 @@ export default function SourcePanel({
       setSelectedType(null);
       setConfig({});
       setLocalError(null);
+      setLocationValidation({ status: 'idle' });
+      resetAddSource();
     }
-  }, [isModalOpen]);
+  }, [isModalOpen, resetAddSource]);
 
   // Handle type selection
   const handleTypeSelect = useCallback((type: InfoSourceType) => {
     setSelectedType(type);
     setConfig(SOURCE_TYPE_METADATA[type].defaultConfig);
+    setLocationValidation({ status: 'idle' });
   }, []);
 
   // Handle config changes
   const handleConfigChange = useCallback((key: string, value: any) => {
     setConfig((prev: any) => ({ ...prev, [key]: value }));
+    // Reset location validation when location changes
+    if (key === 'location') {
+      setLocationValidation({ status: 'idle' });
+    }
+  }, []);
+
+  // Validate weather location via Open-Meteo geocoding API
+  const validateLocation = useCallback(async (location: string) => {
+    if (!location || location.trim().length < 2) {
+      setLocationValidation({ status: 'invalid', error: 'Location must be at least 2 characters' });
+      return false;
+    }
+
+    setLocationValidation({ status: 'validating' });
+
+    try {
+      const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location.trim())}&count=1&language=en&format=json`;
+      const response = await fetch(geoUrl);
+      const data = await response.json();
+
+      if (!data.results || data.results.length === 0) {
+        setLocationValidation({ status: 'invalid', error: `No location found for "${location}"` });
+        return false;
+      }
+
+      const result = data.results[0];
+      setLocationValidation({
+        status: 'valid',
+        resolvedLocation: result.name,
+        country: result.country,
+        lat: result.latitude,
+        lon: result.longitude,
+      });
+      return true;
+    } catch (err) {
+      setLocationValidation({ status: 'invalid', error: 'Failed to validate location. Check your internet connection.' });
+      return false;
+    }
   }, []);
 
   // Validate and submit
@@ -217,6 +268,18 @@ export default function SourcePanel({
       return;
     }
 
+    // Weather location validation - require user to verify location first
+    if (selectedType === InfoSourceType.Weather) {
+      if (!config.location || config.location.trim().length < 2) {
+        setLocalError('Please enter a valid city or location');
+        return;
+      }
+      if (locationValidation.status !== 'valid') {
+        setLocalError('Please verify the location first using the "Verify Location" button');
+        return;
+      }
+    }
+
     try {
       // Transform config for backend (arrays from comma-separated strings)
       const transformedConfig = {
@@ -251,7 +314,7 @@ export default function SourcePanel({
     } catch (err) {
       console.error('Failed to add source:', err);
     }
-  }, [selectedType, config, addSource, onAddSource]);
+  }, [selectedType, config, locationValidation, addSource, onAddSource]);
 
   // Store actions
   const removeNode = useStore((state: StoreState) => state.removeNode);
@@ -416,14 +479,47 @@ export default function SourcePanel({
           <div className="space-y-4">
             <div>
               <label className={labelClass}>Location</label>
-              <input
-                type="text"
-                value={config.location || ''}
-                onChange={(e) => handleConfigChange('location', e.target.value)}
-                placeholder="New York, London, Tokyo..."
-                className={commonInputClass}
-              />
-              <p className="text-xs text-gray-500 mt-1">City name — geocoded automatically via Open-Meteo (free, no API key)</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={config.location || ''}
+                  onChange={(e) => handleConfigChange('location', e.target.value)}
+                  placeholder="New York, London, Tokyo..."
+                  className={`${commonInputClass} flex-1`}
+                />
+                <button
+                  type="button"
+                  onClick={() => validateLocation(config.location)}
+                  disabled={locationValidation.status === 'validating' || !config.location || config.location.trim().length < 2}
+                  className="px-3 py-2 rounded bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium transition-colors whitespace-nowrap"
+                >
+                  {locationValidation.status === 'validating' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    'Verify'
+                  )}
+                </button>
+              </div>
+              
+              {/* Location validation feedback */}
+              {locationValidation.status === 'valid' && (
+                <div className="flex items-center gap-2 mt-2 text-sm text-green-400">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    Found: <strong>{locationValidation.resolvedLocation}</strong>
+                    {locationValidation.country && `, ${locationValidation.country}`}
+                  </span>
+                </div>
+              )}
+              {locationValidation.status === 'invalid' && (
+                <div className="flex items-center gap-2 mt-2 text-sm text-red-400">
+                  <AlertCircle className="w-4 h-4" />
+                  <span>{locationValidation.error}</span>
+                </div>
+              )}
+              {locationValidation.status === 'idle' && (
+                <p className="text-xs text-gray-500 mt-1">Enter a city name and click "Verify" to confirm the location</p>
+              )}
             </div>
 
             <div>

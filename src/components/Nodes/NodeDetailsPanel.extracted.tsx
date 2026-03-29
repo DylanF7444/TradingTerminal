@@ -65,7 +65,7 @@ function getMonitoringInfo(
       CommodityPrices:    { label: 'Monitoring Commodities',  field: 'symbols',    fallback: ['Gold', 'Oil', 'Silver'] },
       NewsSource:         { label: 'News Sources',            field: 'feeds',      fallback: ['Reuters', 'AP', 'Bloomberg'] },
       SocialMedia:        { label: 'Social Platforms',         field: 'platforms',  fallback: ['Twitter/X', 'Reddit'] },
-      Weather:            { label: 'Locations',               field: 'locations',  fallback: ['NYC', 'London'] },
+      Weather:            { label: 'Location',                field: 'location',   fallback: ['Unknown'] },
       Livestream:         { label: 'Platforms',               field: 'platforms',  fallback: ['YouTube', 'Twitch'] },
       EconomicIndicators: { label: 'Indicators',             field: 'indicators', fallback: ['CPI', 'Unemployment', 'GDP'] },
       OnChainData:        { label: 'Metrics',                field: 'metrics',    fallback: ['Transaction Volume', 'Gas Fees'] },
@@ -74,9 +74,18 @@ function getMonitoringInfo(
 
     const config = MONITORING_CONFIG[subtype];
     if (config) {
+      const fieldValue = metadata[config.field];
+      let items: string[];
+      if (Array.isArray(fieldValue)) {
+        items = fieldValue;
+      } else if (typeof fieldValue === 'string') {
+        items = [fieldValue];
+      } else {
+        items = metadata.symbols || metadata.sources || config.fallback;
+      }
       return {
         label: config.label,
-        items: metadata[config.field] || metadata.symbols || metadata.sources || config.fallback,
+        items,
       };
     }
 

@@ -996,7 +996,7 @@ export default function Canvas({
 
       {/* Coordinate display */}
       {mousePosition && (
-        <div className="absolute top-4 left-4 flex gap-4 bg-gray-900/90 backdrop-blur-sm px-3 py-2 rounded-lg shadow-lg border border-gray-700">
+        <div className="absolute top-4 left-4 flex gap-4 bg-gray-900/90 backdrop-blur-sm px-3 py-2 rounded-lg shadow-lg border border-gray-700 z-50">
           <div className="flex items-center gap-2">
             <span className="text-gray-400 text-xs">X:</span>
             <span className="text-cyan-400 font-mono text-sm font-medium">
