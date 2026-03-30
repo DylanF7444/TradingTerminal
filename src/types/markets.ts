@@ -1217,9 +1217,9 @@ export interface OutcomeSelection {
 
 /**
  * A single market within an event search result.
- * Mirrors Rust EventMarketItem in src-tauri/src/commands/markets.rs
+ * Mirrors Rust SeriesMarketItem in src-tauri/src/commands/markets.rs
  */
-export interface EventMarketItem {
+export interface SeriesMarketItem {
   /** Market identifier (CLOB token ID for Polymarket, ticker for Kalshi) */
   id: string;
   /** Human-readable market title */
@@ -1247,38 +1247,92 @@ export interface EventMarketItem {
 }
 
 /**
- * An event search result containing nested markets.
- * Mirrors Rust EventSearchResult in src-tauri/src/commands/markets.rs
+ * A series search result containing nested markets.
+ * Mirrors Rust SeriesSearchResult in src-tauri/src/commands/markets.rs
  */
-export interface EventSearchResult {
-  /** Event identifier */
+export interface SeriesSearchResult {
+  /** Series identifier */
   id: string;
-  /** Event title */
+  /** Series title */
   title: string;
-  /** Event description */
+  /** Series description */
   description: string;
-  /** Event image URL */
+  /** Series image URL */
   image_url: string | null;
-  /** Event category */
+  /** Series category */
   category: string | null;
   /** Platform name */
   platform: string;
-  /** Event slug */
+  /** Series slug */
   slug: string;
-  /** Markets within this event */
-  markets: EventMarketItem[];
-  /** Number of markets in this event */
+  /** Markets within this series */
+  markets: SeriesMarketItem[];
+  /** Number of markets in this series */
   market_count: number;
   /** Creation date */
   created_at: string | null;
 }
 
 /**
- * Paginated event search response.
+ * Paginated series search response.
+ * Mirrors Rust SeriesSearchResponse in src-tauri/src/commands/markets.rs
+ */
+export interface SeriesSearchResponse {
+  /** Series results for this page */
+  results: SeriesSearchResult[];
+  /** Whether more results may be available */
+  has_more: boolean;
+  /** Opaque cursor for next page */
+  next_cursor: string | null;
+  /** Page size used */
+  page_size: number;
+}
+
+/**
+ * Individual market result from /events endpoint (flat, no nested markets).
+ * Mirrors Rust EventSearchResult in src-tauri/src/commands/markets.rs
+ */
+export interface EventSearchResult {
+  /** Market identifier (CLOB token ID for Polymarket, ticker for Kalshi) */
+  id: string;
+  /** Market title/question */
+  title: string;
+  /** Short description */
+  description: string;
+  /** Market image URL */
+  image_url: string | null;
+  /** Current YES price (probability 0.0 - 1.0) */
+  yes_price: number | null;
+  /** Current NO price */
+  no_price: number | null;
+  /** 24h trading volume */
+  volume_24h: number | null;
+  /** Liquidity / open interest */
+  liquidity: number | null;
+  /** Market category */
+  category: string | null;
+  /** Market status ("open", "closed", "resolved") */
+  status: string;
+  /** End date / close time */
+  end_date: string | null;
+  /** Creation date */
+  created_at: string | null;
+  /** Platform name */
+  platform: string;
+  /** URL-friendly slug */
+  slug: string;
+  /** CLOB token IDs for Polymarket */
+  token_ids: string[];
+  /** Condition ID for Polymarket */
+  condition_id: string | null;
+}
+
+/**
+ * Paginated event search response (flat markets).
  * Mirrors Rust EventSearchResponse in src-tauri/src/commands/markets.rs
  */
 export interface EventSearchResponse {
-  /** Event results for this page */
+  /** Individual market results for this page */
   results: EventSearchResult[];
   /** Whether more results may be available */
   has_more: boolean;
@@ -1289,7 +1343,7 @@ export interface EventSearchResponse {
 }
 
 /**
- * A market selected by the user from an event.
+ * A market selected by the user from a series.
  * Used by MarketBrowser -> MarketPanel to pass selected markets.
  */
 export interface SelectedEventMarket {
@@ -1320,7 +1374,7 @@ export interface SelectedEventMarket {
  * Contains a snapshot of the market's current state from the last refresh.
  */
 export interface SeriesChildMarket {
-  /** Market ID (same as EventMarketItem.id) */
+  /** Market ID (same as SeriesMarketItem.id) */
   id: string;
   /** Market title/question */
   title: string;
@@ -1372,7 +1426,7 @@ export interface SeriesInfo {
   /** Number of markets in this series */
   market_count: number;
   /** Markets within this series */
-  markets: EventMarketItem[];
+  markets: SeriesMarketItem[];
   /** Tags for categorization */
   tags: string[] | null;
   /** Whether the series is currently active */

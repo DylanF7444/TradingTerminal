@@ -48,7 +48,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { MarketType, Node } from '../../types/nodes';
 import { useTauriCommand } from '../../hooks/useTauriCommand';
 import MarketBrowser from './MarketBrowser';
-import type { SelectedEventMarket, EventSearchResult, EventSearchResponse } from '../../types/markets';
+import type { SelectedEventMarket, SeriesSearchResult, SeriesSearchResponse } from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
 import { createNodeGroup } from '../../store/groupsSlice';
 import { transformNodeFromBackend } from '../../utils/nodeTransform';
@@ -173,14 +173,14 @@ export default function MarketPanel({
 
   // Series search state
   const [seriesQuery, setSeriesQuery] = useState('');
-  const [seriesResults, setSeriesResults] = useState<EventSearchResult[]>([]);
+  const [seriesResults, setSeriesResults] = useState<SeriesSearchResult[]>([]);
   const [isSeriesSearching, setIsSeriesSearching] = useState(false);
   const [seriesError, setSeriesError] = useState<string | null>(null);
   const [seriesHasSearched, setSeriesHasSearched] = useState(false);
   const [seriesHasMore, setSeriesHasMore] = useState(false);
   const [seriesNextCursor, setSeriesNextCursor] = useState<string | null>(null);
   const [isSeriesLoadingMore, setIsSeriesLoadingMore] = useState(false);
-  const [selectedSeries, setSelectedSeries] = useState<EventSearchResult | null>(null);
+  const [selectedSeries, setSelectedSeries] = useState<SeriesSearchResult | null>(null);
   const seriesDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Store actions for series
@@ -364,7 +364,7 @@ export default function MarketPanel({
 
       try {
         const pName = selectedPlatform === MarketType.Polymarket ? 'Polymarket' : 'Kalshi';
-        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+        const response = await invoke<SeriesSearchResponse>('search_series_cmd', {
           platform: pName,
           query: searchQuery.trim(),
           cursor,
@@ -419,8 +419,8 @@ export default function MarketPanel({
     [performSeriesSearch]
   );
 
-  const handleSeriesSelect = (event: EventSearchResult) => {
-    setSelectedSeries(event);
+  const handleSeriesSelect = (series: SeriesSearchResult) => {
+    setSelectedSeries(series);
     setLocalError(null);
   };
 

@@ -240,8 +240,8 @@ fn main() {
             get_markets_cmd,
             get_orderbook_cmd,
             refresh_market_connection_cmd,
-            search_markets_cmd,
             search_events_cmd,
+            search_series_cmd,
             // Series API commands
             get_series_cmd,
             get_series_markets_cmd,
@@ -1677,19 +1677,7 @@ async fn refresh_market_connection_cmd(
     }
 }
 
-/// Search for markets on Polymarket or Kalshi
-#[tauri::command]
-async fn search_markets_cmd(
-    platform: String,
-    query: String,
-    limit: Option<u32>,
-    cursor: Option<String>,
-) -> Result<commands::MarketSearchResponse, String> {
-    info!("Searching {} markets for: {} (limit={:?}, cursor={:?})", platform, query, limit, cursor);
-    markets::search_markets(platform, query, limit, cursor).await
-}
-
-/// Search for events (grouped markets) on Polymarket or Kalshi
+/// Search for events (individual markets) on Polymarket or Kalshi via /events endpoints
 #[tauri::command]
 async fn search_events_cmd(
     platform: String,
@@ -1699,6 +1687,18 @@ async fn search_events_cmd(
 ) -> Result<commands::EventSearchResponse, String> {
     info!("Searching {} events for: {} (limit={:?}, cursor={:?})", platform, query, limit, cursor);
     markets::search_events(platform, query, limit, cursor).await
+}
+
+/// Search for series (grouped markets) on Polymarket or Kalshi via /series endpoints
+#[tauri::command]
+async fn search_series_cmd(
+    platform: String,
+    query: String,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<commands::SeriesSearchResponse, String> {
+    info!("Searching {} series for: {} (limit={:?}, cursor={:?})", platform, query, limit, cursor);
+    markets::search_series(platform, query, limit, cursor).await
 }
 
 /// Get series information by ticker/slug
@@ -1720,7 +1720,7 @@ async fn get_series_cmd(
 async fn get_series_markets_cmd(
     platform: String,
     series_id: String,
-) -> Result<Vec<commands::EventMarketItem>, String> {
+) -> Result<Vec<commands::SeriesMarketItem>, String> {
     info!("Getting {} series markets: {}", platform, series_id);
     markets::get_series_markets(platform, series_id).await
 }

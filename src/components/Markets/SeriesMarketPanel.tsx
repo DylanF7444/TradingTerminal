@@ -30,8 +30,8 @@ import {
 import type { Node } from '../../types/nodes';
 import type { 
   SeriesChildMarket, 
-  EventSearchResponse, 
-  EventSearchResult,
+  SeriesSearchResponse, 
+  SeriesSearchResult,
   SeriesInfo,
 } from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
@@ -247,16 +247,16 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
     } catch (err) {
       console.error('Series refresh failed:', err);
       
-      // Fallback to events search if Series API fails
+      // Fallback to series search if Series API fails
       try {
-        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+        const response = await invoke<SeriesSearchResponse>('search_series_cmd', {
           platform,
           query: eventTitle,
           cursor: null,
         });
 
         const matchingEvent = response?.results?.find(
-          (e: EventSearchResult) => e.id === eventId || e.slug === eventSlug
+          (e: SeriesSearchResult) => e.id === eventId || e.slug === eventSlug
         );
 
         if (matchingEvent) {

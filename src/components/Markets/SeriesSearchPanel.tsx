@@ -33,8 +33,8 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, type Node } from '../../types/nodes';
 import type { 
-  EventSearchResult, 
-  EventSearchResponse, 
+  SeriesSearchResult, 
+  SeriesSearchResponse, 
   SeriesInfo, 
   ParsedMarketUrl,
 } from '../../types/markets';
@@ -82,7 +82,7 @@ export default function SeriesSearchPanel({
   className = '',
 }: SeriesSearchPanelProps) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<EventSearchResult[]>([]);
+  const [results, setResults] = useState<SeriesSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,7 +129,7 @@ export default function SeriesSearchPanel({
       setHasSearched(true);
 
       try {
-        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+        const response = await invoke<SeriesSearchResponse>('search_series_cmd', {
           platform: platformName,
           query: searchQuery.trim(),
           cursor,
@@ -199,14 +199,14 @@ export default function SeriesSearchPanel({
 
   // Add series as a group with expanded nodes
   const handleAddSeries = useCallback(
-    async (event: EventSearchResult) => {
+    async (series: SeriesSearchResult) => {
       if (isAddingSeries) return;
-      setIsAddingSeries(event.id);
+      setIsAddingSeries(series.id);
 
       try {
-        const markets = event.markets || [];
+        const markets = series.markets || [];
         if (markets.length === 0) {
-          setError('No markets found in this event');
+          setError('No markets found in this series');
           setIsAddingSeries(null);
           return;
         }
@@ -237,14 +237,14 @@ export default function SeriesSearchPanel({
                 market_id: market.id,
                 question: market.title,
                 token_ids: market.token_ids || [],
-                event_group_id: event.id,
-                event_title: event.title,
+                event_group_id: series.id,
+                event_title: series.title,
               },
               marketDetails: {
                 title: market.title,
                 description: market.description || undefined,
-                image_url: event.image_url || undefined,
-                category: event.category || undefined,
+                image_url: series.image_url || undefined,
+                category: series.category || undefined,
                 end_date: market.end_date || undefined,
                 status: market.status || undefined,
                 slug: market.slug || undefined,
@@ -269,16 +269,16 @@ export default function SeriesSearchPanel({
         // Create the group
         if (createdNodeIds.length > 0) {
           const group = createNodeGroup(
-            event.title || 'Series',
+            series.title || 'Series',
             createdNodeIds,
             {
               type: 'series',
               platform: platformName,
-              seriesEventId: event.id,
-              seriesEventSlug: event.slug,
-              seriesEventTitle: event.title,
-              seriesImageUrl: event.image_url,
-              seriesCategory: event.category,
+              seriesEventId: series.id,
+              seriesEventSlug: series.slug,
+              seriesEventTitle: series.title,
+              seriesImageUrl: series.image_url,
+              seriesCategory: series.category,
               seriesRefreshInterval: 60,
               seriesLastRefreshed: Date.now(),
             },
@@ -340,8 +340,8 @@ export default function SeriesSearchPanel({
   const handleAddFromUrl = useCallback(async () => {
     if (!urlPreview || isAddingSeries) return;
 
-    // Convert SeriesInfo to EventSearchResult format for reuse
-    const eventResult: EventSearchResult = {
+    // Convert SeriesInfo to SeriesSearchResult format for reuse
+    const seriesResult: SeriesSearchResult = {
       id: urlPreview.id,
       title: urlPreview.title,
       description: urlPreview.description || '',
@@ -354,7 +354,7 @@ export default function SeriesSearchPanel({
       created_at: null,
     };
 
-    await handleAddSeries(eventResult);
+    await handleAddSeries(seriesResult);
 
     // Clear URL input
     setUrlInput('');

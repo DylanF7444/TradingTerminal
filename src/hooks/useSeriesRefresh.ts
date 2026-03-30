@@ -11,7 +11,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore, type StoreState } from '../store';
-import type { EventSearchResponse, EventSearchResult } from '../types/markets';
+import type { SeriesSearchResponse, SeriesSearchResult } from '../types/markets';
 import type { Node, NodeGroup } from '../types/nodes';
 import { transformNodeFromBackend } from '../utils/nodeTransform';
 
@@ -54,7 +54,7 @@ export function useSeriesRefresh() {
 
         if (!searchQuery || !eventId) continue;
 
-        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+        const response = await invoke<SeriesSearchResponse>('search_series_cmd', {
           platform,
           query: searchQuery,
           cursor: null,
@@ -63,7 +63,7 @@ export function useSeriesRefresh() {
         if (!response?.results) continue;
 
         const matchingEvent = response.results.find(
-          (e: EventSearchResult) => e.id === eventId
+          (e: SeriesSearchResult) => e.id === eventId
         );
 
         if (!matchingEvent) continue;

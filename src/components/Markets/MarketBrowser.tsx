@@ -1,30 +1,30 @@
 // ============================================================================
-// EVENT BROWSER / SEARCH COMPONENT
+// SERIES BROWSER / SEARCH COMPONENT
 // ============================================================================
 //
 // Module: components/Markets/MarketBrowser.tsx
-// Purpose: Search and browse prediction market events on Polymarket/Kalshi
+// Purpose: Search and browse prediction market series on Polymarket/Kalshi
 //
 // OVERVIEW:
-// Provides a search interface for discovering events (groups of markets) on
-// supported platforms. Users search by keyword, browse event results, expand
-// events to see nested markets, and select one or more markets to add.
+// Provides a search interface for discovering series (groups of markets) on
+// supported platforms. Users search by keyword, browse series results, expand
+// series to see nested markets, and select one or more markets to add.
 //
-// For single-market events, clicking the event directly selects the market.
-// For multi-market events, the user expands the event card and selects
+// For single-market series, clicking the series directly selects the market.
+// For multi-market series, the user expands the series card and selects
 // individual markets via checkboxes.
 //
 // Features:
 // - Debounced search input (350ms delay)
-// - Platform-specific event search (Polymarket /events API, Kalshi /events API)
-// - Expandable event cards with nested market selection
-// - Single-market events auto-select on click
-// - Multi-market events with checkbox selection and "Select All"
+// - Platform-specific series search (Polymarket /series API, Kalshi /series API)
+// - Expandable series cards with nested market selection
+// - Single-market series auto-select on click
+// - Multi-market series with checkbox selection and "Select All"
 // - Loading, error, and pagination states
 //
-// Backend Command: search_events_cmd (Rust, src-tauri/src/commands/markets.rs)
-//   - Polymarket: queries gamma-api.polymarket.com/events
-//   - Kalshi: queries api.elections.kalshi.com/trade-api/v2/events
+// Backend Command: search_series_cmd (Rust, src-tauri/src/commands/markets.rs)
+//   - Polymarket: queries gamma-api.polymarket.com/series
+//   - Kalshi: queries api.elections.kalshi.com/trade-api/v2/series
 //
 // ============================================================================
 
@@ -32,7 +32,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Search, Loader2, TrendingUp, BarChart3, Tag, AlertCircle, X, ChevronDown, ChevronRight, Check, Layers } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType } from '../../types/nodes';
-import type { EventSearchResult, EventSearchResponse, EventMarketItem, SelectedEventMarket } from '../../types/markets';
+import type { SeriesSearchResult, SeriesSearchResponse, SeriesMarketItem, SelectedEventMarket } from '../../types/markets';
 
 // ============================================================================
 // TYPES
@@ -58,7 +58,7 @@ export default function MarketBrowser({
   className = '',
 }: MarketBrowserProps) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<EventSearchResult[]>([]);
+  const [results, setResults] = useState<SeriesSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +96,7 @@ export default function MarketBrowser({
       setHasSearched(true);
 
       try {
-        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+        const response = await invoke<SeriesSearchResponse>('search_series_cmd', {
           platform: platformName,
           query: searchQuery.trim(),
           cursor: cursor,
@@ -166,15 +166,15 @@ export default function MarketBrowser({
     };
   }, []);
 
-  // Build SelectedEventMarket from EventMarketItem
-  const buildSelectedMarket = (market: EventMarketItem, event: EventSearchResult): SelectedEventMarket => ({
+  // Build SelectedEventMarket from SeriesMarketItem
+  const buildSelectedMarket = (market: SeriesMarketItem, series: SeriesSearchResult): SelectedEventMarket => ({
     id: market.id,
     title: market.title,
     tokenIds: market.token_ids || [],
     details: {
       description: market.description || undefined,
-      image_url: event.image_url || undefined,
-      category: event.category || undefined,
+      image_url: series.image_url || undefined,
+      category: series.category || undefined,
       end_date: market.end_date || undefined,
       status: market.status || undefined,
       slug: market.slug || undefined,
@@ -182,21 +182,21 @@ export default function MarketBrowser({
     },
   });
 
-  // Handle event card click
-  const handleEventClick = (event: EventSearchResult) => {
-    if (event.market_count === 1) {
-      // Single-market event: auto-select and confirm
-      const market = event.markets[0];
-      setConfirmedEventId(event.id);
+  // Handle series card click
+  const handleEventClick = (series: SeriesSearchResult) => {
+    if (series.market_count === 1) {
+      // Single-market series: auto-select and confirm
+      const market = series.markets[0];
+      setConfirmedEventId(series.id);
       setExpandedEventId(null);
-      onSelectMarkets(event.id, event.title, [buildSelectedMarket(market, event)]);
+      onSelectMarkets(series.id, series.title, [buildSelectedMarket(market, series)]);
     } else {
-      // Multi-market event: toggle expansion
-      setExpandedEventId((prev) => (prev === event.id ? null : event.id));
+      // Multi-market series: toggle expansion
+      setExpandedEventId((prev) => (prev === series.id ? null : series.id));
     }
   };
 
-  // Toggle individual market selection within an event
+  // Toggle individual market selection within a series
   const toggleMarketSelection = (eventId: string, marketId: string) => {
     setSelectedMarkets((prev) => {
       const eventSet = new Set(prev[eventId] || []);
@@ -209,15 +209,15 @@ export default function MarketBrowser({
     });
   };
 
-  // Select all markets in an event
-  const selectAllInEvent = (event: EventSearchResult) => {
+  // Select all markets in a series
+  const selectAllInEvent = (series: SeriesSearchResult) => {
     setSelectedMarkets((prev) => ({
       ...prev,
-      [event.id]: new Set(event.markets.map((m) => m.id)),
+      [series.id]: new Set(series.markets.map((m) => m.id)),
     }));
   };
 
-  // Deselect all markets in an event
+  // Deselect all markets in a series
   const deselectAllInEvent = (eventId: string) => {
     setSelectedMarkets((prev) => ({
       ...prev,
@@ -225,17 +225,17 @@ export default function MarketBrowser({
     }));
   };
 
-  // Confirm selection of markets from an event
-  const handleConfirmSelection = (event: EventSearchResult) => {
-    const selected = selectedMarkets[event.id];
+  // Confirm selection of markets from a series
+  const handleConfirmSelection = (series: SeriesSearchResult) => {
+    const selected = selectedMarkets[series.id];
     if (!selected || selected.size === 0) return;
 
-    const chosenMarkets: SelectedEventMarket[] = event.markets
+    const chosenMarkets: SelectedEventMarket[] = series.markets
       .filter((m) => selected.has(m.id))
-      .map((m) => buildSelectedMarket(m, event));
+      .map((m) => buildSelectedMarket(m, series));
 
-    setConfirmedEventId(event.id);
-    onSelectMarkets(event.id, event.title, chosenMarkets);
+    setConfirmedEventId(series.id);
+    onSelectMarkets(series.id, series.title, chosenMarkets);
   };
 
   // Format price as cents
@@ -252,15 +252,15 @@ export default function MarketBrowser({
     return `$${vol.toFixed(0)}`;
   };
 
-  // Get selected count for an event
+  // Get selected count for a series
   const getSelectedCount = (eventId: string): number => {
     return selectedMarkets[eventId]?.size || 0;
   };
 
-  // Check if all markets in event are selected
-  const isAllSelected = (event: EventSearchResult): boolean => {
-    const selected = selectedMarkets[event.id];
-    return !!selected && selected.size === event.markets.length;
+  // Check if all markets in series are selected
+  const isAllSelected = (series: SeriesSearchResult): boolean => {
+    const selected = selectedMarkets[series.id];
+    return !!selected && selected.size === series.markets.length;
   };
 
   return (

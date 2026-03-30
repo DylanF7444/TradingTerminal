@@ -872,12 +872,13 @@ async fn remove_credentials(_creds_id: &str) -> Result<(), String> {
 }
 
 // ============================================================================
-// MARKET SEARCH
+// EVENT SEARCH (individual markets from /events endpoint)
 // ============================================================================
 
-/// A search result returned from market search APIs
+/// A search result for an individual market from the /events endpoint
+/// Used by search_events which fetches from Polymarket/Kalshi /events endpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketSearchResult {
+pub struct EventSearchResult {
     /// Unique market identifier (CLOB token ID for Polymarket, ticker for Kalshi)
     pub id: String,
     /// Human-readable market title/question
@@ -920,11 +921,11 @@ pub struct MarketSearchResult {
     pub condition_id: Option<String>,
 }
 
-/// Paginated search response containing results and continuation state
+/// Paginated response from event search (individual markets)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketSearchResponse {
+pub struct EventSearchResponse {
     /// The matching market results for this page
-    pub results: Vec<MarketSearchResult>,
+    pub results: Vec<EventSearchResult>,
     /// Whether more results may be available from the API
     pub has_more: bool,
     /// Opaque cursor string to pass back for the next page request
@@ -934,12 +935,12 @@ pub struct MarketSearchResponse {
 }
 
 // ============================================================================
-// EVENT SEARCH (grouped markets by event)
+// SERIES SEARCH (grouped markets by series from /series endpoint)
 // ============================================================================
 
-/// A single market within an event search result
+/// A single market within a series search result
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventMarketItem {
+pub struct SeriesMarketItem {
     /// Market identifier (CLOB token ID for Polymarket, ticker for Kalshi)
     pub id: String,
     /// Human-readable market title (groupItemTitle for Polymarket, title for Kalshi)
@@ -971,37 +972,38 @@ pub struct EventMarketItem {
     pub condition_id: Option<String>,
 }
 
-/// An event search result containing nested markets
+/// A series search result containing nested markets
+/// Returned from /series endpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventSearchResult {
-    /// Event identifier
+pub struct SeriesSearchResult {
+    /// Series identifier
     pub id: String,
-    /// Event title
+    /// Series title
     pub title: String,
-    /// Event description
+    /// Series description
     pub description: String,
-    /// Event image URL
+    /// Series image URL
     pub image_url: Option<String>,
-    /// Event category
+    /// Series category
     pub category: Option<String>,
     /// Platform name
     pub platform: String,
-    /// Event slug
+    /// Series slug
     pub slug: String,
-    /// Markets within this event
-    pub markets: Vec<EventMarketItem>,
-    /// Number of markets in this event
+    /// Markets within this series
+    pub markets: Vec<SeriesMarketItem>,
+    /// Number of markets in this series
     pub market_count: usize,
     /// Creation date
     #[serde(default)]
     pub created_at: Option<String>,
 }
 
-/// Paginated event search response
+/// Paginated series search response
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventSearchResponse {
-    /// Event results for this page
-    pub results: Vec<EventSearchResult>,
+pub struct SeriesSearchResponse {
+    /// Series results for this page
+    pub results: Vec<SeriesSearchResult>,
     /// Whether more results may be available
     pub has_more: bool,
     /// Opaque cursor for next page
@@ -1038,167 +1040,7 @@ fn parse_kalshi_cursor(cursor: &Option<String>) -> Result<Option<String>, String
     }
 }
 
-/// Parse a single Polymarket JSON item into a MarketSearchResult
-fn parse_polymarket_item(item: &JsonValue) -> Option<MarketSearchResult> {
-    let id = item["id"].as_str()?.to_string();
-    let question = item["question"].as_str().unwrap_or("").to_string();
-    let description = item["description"].as_str().unwrap_or("").to_string();
-    let slug = item["slug"].as_str().unwrap_or(&id).to_string();
-    let image = item["image"].as_str().map(|s| s.to_string());
-    let active = item["active"].as_bool().unwrap_or(false);
-    let closed = item["closed"].as_bool().unwrap_or(true);
-
-    let clob_token_ids: Vec<String> = item["clobTokenIds"]
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-        .or_else(|| {
-            item["clobTokenIds"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-        })
-        .unwrap_or_default();
-
-    let condition_id_val = item["conditionId"].as_str().map(|s| s.to_string());
-
-    let primary_id = clob_token_ids
-        .first()
-        .cloned()
-        .or_else(|| condition_id_val.clone())
-        .unwrap_or_else(|| slug.clone());
-
-    let outcomes_prices: Vec<f64> = item["outcomePrices"]
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-        .map(|prices| {
-            prices
-                .iter()
-                .filter_map(|p| p.parse::<f64>().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let yes_price = outcomes_prices.first().copied();
-    let no_price = outcomes_prices.get(1).copied();
-
-    let volume = item["volume"]
-        .as_str()
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| item["volume"].as_f64());
-    let liquidity = item["liquidity"]
-        .as_str()
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| item["liquidity"].as_f64());
-    let end_date = item["endDate"].as_str().map(|s| s.to_string());
-    let created_at = item["createdAt"].as_str().map(|s| s.to_string());
-
-    let status = if closed {
-        "closed".to_string()
-    } else if active {
-        "open".to_string()
-    } else {
-        "inactive".to_string()
-    };
-
-    Some(MarketSearchResult {
-        id: primary_id,
-        title: question,
-        description: if description.len() > 200 {
-            let mut end = 200;
-            while !description.is_char_boundary(end) { end -= 1; }
-            format!("{}...", &description[..end])
-        } else {
-            description
-        },
-        image_url: image,
-        yes_price,
-        no_price,
-        volume_24h: volume,
-        liquidity,
-        category: item["category"].as_str().map(|s| s.to_string()),
-        status,
-        end_date,
-        created_at,
-        platform: "Polymarket".to_string(),
-        slug,
-        token_ids: clob_token_ids,
-        condition_id: condition_id_val,
-    })
-}
-
-/// Parse a single Kalshi market JSON item into a MarketSearchResult
-/// Returns None if the market doesn't match the query
-fn parse_kalshi_market(
-    market: &JsonValue,
-    event_title: &str,
-    event_category: &Option<String>,
-    event_image: &Option<String>,
-    query_lower: &str,
-) -> Option<MarketSearchResult> {
-    let ticker = market["ticker"].as_str().unwrap_or("").to_string();
-    let title = market["title"].as_str().unwrap_or("").to_string();
-    let yes_sub_title = market["yes_sub_title"].as_str().unwrap_or("").to_string();
-    let no_sub_title = market["no_sub_title"].as_str().unwrap_or("").to_string();
-
-    // Client-side filtering by query
-    if !query_lower.is_empty() {
-        let search_text = format!("{} {} {} {} {}", event_title, title, yes_sub_title, no_sub_title, ticker).to_lowercase();
-        if !search_text.contains(query_lower) {
-            return None;
-        }
-    }
-
-    let yes_price = market["yes_ask"]
-        .as_f64()
-        .or_else(|| market["last_price"].as_f64())
-        .map(|p| p / 100.0);
-    let no_price = market["no_ask"].as_f64().map(|p| p / 100.0);
-
-    let volume = market["volume"]
-        .as_f64()
-        .or_else(|| market["volume_24h"].as_f64());
-
-    let open_interest = market["open_interest"].as_f64();
-    let close_time = market["close_time"].as_str().map(|s| s.to_string());
-
-    let market_status = market["status"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-
-    // Combine title with yes_sub_title to show the specific outcome (e.g., candidate name)
-    let display_title = if !yes_sub_title.is_empty() && !title.contains(&yes_sub_title) {
-        format!("{} ({})", title, yes_sub_title)
-    } else if title.is_empty() {
-        event_title.to_string()
-    } else {
-        title.clone()
-    };
-
-    Some(MarketSearchResult {
-        id: ticker.clone(),
-        title: display_title,
-        description: yes_sub_title,
-        image_url: event_image.clone(),
-        yes_price,
-        no_price,
-        volume_24h: volume,
-        liquidity: open_interest,
-        category: event_category.clone(),
-        status: market_status,
-        end_date: close_time,
-        created_at: None,
-        platform: "Kalshi".to_string(),
-        slug: ticker,
-        token_ids: vec![],
-        condition_id: None,
-    })
-}
-
-/// Search for markets on Polymarket or Kalshi
+/// Search for events (individual markets) on Polymarket or Kalshi
 ///
 /// Endpoint mapping:
 ///   - Polymarket: GET https://gamma-api.polymarket.com/events (flattens nested markets)
@@ -1206,12 +1048,12 @@ fn parse_kalshi_market(
 ///
 /// Supports cursor-based pagination. Pass `cursor` from the previous response's
 /// `next_cursor` to fetch the next page of results.
-pub async fn search_markets(
+pub async fn search_events(
     platform: String,
     query: String,
     limit: Option<u32>,
     cursor: Option<String>,
-) -> Result<MarketSearchResponse, String> {
+) -> Result<EventSearchResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent("PredictionMarketTerminal/1.0")
@@ -1222,28 +1064,28 @@ pub async fn search_markets(
         "Polymarket" => {
             let page_size = limit.unwrap_or(POLYMARKET_PAGE_SIZE).min(500);
             let api_offset = parse_polymarket_cursor(&cursor)?;
-            search_polymarket(&client, &query, page_size, api_offset).await
+            search_polymarket_events(&client, &query, page_size, api_offset).await
         }
         "Kalshi" => {
             let page_size = limit.unwrap_or(KALSHI_PAGE_SIZE).min(500);
             let api_cursor = parse_kalshi_cursor(&cursor)?;
-            search_kalshi(&client, &query, page_size, api_cursor).await
+            search_kalshi_events(&client, &query, page_size, api_cursor).await
         }
         _ => Err(format!("Unknown platform: {}", platform)),
     }
 }
 
-/// Search Polymarket markets via the Gamma API /events endpoint
+/// Search Polymarket via the Gamma API /events endpoint
 /// Loops over API batches until enough filtered results are collected or the API is exhausted.
-/// Each event contains nested markets which are flattened into individual MarketSearchResults.
-async fn search_polymarket(
+/// Each event contains nested markets which are flattened into individual EventSearchResults.
+async fn search_polymarket_events(
     client: &reqwest::Client,
     query: &str,
     page_size: u32,
     initial_api_offset: u32,
-) -> Result<MarketSearchResponse, String> {
+) -> Result<EventSearchResponse, String> {
     let query_lower = query.to_lowercase();
-    let mut collected: Vec<MarketSearchResult> = Vec::new();
+    let mut collected: Vec<EventSearchResult> = Vec::new();
     let mut api_offset = initial_api_offset;
     let mut api_exhausted = false;
     let mut fetches = 0u32;
@@ -1320,7 +1162,7 @@ async fn search_polymarket(
                         }
                     }
 
-                    if let Some(result) = parse_polymarket_event_market_to_search_result(market, event_title, &event_category, &event_image) {
+                    if let Some(result) = parse_polymarket_event_to_result(market, event_title, &event_category, &event_image) {
                         collected.push(result);
                     }
                 }
@@ -1335,7 +1177,7 @@ async fn search_polymarket(
         None
     };
 
-    Ok(MarketSearchResponse {
+    Ok(EventSearchResponse {
         results: collected,
         has_more,
         next_cursor,
@@ -1343,13 +1185,13 @@ async fn search_polymarket(
     })
 }
 
-/// Parse a Polymarket market from an event into a MarketSearchResult
-fn parse_polymarket_event_market_to_search_result(
+/// Parse a Polymarket market from an event into an EventSearchResult
+fn parse_polymarket_event_to_result(
     market: &JsonValue,
     event_title: &str,
     event_category: &Option<String>,
     event_image: &Option<String>,
-) -> Option<MarketSearchResult> {
+) -> Option<EventSearchResult> {
     let question = market["question"].as_str().unwrap_or("").to_string();
     let group_title = market["groupItemTitle"].as_str().unwrap_or("").to_string();
     let title = if !group_title.is_empty() {
@@ -1399,7 +1241,7 @@ fn parse_polymarket_event_market_to_search_result(
         "inactive"
     };
 
-    Some(MarketSearchResult {
+    Some(EventSearchResult {
         id: primary_id,
         title,
         description: market["description"].as_str().unwrap_or("").to_string(),
@@ -1425,17 +1267,86 @@ fn parse_polymarket_event_market_to_search_result(
     })
 }
 
-/// Search Kalshi markets via the public API
+/// Parse a single Kalshi market from /events endpoint to EventSearchResult
+fn parse_kalshi_event_to_result(
+    market: &JsonValue,
+    event_title: &str,
+    event_category: &Option<String>,
+    event_image: &Option<String>,
+    query_lower: &str,
+) -> Option<EventSearchResult> {
+    let ticker = market["ticker"].as_str().unwrap_or("");
+    let subtitle = market["subtitle"].as_str().unwrap_or("");
+    
+    // Use subtitle as title if available, otherwise use event title
+    let title = if !subtitle.is_empty() {
+        subtitle.to_string()
+    } else {
+        event_title.to_string()
+    };
+    
+    // Filter by query
+    let title_lower = title.to_lowercase();
+    let ticker_lower = ticker.to_lowercase();
+    if !query_lower.is_empty() 
+        && !title_lower.contains(query_lower) 
+        && !ticker_lower.contains(query_lower) 
+    {
+        return None;
+    }
+    
+    if ticker.is_empty() {
+        return None;
+    }
+    
+    let yes_bid = market["yes_bid"].as_f64().or_else(|| {
+        market["yes_bid"].as_str().and_then(|s| s.parse::<f64>().ok())
+    });
+    let no_bid = market["no_bid"].as_f64().or_else(|| {
+        market["no_bid"].as_str().and_then(|s| s.parse::<f64>().ok())
+    });
+    
+    // Convert from cents (0-100) to decimal (0-1) if needed
+    let yes_price = yes_bid.map(|p| if p > 1.0 { p / 100.0 } else { p });
+    let no_price = no_bid.map(|p| if p > 1.0 { p / 100.0 } else { p });
+    
+    let status = market["status"].as_str().unwrap_or("unknown").to_string();
+    
+    Some(EventSearchResult {
+        id: ticker.to_string(),
+        title,
+        description: market["rules_primary"].as_str().unwrap_or("").to_string(),
+        platform: "Kalshi".to_string(),
+        category: event_category.clone(),
+        image_url: event_image.clone(),
+        yes_price,
+        no_price,
+        volume_24h: market["volume_24h"].as_f64().or_else(|| {
+            market["volume_24h"].as_str().and_then(|s| s.parse::<f64>().ok())
+        }),
+        liquidity: market["open_interest"].as_f64().or_else(|| {
+            market["open_interest"].as_str().and_then(|s| s.parse::<f64>().ok())
+        }),
+        status,
+        end_date: market["expiration_time"].as_str().map(|s| s.to_string()),
+        created_at: market["open_time"].as_str().map(|s| s.to_string()),
+        slug: ticker.to_string(),
+        token_ids: vec![],
+        condition_id: None,
+    })
+}
+
+/// Search Kalshi via the public API /events endpoint
 /// Loops over API pages using cursor-based pagination until enough filtered results
 /// are collected or the API is exhausted.
-async fn search_kalshi(
+async fn search_kalshi_events(
     client: &reqwest::Client,
     query: &str,
     page_size: u32,
     initial_cursor: Option<String>,
-) -> Result<MarketSearchResponse, String> {
+) -> Result<EventSearchResponse, String> {
     let query_lower = query.to_lowercase();
-    let mut collected: Vec<MarketSearchResult> = Vec::new();
+    let mut collected: Vec<EventSearchResult> = Vec::new();
     let mut cursor = initial_cursor;
     let mut api_exhausted = false;
     let mut fetches = 0u32;
@@ -1498,7 +1409,7 @@ async fn search_kalshi(
                         if collected.len() >= page_size as usize {
                             break;
                         }
-                        if let Some(result) = parse_kalshi_market(
+                        if let Some(result) = parse_kalshi_event_to_result(
                             market,
                             event_title,
                             &event_category,
@@ -1520,7 +1431,7 @@ async fn search_kalshi(
         None
     };
 
-    Ok(MarketSearchResponse {
+    Ok(EventSearchResponse {
         results: collected,
         has_more,
         next_cursor,
@@ -1529,20 +1440,24 @@ async fn search_kalshi(
 }
 
 // ============================================================================
-// SERIES SEARCH IMPLEMENTATION (for "Event Search" / "Series Search" feature)
+// SERIES SEARCH IMPLEMENTATION (for Series Search feature)
 // ============================================================================
 
 /// Search for series on Polymarket or Kalshi, returning grouped results
 /// with nested markets per series.
 ///
+/// Endpoint mapping:
+///   - Polymarket: GET https://gamma-api.polymarket.com/series
+///   - Kalshi: GET https://api.elections.kalshi.com/trade-api/v2/series
+///
 /// Series represent recurring events (e.g., "Weekly Jobs Report") that contain
-/// multiple related markets. This uses the /series endpoints.
-pub async fn search_events(
+/// multiple related markets.
+pub async fn search_series(
     platform: String,
     query: String,
     limit: Option<u32>,
     cursor: Option<String>,
-) -> Result<EventSearchResponse, String> {
+) -> Result<SeriesSearchResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent("PredictionMarketTerminal/1.0")
@@ -1570,9 +1485,9 @@ async fn search_polymarket_series(
     query: &str,
     page_size: u32,
     initial_api_offset: u32,
-) -> Result<EventSearchResponse, String> {
+) -> Result<SeriesSearchResponse, String> {
     let query_lower = query.to_lowercase();
-    let mut collected: Vec<EventSearchResult> = Vec::new();
+    let mut collected: Vec<SeriesSearchResult> = Vec::new();
     let mut api_offset = initial_api_offset;
     let mut api_exhausted = false;
     let mut fetches = 0u32;
@@ -1622,7 +1537,7 @@ async fn search_polymarket_series(
             if collected.len() >= page_size as usize {
                 break;
             }
-            if let Some(series_result) = parse_polymarket_series_to_event(series_json, &query_lower) {
+            if let Some(series_result) = parse_polymarket_series_to_result(series_json, &query_lower) {
                 collected.push(series_result);
             }
         }
@@ -1635,7 +1550,7 @@ async fn search_polymarket_series(
         None
     };
 
-    Ok(EventSearchResponse {
+    Ok(SeriesSearchResponse {
         results: collected,
         has_more,
         next_cursor,
@@ -1643,8 +1558,8 @@ async fn search_polymarket_series(
     })
 }
 
-/// Parse a single Polymarket series JSON into an EventSearchResult
-fn parse_polymarket_series_to_event(series: &JsonValue, query_lower: &str) -> Option<EventSearchResult> {
+/// Parse a single Polymarket series JSON into a SeriesSearchResult
+fn parse_polymarket_series_to_result(series: &JsonValue, query_lower: &str) -> Option<SeriesSearchResult> {
     // Handle both string and numeric IDs
     let series_id_str = if let Some(s) = series["id"].as_str() {
         s.to_string()
@@ -1678,14 +1593,14 @@ fn parse_polymarket_series_to_event(series: &JsonValue, query_lower: &str) -> Op
 
     // Series can have nested events, which in turn have nested markets
     // Try to extract markets from the series structure
-    let mut markets: Vec<EventMarketItem> = Vec::new();
+    let mut markets: Vec<SeriesMarketItem> = Vec::new();
 
     // First check if series has direct markets array
     if let Some(markets_json) = series["markets"].as_array() {
         markets.extend(
             markets_json
                 .iter()
-                .filter_map(|m| parse_polymarket_event_market(m))
+                .filter_map(|m| parse_series_market_item(m))
         );
     }
 
@@ -1696,7 +1611,7 @@ fn parse_polymarket_series_to_event(series: &JsonValue, query_lower: &str) -> Op
                 markets.extend(
                     event_markets
                         .iter()
-                        .filter_map(|m| parse_polymarket_event_market(m))
+                        .filter_map(|m| parse_series_market_item(m))
                 );
             }
         }
@@ -1706,7 +1621,7 @@ fn parse_polymarket_series_to_event(series: &JsonValue, query_lower: &str) -> Op
     // (series might have markets that need to be fetched separately)
     let market_count = markets.len();
 
-    Some(EventSearchResult {
+    Some(SeriesSearchResult {
         id: series_id_str,
         title,
         description: if description.len() > 300 {
@@ -1726,8 +1641,8 @@ fn parse_polymarket_series_to_event(series: &JsonValue, query_lower: &str) -> Op
     })
 }
 
-/// Parse a single market within a Polymarket event into an EventMarketItem
-fn parse_polymarket_event_market(market: &JsonValue) -> Option<EventMarketItem> {
+/// Parse a single market within a series into a SeriesMarketItem
+fn parse_series_market_item(market: &JsonValue) -> Option<SeriesMarketItem> {
     let question = market["question"].as_str().unwrap_or("").to_string();
     let group_title = market["groupItemTitle"].as_str().unwrap_or("").to_string();
     let title = if !group_title.is_empty() {
@@ -1780,7 +1695,7 @@ fn parse_polymarket_event_market(market: &JsonValue) -> Option<EventMarketItem> 
         "inactive"
     };
 
-    Some(EventMarketItem {
+    Some(SeriesMarketItem {
         id: primary_id,
         title,
         description: market["description"]
@@ -1805,16 +1720,15 @@ fn parse_polymarket_event_market(market: &JsonValue) -> Option<EventMarketItem> 
     })
 }
 
-/// Search Kalshi events, preserving event grouping instead of flattening
 /// Search Kalshi series via the /series endpoint
 async fn search_kalshi_series(
     client: &reqwest::Client,
     query: &str,
     page_size: u32,
     initial_cursor: Option<String>,
-) -> Result<EventSearchResponse, String> {
+) -> Result<SeriesSearchResponse, String> {
     let query_lower = query.to_lowercase();
-    let mut collected: Vec<EventSearchResult> = Vec::new();
+    let mut collected: Vec<SeriesSearchResult> = Vec::new();
     let mut cursor = initial_cursor;
     let mut api_exhausted = false;
     let mut fetches = 0u32;
@@ -1873,7 +1787,7 @@ async fn search_kalshi_series(
                 if collected.len() >= page_size as usize {
                     break;
                 }
-                if let Some(result) = parse_kalshi_series_to_event(series, &query_lower) {
+                if let Some(result) = parse_kalshi_series_to_result(series, &query_lower) {
                     collected.push(result);
                 }
             }
@@ -1887,7 +1801,7 @@ async fn search_kalshi_series(
         None
     };
 
-    Ok(EventSearchResponse {
+    Ok(SeriesSearchResponse {
         results: collected,
         has_more,
         next_cursor,
@@ -1895,8 +1809,8 @@ async fn search_kalshi_series(
     })
 }
 
-/// Parse a single Kalshi series JSON into an EventSearchResult
-fn parse_kalshi_series_to_event(series: &JsonValue, query_lower: &str) -> Option<EventSearchResult> {
+/// Parse a single Kalshi series JSON into a SeriesSearchResult
+fn parse_kalshi_series_to_result(series: &JsonValue, query_lower: &str) -> Option<SeriesSearchResult> {
     let ticker = series["ticker"].as_str().unwrap_or("");
     let title = series["title"].as_str().unwrap_or("");
     let category = series["category"].as_str().map(|s| s.to_string());
@@ -1919,7 +1833,7 @@ fn parse_kalshi_series_to_event(series: &JsonValue, query_lower: &str) -> Option
 
     // Series don't have nested markets directly - they would need to be fetched separately
     // For now, return an empty markets array (markets can be fetched via get_series_markets)
-    let markets: Vec<EventMarketItem> = Vec::new();
+    let markets: Vec<SeriesMarketItem> = Vec::new();
     let market_count = 0;
 
     // Build description from available fields
@@ -1929,7 +1843,7 @@ fn parse_kalshi_series_to_event(series: &JsonValue, query_lower: &str) -> Option
         String::new()
     };
 
-    Some(EventSearchResult {
+    Some(SeriesSearchResult {
         id: ticker.to_string(),
         title: title.to_string(),
         description,
@@ -1944,7 +1858,7 @@ fn parse_kalshi_series_to_event(series: &JsonValue, query_lower: &str) -> Option
 }
 
 // ============================================================================
-// SERIES API FUNCTIONS
+// SERIES API FUNCTIONS (for fetching specific series by ID)
 // ============================================================================
 //
 // These functions use the proper Series APIs as documented:
@@ -2004,7 +1918,7 @@ pub struct SeriesInfo {
     pub platform: String,
     pub frequency: Option<String>,
     pub market_count: usize,
-    pub markets: Vec<EventMarketItem>,
+    pub markets: Vec<SeriesMarketItem>,
     pub tags: Option<Vec<String>>,
     pub is_active: bool,
 }
@@ -2066,7 +1980,7 @@ pub async fn get_series(
 pub async fn get_series_markets(
     platform: String,
     series_id: String,
-) -> Result<Vec<EventMarketItem>, String> {
+) -> Result<Vec<SeriesMarketItem>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent("PredictionMarketTerminal/1.0")
@@ -2180,7 +2094,7 @@ async fn get_kalshi_series(
 async fn get_kalshi_series_markets(
     client: &reqwest::Client,
     series_ticker: &str,
-) -> Result<Vec<EventMarketItem>, String> {
+) -> Result<Vec<SeriesMarketItem>, String> {
     let mut markets = Vec::new();
     let mut cursor: Option<String> = None;
     let mut fetches = 0u32;
@@ -2240,8 +2154,8 @@ async fn get_kalshi_series_markets(
     Ok(markets)
 }
 
-/// Parse a Kalshi market JSON into EventMarketItem
-fn parse_kalshi_market_item(market: &JsonValue) -> Option<EventMarketItem> {
+/// Parse a Kalshi market JSON into SeriesMarketItem
+fn parse_kalshi_market_item(market: &JsonValue) -> Option<SeriesMarketItem> {
     let ticker = market["ticker"].as_str()?.to_string();
     let title = market["title"].as_str().unwrap_or("").to_string();
     let yes_sub_title = market["yes_sub_title"].as_str().unwrap_or("").to_string();
@@ -2262,7 +2176,7 @@ fn parse_kalshi_market_item(market: &JsonValue) -> Option<EventMarketItem> {
     let close_time = market["close_time"].as_str().map(|s| s.to_string());
     let status = market["status"].as_str().unwrap_or("unknown").to_string();
 
-    Some(EventMarketItem {
+    Some(SeriesMarketItem {
         id: ticker.clone(),
         title: display_title,
         description: yes_sub_title,
@@ -2345,7 +2259,7 @@ async fn get_polymarket_series(
 async fn get_polymarket_series_markets(
     client: &reqwest::Client,
     slug: &str,
-) -> Result<Vec<EventMarketItem>, String> {
+) -> Result<Vec<SeriesMarketItem>, String> {
     // Fetch the event with nested markets
     let url = format!(
         "https://gamma-api.polymarket.com/events?slug={}&_embed=markets",
@@ -2374,7 +2288,7 @@ async fn get_polymarket_series_markets(
     if let Some(event) = data.first() {
         if let Some(market_arr) = event["markets"].as_array() {
             for market in market_arr {
-                if let Some(item) = parse_polymarket_event_market(market) {
+                if let Some(item) = parse_series_market_item(market) {
                     markets.push(item);
                 }
             }
@@ -2402,11 +2316,11 @@ fn parse_polymarket_event_to_series_info(event: &JsonValue) -> Result<SeriesInfo
     let active = event["active"].as_bool().unwrap_or(false);
     let closed = event["closed"].as_bool().unwrap_or(true);
 
-    let markets: Vec<EventMarketItem> = event["markets"]
+    let markets: Vec<SeriesMarketItem> = event["markets"]
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|m| parse_polymarket_event_market(m))
+                .filter_map(|m| parse_series_market_item(m))
                 .collect()
         })
         .unwrap_or_default();
@@ -2453,7 +2367,7 @@ fn parse_polymarket_series_to_series_info(series: &JsonValue) -> Result<SeriesIn
         for event in events {
             if let Some(markets) = event["markets"].as_array() {
                 for market in markets {
-                    if let Some(item) = parse_polymarket_event_market(market) {
+                    if let Some(item) = parse_series_market_item(market) {
                         all_markets.push(item);
                     }
                 }
