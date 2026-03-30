@@ -10,6 +10,11 @@
 // 2. A NodeGroup is created with origin.type = 'series' to track the event
 // 3. Nodes are positioned in a grid layout near viewport center
 // 4. The group auto-refreshes to detect new/closed markets
+//
+// FEATURES:
+// - Text search for events/series
+// - URL paste support (kalshi.com/markets/... or polymarket.com/event/...)
+// - Configurable auto-refresh settings
 // ============================================================================
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -22,10 +27,17 @@ import {
   AlertCircle,
   X,
   ChevronDown,
+  Link,
+  ExternalLink,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarketType, type Node } from '../../types/nodes';
-import type { EventSearchResult, EventSearchResponse } from '../../types/markets';
+import type { 
+  EventSearchResult, 
+  EventSearchResponse, 
+  SeriesInfo, 
+  ParsedMarketUrl,
+} from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
 import { createNodeGroup } from '../../store/groupsSlice';
 import { transformNodeFromBackend } from '../../utils/nodeTransform';
@@ -42,6 +54,7 @@ const PLATFORM_CONFIG = {
     bgColor: 'bg-purple-500',
     icon: Wallet,
     seriesColor: '#8b5cf6',
+    urlPattern: 'polymarket.com',
   },
   [MarketType.Kalshi]: {
     name: 'Kalshi',
@@ -49,8 +62,20 @@ const PLATFORM_CONFIG = {
     bgColor: 'bg-emerald-500',
     icon: TrendingUp,
     seriesColor: '#10b981',
+    urlPattern: 'kalshi.com',
   },
 };
+
+// Detect if input looks like a URL
+function isLikelyUrl(input: string): boolean {
+  const trimmed = input.trim().toLowerCase();
+  return (
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('https://') ||
+    trimmed.includes('kalshi.com') ||
+    trimmed.includes('polymarket.com')
+  );
+}
 
 export default function SeriesSearchPanel({
   platform,
@@ -67,6 +92,12 @@ export default function SeriesSearchPanel({
   const [isAddingSeries, setIsAddingSeries] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  
+  // URL input state
+  const [urlInput, setUrlInput] = useState('');
+  const [urlPreview, setUrlPreview] = useState<SeriesInfo | null>(null);
+  const [isLoadingUrl, setIsLoadingUrl] = useState(false);
+  const [urlError, setUrlError] = useState<string | null>(null);
 
   const config = PLATFORM_CONFIG[platform];
   const platformName = config.name;
@@ -103,6 +134,11 @@ export default function SeriesSearchPanel({
           query: searchQuery.trim(),
           cursor,
         });
+
+        console.debug(`[${platformName}] Search results for "${searchQuery.trim()}":`, response.results);
+        for (const event of response.results) {
+          console.debug(`[${platformName}] Event: ${event.title}`, { markets: event.markets });
+        }
 
         if (append) {
           setResults((prev) => [...prev, ...response.results]);
@@ -265,6 +301,90 @@ export default function SeriesSearchPanel({
     [isAddingSeries, platform, platformName, viewport, addNode, addGroup, config.seriesColor]
   );
 
+  // Handle URL input - fetch series from URL
+  const handleUrlSubmit = useCallback(async () => {
+    if (!urlInput.trim() || isLoadingUrl) return;
+    
+    setIsLoadingUrl(true);
+    setUrlError(null);
+    setUrlPreview(null);
+
+    try {
+      // First parse the URL to validate it
+      const parsed = await invoke<ParsedMarketUrl>('parse_market_url_cmd', {
+        url: urlInput.trim(),
+      });
+
+      // Check if URL matches this platform
+      if (parsed.platform !== platformName) {
+        setUrlError(`This is a ${parsed.platform} URL. Use the ${parsed.platform} panel instead.`);
+        setIsLoadingUrl(false);
+        return;
+      }
+
+      // Fetch the series/event data
+      const seriesInfo = await invoke<SeriesInfo>('fetch_from_url_cmd', {
+        url: urlInput.trim(),
+      });
+
+      setUrlPreview(seriesInfo);
+    } catch (err) {
+      console.error('Failed to parse/fetch URL:', err);
+      setUrlError(typeof err === 'string' ? err : 'Failed to load from URL. Check the URL format.');
+    } finally {
+      setIsLoadingUrl(false);
+    }
+  }, [urlInput, isLoadingUrl, platformName]);
+
+  // Add series from URL preview
+  const handleAddFromUrl = useCallback(async () => {
+    if (!urlPreview || isAddingSeries) return;
+
+    // Convert SeriesInfo to EventSearchResult format for reuse
+    const eventResult: EventSearchResult = {
+      id: urlPreview.id,
+      title: urlPreview.title,
+      description: urlPreview.description || '',
+      image_url: urlPreview.image_url ?? null,
+      category: urlPreview.category ?? null,
+      platform: urlPreview.platform,
+      slug: urlPreview.slug,
+      markets: urlPreview.markets,
+      market_count: urlPreview.market_count,
+      created_at: null,
+    };
+
+    await handleAddSeries(eventResult);
+
+    // Clear URL input
+    setUrlInput('');
+    setUrlPreview(null);
+    setUrlError(null);
+  }, [urlPreview, isAddingSeries, handleAddSeries]);
+
+  // Handle paste event for URL detection
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pastedText = e.clipboardData.getData('text');
+    if (isLikelyUrl(pastedText)) {
+      e.preventDefault();
+      setUrlInput(pastedText);
+      // Auto-submit after a short delay
+      setTimeout(() => {
+        invoke<SeriesInfo>('fetch_from_url_cmd', { url: pastedText.trim() })
+          .then((seriesInfo) => {
+            if (seriesInfo.platform === platformName) {
+              setUrlPreview(seriesInfo);
+            } else {
+              setUrlError(`This is a ${seriesInfo.platform} URL.`);
+            }
+          })
+          .catch((err) => {
+            setUrlError(typeof err === 'string' ? err : 'Failed to load from URL.');
+          });
+      }, 100);
+    }
+  }, [platformName]);
+
   const formatPrice = (price: number | null): string => {
     if (price === null || price === undefined) return '\u2014';
     return `${(price * 100).toFixed(1)}\u00A2`;
@@ -290,6 +410,115 @@ export default function SeriesSearchPanel({
 
       {!isCollapsed && (
         <div className="p-3 space-y-3">
+          {/* URL Input Section */}
+          <div className="space-y-2">
+            <div className="relative">
+              <Link className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+              <input
+                type="text"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onPaste={handlePaste}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleUrlSubmit();
+                }}
+                placeholder={`Paste ${platformName} URL...`}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-9 pr-20 py-2 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors text-sm"
+              />
+              {urlInput && (
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                  {isLoadingUrl ? (
+                    <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+                  ) : (
+                    <>
+                      <button
+                        onClick={handleUrlSubmit}
+                        className="text-blue-400 hover:text-blue-300 p-1"
+                        title="Load from URL"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setUrlInput('');
+                          setUrlPreview(null);
+                          setUrlError(null);
+                        }}
+                        className="text-gray-500 hover:text-gray-300 p-1"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* URL Error */}
+            {urlError && (
+              <div className="flex items-center gap-2 p-2 rounded bg-red-500/10 border border-red-500/20">
+                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <span className="text-xs text-red-400">{urlError}</span>
+              </div>
+            )}
+
+            {/* URL Preview */}
+            {urlPreview && (
+              <div className="p-2 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                <div className="flex items-start gap-2">
+                  {urlPreview.image_url ? (
+                    <img
+                      src={urlPreview.image_url}
+                      alt=""
+                      className="w-10 h-10 rounded object-cover flex-shrink-0 bg-gray-800"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded bg-gray-800 flex items-center justify-center flex-shrink-0">
+                      <Layers className="w-5 h-5 text-blue-400" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-gray-200 truncate">{urlPreview.title}</p>
+                    <div className="flex items-center gap-2 mt-1 text-[10px]">
+                      <span className="flex items-center gap-1 text-blue-400">
+                        <Layers className="w-3 h-3" />
+                        {urlPreview.market_count} markets
+                      </span>
+                      {urlPreview.category && (
+                        <span className="text-gray-500">{urlPreview.category}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={handleAddFromUrl}
+                  disabled={!!isAddingSeries}
+                  className="w-full mt-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1"
+                >
+                  {isAddingSeries === urlPreview.id ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Adding...
+                    </>
+                  ) : (
+                    <>
+                      <Layers className="w-3 h-3" />
+                      Add Series
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Divider */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-px bg-gray-800" />
+            <span className="text-[10px] text-gray-600 uppercase">or search</span>
+            <div className="flex-1 h-px bg-gray-800" />
+          </div>
+
           {/* Search Input */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />

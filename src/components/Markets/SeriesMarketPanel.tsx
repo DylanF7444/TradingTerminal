@@ -3,15 +3,48 @@
 // ============================================================================
 //
 // Displays all markets within a series node. Shows market prices, statuses,
-// and provides manual refresh functionality.
+// and provides manual refresh functionality with configurable auto-refresh.
+//
+// FEATURES:
+// - Manual refresh button
+// - Configurable auto-refresh intervals
+// - Auto-add new markets toggle
+// - Hide/show resolved markets
 // ============================================================================
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { RefreshCw, Layers, AlertCircle, CheckCircle2, Loader2, Eye, EyeOff } from 'lucide-react';
+import { 
+  RefreshCw, 
+  Layers, 
+  AlertCircle, 
+  CheckCircle2, 
+  Loader2, 
+  Eye, 
+  EyeOff, 
+  Settings, 
+  Clock,
+  Bell,
+  X,
+} from 'lucide-react';
 import type { Node } from '../../types/nodes';
-import type { SeriesChildMarket, EventSearchResponse, EventSearchResult } from '../../types/markets';
+import type { 
+  SeriesChildMarket, 
+  EventSearchResponse, 
+  EventSearchResult,
+  SeriesInfo,
+} from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
+
+// Refresh interval options
+const REFRESH_INTERVALS = [
+  { label: '1 minute', value: 60 },
+  { label: '5 minutes', value: 300 },
+  { label: '15 minutes', value: 900 },
+  { label: '30 minutes', value: 1800 },
+  { label: '1 hour', value: 3600 },
+  { label: 'Manual only', value: 0 },
+] as const;
 
 // ============================================================================
 // TYPES
@@ -48,6 +81,16 @@ function timeAgo(timestamp: number | null | undefined): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+function formatNextRefresh(lastRefreshed: number, intervalSeconds: number): string {
+  if (intervalSeconds === 0) return 'Manual';
+  const nextRefresh = lastRefreshed + intervalSeconds * 1000;
+  const remaining = Math.max(0, Math.floor((nextRefresh - Date.now()) / 1000));
+  if (remaining === 0) return 'Now';
+  if (remaining < 60) return `${remaining}s`;
+  if (remaining < 3600) return `${Math.floor(remaining / 60)}m`;
+  return `${Math.floor(remaining / 3600)}h`;
+}
+
 // ============================================================================
 // COMPONENT
 // ============================================================================
@@ -56,6 +99,9 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
   const updateNodeMetadata = useStore((state: StoreState) => state.updateNodeMetadata);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [newMarketsDetected, setNewMarketsDetected] = useState<string[]>([]);
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Safely extract series metadata
   const meta = (node?.metadata ?? {}) as Record<string, unknown>;
@@ -63,12 +109,17 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
 
   const eventTitle = (meta?.series_event_title as string) || 'Series';
   const eventId = (meta?.series_event_id as string) || '';
+  const eventSlug = (meta?.series_event_slug as string) || eventId;
   const imageUrl = (meta?.series_image_url as string) || null;
   const category = (meta?.series_category as string) || null;
   const platform = (meta?.series_platform as string) || 'Polymarket';
   const lastRefreshed = (meta?.series_last_refreshed as number) || 0;
   const hideResolved = (meta?.series_hide_resolved as boolean) ?? true;
   const rawMarkets = (meta?.series_markets as SeriesChildMarket[]) || [];
+  
+  // Auto-refresh settings
+  const refreshIntervalSeconds = (meta?.series_refresh_interval as number) ?? 300; // default 5 min
+  const autoAddNewMarkets = (meta?.series_auto_add_new_markets as boolean) ?? false;
 
   // Sort and filter markets
   const markets = useMemo(() => {
@@ -103,38 +154,60 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
     } catch (_) { /* ignore */ }
   }, [hideResolved, node.id, meta, updateNodeMetadata]);
 
-  // Manual refresh
-  const handleRefresh = useCallback(async () => {
+  // Update refresh interval
+  const updateRefreshInterval = useCallback((newInterval: number) => {
+    updateNodeMetadata(node.id, { series_refresh_interval: newInterval });
+    try {
+      invoke('update_data_source_cmd', {
+        nodeId: node.id,
+        config: { ...meta, series_refresh_interval: newInterval },
+      }).catch((err: unknown) => console.error('Failed to persist refresh interval:', err));
+    } catch (_) { /* ignore */ }
+  }, [node.id, meta, updateNodeMetadata]);
+
+  // Toggle auto-add new markets
+  const toggleAutoAddNewMarkets = useCallback(() => {
+    const newVal = !autoAddNewMarkets;
+    updateNodeMetadata(node.id, { series_auto_add_new_markets: newVal });
+    try {
+      invoke('update_data_source_cmd', {
+        nodeId: node.id,
+        config: { ...meta, series_auto_add_new_markets: newVal },
+      }).catch((err: unknown) => console.error('Failed to persist auto-add setting:', err));
+    } catch (_) { /* ignore */ }
+  }, [autoAddNewMarkets, node.id, meta, updateNodeMetadata]);
+
+  // Manual refresh - uses the Series API
+  const handleRefresh = useCallback(async (silent = false) => {
     if (isRefreshing) return;
-    setIsRefreshing(true);
+    if (!silent) setIsRefreshing(true);
     setRefreshError(null);
 
     try {
-      const response = await invoke<EventSearchResponse>('search_events_cmd', {
+      // Use the Series API for more accurate results
+      const seriesInfo = await invoke<SeriesInfo>('get_series_cmd', {
         platform,
-        query: eventTitle,
-        cursor: null,
+        seriesId: eventSlug || eventId,
       });
 
-      if (!response?.results) {
-        setRefreshError('No results returned');
+      if (!seriesInfo?.markets) {
+        if (!silent) setRefreshError('No markets returned');
         return;
       }
 
-      // Find matching event by ID
-      const matchingEvent = response.results.find(
-        (e: EventSearchResult) => e.id === eventId
-      );
+      // Detect new markets
+      const existingIds = new Set(rawMarkets.map(m => m.id));
+      const newMarketIds = seriesInfo.markets
+        .filter(m => !existingIds.has(m.id))
+        .map(m => m.id);
 
-      if (!matchingEvent) {
-        setRefreshError('Event not found in search results');
-        return;
+      if (newMarketIds.length > 0) {
+        setNewMarketsDetected(newMarketIds);
       }
 
       // Merge updated market data
-      const existingMarkets = rawMarkets;
-      const updatedMarkets: SeriesChildMarket[] = (matchingEvent.markets || []).map((m) => {
-        const existing = existingMarkets.find((em) => em.id === m.id);
+      const updatedMarkets: SeriesChildMarket[] = seriesInfo.markets.map((m) => {
+        const existing = rawMarkets.find((em) => em.id === m.id);
         return {
           id: m.id || '',
           title: m.title || '',
@@ -173,11 +246,81 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
       }
     } catch (err) {
       console.error('Series refresh failed:', err);
-      setRefreshError(typeof err === 'string' ? err : 'Refresh failed');
+      
+      // Fallback to events search if Series API fails
+      try {
+        const response = await invoke<EventSearchResponse>('search_events_cmd', {
+          platform,
+          query: eventTitle,
+          cursor: null,
+        });
+
+        const matchingEvent = response?.results?.find(
+          (e: EventSearchResult) => e.id === eventId || e.slug === eventSlug
+        );
+
+        if (matchingEvent) {
+          const updatedMarkets: SeriesChildMarket[] = (matchingEvent.markets || []).map((m) => {
+            const existing = rawMarkets.find((em) => em.id === m.id);
+            return {
+              id: m.id || '',
+              title: m.title || '',
+              token_ids: m.token_ids || [],
+              yes_price: m.yes_price ?? null,
+              no_price: m.no_price ?? null,
+              volume: m.volume ?? null,
+              liquidity: m.liquidity ?? null,
+              status: m.status || 'active',
+              end_date: m.end_date ?? null,
+              slug: m.slug || '',
+              condition_id: m.condition_id ?? null,
+              is_resolved: existing?.is_resolved || m.status === 'resolved' || m.status === 'closed',
+            };
+          });
+
+          updateNodeMetadata(node.id, {
+            series_markets: updatedMarkets,
+            series_last_refreshed: Date.now(),
+          });
+        } else if (!silent) {
+          setRefreshError('Event not found');
+        }
+      } catch (fallbackErr) {
+        if (!silent) {
+          setRefreshError(typeof err === 'string' ? err : 'Refresh failed');
+        }
+      }
     } finally {
-      setIsRefreshing(false);
+      if (!silent) setIsRefreshing(false);
     }
-  }, [isRefreshing, platform, eventTitle, eventId, rawMarkets, meta, node.id, updateNodeMetadata]);
+  }, [isRefreshing, platform, eventSlug, eventId, eventTitle, rawMarkets, meta, node.id, updateNodeMetadata]);
+
+  // Auto-refresh effect
+  useEffect(() => {
+    // Clear existing interval
+    if (autoRefreshRef.current) {
+      clearInterval(autoRefreshRef.current);
+      autoRefreshRef.current = null;
+    }
+
+    // Set up new interval if enabled
+    if (isSeries && refreshIntervalSeconds > 0) {
+      autoRefreshRef.current = setInterval(() => {
+        handleRefresh(true); // Silent refresh
+      }, refreshIntervalSeconds * 1000);
+    }
+
+    return () => {
+      if (autoRefreshRef.current) {
+        clearInterval(autoRefreshRef.current);
+      }
+    };
+  }, [isSeries, refreshIntervalSeconds, handleRefresh]);
+
+  // Dismiss new markets notification
+  const dismissNewMarkets = useCallback(() => {
+    setNewMarketsDetected([]);
+  }, []);
 
   if (!isSeries) {
     return null;
@@ -185,6 +328,29 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
 
   return (
     <div className={`space-y-3 ${className}`}>
+      {/* New Markets Notification */}
+      {newMarketsDetected.length > 0 && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+          <div className="flex items-start gap-2">
+            <Bell className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-xs font-medium text-blue-300">
+                {newMarketsDetected.length} new market{newMarketsDetected.length > 1 ? 's' : ''} detected!
+              </p>
+              <p className="text-[10px] text-blue-400/70 mt-0.5">
+                Refresh the page to see updated markets
+              </p>
+            </div>
+            <button
+              onClick={dismissNewMarkets}
+              className="text-blue-400 hover:text-blue-300 p-1"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-gray-800/50 rounded-lg p-3">
         <div className="flex items-start gap-3">
@@ -207,7 +373,54 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
               <span>{activeCount} active / {totalCount} total</span>
             </div>
           </div>
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-1.5 rounded hover:bg-gray-700 transition-colors ${showSettings ? 'bg-gray-700 text-blue-400' : 'text-gray-500'}`}
+            title="Refresh settings"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
         </div>
+
+        {/* Settings Panel */}
+        {showSettings && (
+          <div className="mt-3 pt-3 border-t border-gray-700 space-y-3">
+            {/* Refresh Interval */}
+            <div>
+              <label className="text-[10px] text-gray-500 uppercase tracking-wide">Auto-refresh</label>
+              <select
+                value={refreshIntervalSeconds}
+                onChange={(e) => updateRefreshInterval(Number(e.target.value))}
+                className="w-full mt-1 bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              >
+                {REFRESH_INTERVALS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Auto-add toggle */}
+            <button
+              onClick={toggleAutoAddNewMarkets}
+              className="flex items-center gap-2 w-full text-left"
+            >
+              <div className={`w-8 h-4 rounded-full transition-colors ${autoAddNewMarkets ? 'bg-blue-500' : 'bg-gray-600'}`}>
+                <div className={`w-3 h-3 rounded-full bg-white shadow transform transition-transform mt-0.5 ${autoAddNewMarkets ? 'translate-x-4.5 ml-0.5' : 'translate-x-0.5'}`} />
+              </div>
+              <span className="text-xs text-gray-400">Auto-add new markets</span>
+            </button>
+
+            {/* Next refresh indicator */}
+            {refreshIntervalSeconds > 0 && (
+              <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                <Clock className="w-3 h-3" />
+                Next refresh: {formatNextRefresh(lastRefreshed, refreshIntervalSeconds)}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Refresh row */}
         <div className="flex items-center justify-between mt-3 pt-2 border-t border-gray-700">
@@ -215,7 +428,7 @@ export function SeriesMarketPanel({ node, className = '' }: SeriesMarketPanelPro
             Refreshed: {timeAgo(lastRefreshed)}
           </span>
           <button
-            onClick={handleRefresh}
+            onClick={() => handleRefresh(false)}
             disabled={isRefreshing}
             className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
           >

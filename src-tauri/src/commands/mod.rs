@@ -58,6 +58,15 @@ pub use markets::{
     EventSearchResponse,
     init_state as init_market_state,
     MarketState,
+    // Series API functions
+    get_series,
+    get_series_markets,
+    parse_market_url_fn,
+    fetch_from_url,
+    // Series types
+    SeriesInfo,
+    ParsedMarketUrl,
+    SeriesSettings,
 };
 
 pub use trading::{

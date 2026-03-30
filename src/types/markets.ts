@@ -1346,6 +1346,87 @@ export interface SeriesChildMarket {
   is_resolved: boolean;
 }
 
+/**
+ * Unified series info returned from the Series API.
+ * Matches the Rust SeriesInfo struct.
+ */
+export interface SeriesInfo {
+  /** Series ID */
+  id: string;
+  /** Series ticker (e.g., KXGOVTSHUTLENGTH for Kalshi) */
+  ticker: string | null;
+  /** URL-friendly slug */
+  slug: string;
+  /** Series title */
+  title: string;
+  /** Series description */
+  description: string | null;
+  /** Series image URL */
+  image_url: string | null;
+  /** Category (e.g., "Politics", "crypto") */
+  category: string | null;
+  /** Platform name ("Kalshi" or "Polymarket") */
+  platform: string;
+  /** Recurrence frequency (e.g., "weekly", "daily") */
+  frequency: string | null;
+  /** Number of markets in this series */
+  market_count: number;
+  /** Markets within this series */
+  markets: EventMarketItem[];
+  /** Tags for categorization */
+  tags: string[] | null;
+  /** Whether the series is currently active */
+  is_active: boolean;
+}
+
+/**
+ * Result of parsing a market URL.
+ * Matches the Rust ParsedMarketUrl struct.
+ */
+export interface ParsedMarketUrl {
+  /** Platform name ("Kalshi" or "Polymarket") */
+  platform: string;
+  /** Series ticker (Kalshi) */
+  series_ticker: string | null;
+  /** Event slug (Polymarket) */
+  event_slug: string | null;
+  /** Individual market ticker */
+  market_ticker: string | null;
+  /** Type of URL: "series", "event", or "market" */
+  url_type: string;
+}
+
+/**
+ * Series settings for auto-refresh configuration.
+ * Stored in node group origin metadata.
+ */
+export interface SeriesSettings {
+  /** Whether auto-refresh is enabled */
+  auto_refresh_enabled: boolean;
+  /** Refresh interval in seconds */
+  refresh_interval_seconds: number;
+  /** Whether to automatically add new markets when detected */
+  auto_add_new_markets: boolean;
+}
+
+/** Default series settings */
+export const DEFAULT_SERIES_SETTINGS: SeriesSettings = {
+  auto_refresh_enabled: true,
+  refresh_interval_seconds: 300, // 5 minutes
+  auto_add_new_markets: false,
+};
+
+/** Available refresh interval options (in seconds) */
+export const SERIES_REFRESH_INTERVALS = [
+  { label: '1 minute', value: 60 },
+  { label: '5 minutes', value: 300 },
+  { label: '15 minutes', value: 900 },
+  { label: '30 minutes', value: 1800 },
+  { label: '1 hour', value: 3600 },
+  { label: '6 hours', value: 21600 },
+  { label: '24 hours', value: 86400 },
+] as const;
+
 // =============================================================================
 // CONSTANTS & ENUMERATIONS
 // =============================================================================

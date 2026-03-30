@@ -242,6 +242,11 @@ fn main() {
             refresh_market_connection_cmd,
             search_markets_cmd,
             search_events_cmd,
+            // Series API commands
+            get_series_cmd,
+            get_series_markets_cmd,
+            parse_market_url_cmd,
+            fetch_from_url_cmd,
             
             // Trading commands
             place_order_cmd,
@@ -1694,6 +1699,55 @@ async fn search_events_cmd(
 ) -> Result<commands::EventSearchResponse, String> {
     info!("Searching {} events for: {} (limit={:?}, cursor={:?})", platform, query, limit, cursor);
     markets::search_events(platform, query, limit, cursor).await
+}
+
+/// Get series information by ticker/slug
+/// 
+/// Fetches series metadata and markets from the platform-specific Series API.
+/// For Kalshi: uses /trade-api/v2/series/{ticker}
+/// For Polymarket: uses /series or /events endpoints
+#[tauri::command]
+async fn get_series_cmd(
+    platform: String,
+    series_id: String,
+) -> Result<commands::SeriesInfo, String> {
+    info!("Getting {} series: {}", platform, series_id);
+    markets::get_series(platform, series_id).await
+}
+
+/// Get all markets within a series
+#[tauri::command]
+async fn get_series_markets_cmd(
+    platform: String,
+    series_id: String,
+) -> Result<Vec<commands::EventMarketItem>, String> {
+    info!("Getting {} series markets: {}", platform, series_id);
+    markets::get_series_markets(platform, series_id).await
+}
+
+/// Parse a market URL and extract platform/series/market identifiers
+/// 
+/// Supports URLs like:
+/// - https://kalshi.com/markets/kxgovtshutlength/title/kxgovtshutlength-26feb07
+/// - https://polymarket.com/event/us-forces-enter-iran-by
+#[tauri::command]
+async fn parse_market_url_cmd(
+    url: String,
+) -> Result<commands::ParsedMarketUrl, String> {
+    info!("Parsing market URL: {}", url);
+    markets::parse_market_url_fn(&url)
+}
+
+/// Fetch series/event data from a URL (combines parse + fetch)
+/// 
+/// Takes a Kalshi or Polymarket URL and returns the full series info
+/// including all markets.
+#[tauri::command]
+async fn fetch_from_url_cmd(
+    url: String,
+) -> Result<commands::SeriesInfo, String> {
+    info!("Fetching from URL: {}", url);
+    markets::fetch_from_url(url).await
 }
 
 // -------------------------------------------------------------------------
