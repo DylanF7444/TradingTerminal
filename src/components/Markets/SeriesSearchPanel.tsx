@@ -34,9 +34,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { MarketType, type Node } from '../../types/nodes';
 import type { 
   SeriesSearchResult, 
-  SeriesSearchResponse, 
   SeriesInfo, 
   ParsedMarketUrl,
+  SeriesListItem,
+  SeriesListResponse,
+  SeriesFullData,
+  SeriesEventData,
 } from '../../types/markets';
 import { useStore, type StoreState } from '../../store';
 import { createNodeGroup } from '../../store/groupsSlice';
@@ -82,7 +85,8 @@ export default function SeriesSearchPanel({
   className = '',
 }: SeriesSearchPanelProps) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SeriesSearchResult[]>([]);
+  // Two-step search: lightweight list first, then full data on selection
+  const [seriesList, setSeriesList] = useState<SeriesListItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,11 +112,11 @@ export default function SeriesSearchPanel({
   const addGroup = useStore((s: StoreState) => s.addGroup);
   const viewport = useStore((s: StoreState) => s.viewport);
 
-  // Search function
-  const fetchResults = useCallback(
+  // Search function - Step 1: List series (lightweight)
+  const fetchSeriesList = useCallback(
     async (searchQuery: string, cursor: string | null, append: boolean) => {
       if (!searchQuery.trim()) {
-        setResults([]);
+        setSeriesList([]);
         setHasSearched(false);
         setHasMore(false);
         setNextCursor(null);
@@ -129,30 +133,28 @@ export default function SeriesSearchPanel({
       setHasSearched(true);
 
       try {
-        const response = await invoke<SeriesSearchResponse>('search_series_cmd', {
+        // Step 1: Get lightweight list of series
+        const response = await invoke<SeriesListResponse>('list_series_cmd', {
           platform: platformName,
           query: searchQuery.trim(),
           cursor,
         });
 
-        console.debug(`[${platformName}] Search results for "${searchQuery.trim()}":`, response.results);
-        for (const event of response.results) {
-          console.debug(`[${platformName}] Event: ${event.title}`, { markets: event.markets });
-        }
+        console.debug(`[${platformName}] Series list for "${searchQuery.trim()}":`, response.series);
 
         if (append) {
-          setResults((prev) => [...prev, ...response.results]);
+          setSeriesList((prev) => [...prev, ...response.series]);
         } else {
-          setResults(response.results);
+          setSeriesList(response.series);
         }
 
         setHasMore(response.has_more);
         setNextCursor(response.next_cursor);
       } catch (err) {
-        console.error('Event search failed:', err);
+        console.error('Series search failed:', err);
         setError(typeof err === 'string' ? err : 'Search failed. Please try again.');
         if (!append) {
-          setResults([]);
+          setSeriesList([]);
         }
       } finally {
         setIsSearching(false);
@@ -166,15 +168,15 @@ export default function SeriesSearchPanel({
     (searchQuery: string) => {
       setNextCursor(null);
       setHasMore(false);
-      fetchResults(searchQuery, null, false);
+      fetchSeriesList(searchQuery, null, false);
     },
-    [fetchResults]
+    [fetchSeriesList]
   );
 
   const loadMore = useCallback(() => {
     if (isLoadingMore || !hasMore) return;
-    fetchResults(query, nextCursor, true);
-  }, [query, nextCursor, isLoadingMore, hasMore, fetchResults]);
+    fetchSeriesList(query, nextCursor, true);
+  }, [query, nextCursor, isLoadingMore, hasMore, fetchSeriesList]);
 
   const handleQueryChange = useCallback(
     (value: string) => {
@@ -197,8 +199,198 @@ export default function SeriesSearchPanel({
     };
   }, []);
 
-  // Add series as a group with expanded nodes
+  // Step 2: Add series - fetch full data and create hierarchical groups
   const handleAddSeries = useCallback(
+    async (seriesItem: SeriesListItem) => {
+      if (isAddingSeries) return;
+      setIsAddingSeries(seriesItem.id);
+
+      try {
+        // Step 2: Fetch full series data with events and markets
+        const seriesFull = await invoke<SeriesFullData>('get_series_full_cmd', {
+          platform: platformName,
+          seriesId: seriesItem.id,
+        });
+
+        console.debug(`[${platformName}] Full series data:`, seriesFull);
+
+        if (seriesFull.total_market_count === 0) {
+          setError('No markets found in this series');
+          setIsAddingSeries(null);
+          return;
+        }
+
+        const credPayload = { environment: 'demo' };
+
+        // Grid layout for new nodes
+        const GRID_COLS = 3;
+        const SPACING_X = 220;
+        const SPACING_Y = 160;
+        const EVENT_SPACING_Y = 240;
+        const baseX = -viewport.x / viewport.zoom + 300;
+        const baseY = -viewport.y / viewport.zoom + 200;
+
+        // Track all created nodes for the series group
+        const allCreatedNodeIds: string[] = [];
+        const eventGroups: { eventData: SeriesEventData; nodeIds: string[]; baseY: number }[] = [];
+
+        let currentY = baseY;
+
+        // Process each event in the series
+        for (const event of seriesFull.events) {
+          const markets = event.markets || [];
+          if (markets.length === 0) continue;
+
+          const eventNodeIds: string[] = [];
+          const eventBaseY = currentY;
+
+          // Create market nodes for this event
+          for (let i = 0; i < markets.length; i++) {
+            const market = markets[i];
+            const col = i % GRID_COLS;
+            const row = Math.floor(i / GRID_COLS);
+            const posX = baseX + col * SPACING_X;
+            const posY = eventBaseY + row * SPACING_Y;
+
+            try {
+              const result = await invoke<{ node: Node }>('add_market_cmd', {
+                marketType: platform,
+                apiCredentials: credPayload,
+                marketConfig: {
+                  market_id: market.id,
+                  question: market.title,
+                  token_ids: market.token_ids || [],
+                  event_group_id: event.id,
+                  event_title: event.title,
+                },
+                marketDetails: {
+                  title: market.title,
+                  description: market.description || undefined,
+                  image_url: event.image_url || seriesFull.image_url || undefined,
+                  category: event.category || seriesFull.category || undefined,
+                  end_date: market.end_date || undefined,
+                  status: market.status || undefined,
+                  slug: market.slug || undefined,
+                },
+              });
+
+              if (result?.node) {
+                const transformedNode = transformNodeFromBackend(result.node as unknown as Record<string, unknown>);
+                const node = {
+                  ...transformedNode,
+                  position: [posX, posY] as [number, number],
+                };
+                addNode(node);
+                eventNodeIds.push(node.id);
+                allCreatedNodeIds.push(node.id);
+              }
+            } catch (err) {
+              console.error(`Failed to add market ${market.id}:`, err);
+            }
+          }
+
+          // Track event group data
+          if (eventNodeIds.length > 0) {
+            eventGroups.push({
+              eventData: event,
+              nodeIds: eventNodeIds,
+              baseY: eventBaseY,
+            });
+          }
+
+          // Move to next event position
+          const rowsUsed = Math.ceil(markets.length / GRID_COLS);
+          currentY += rowsUsed * SPACING_Y + EVENT_SPACING_Y;
+        }
+
+        // Create groups:
+        // - If there's only one event, create a single series group
+        // - If there are multiple events with >1 market, create nested groups
+        if (allCreatedNodeIds.length > 0) {
+          const shouldNestEventGroups = seriesFull.events.length > 1 && 
+            eventGroups.some(eg => eg.nodeIds.length > 1);
+
+          if (shouldNestEventGroups) {
+            // Create event groups for events with >1 market
+            const childGroupIds: string[] = [];
+            
+            for (const eg of eventGroups) {
+              if (eg.nodeIds.length > 1) {
+                // Create event group
+                const eventGroup = createNodeGroup(
+                  eg.eventData.title || 'Event',
+                  eg.nodeIds,
+                  {
+                    type: 'event',
+                    platform: platformName,
+                    seriesEventId: eg.eventData.id,
+                    seriesEventSlug: eg.eventData.slug,
+                    seriesEventTitle: eg.eventData.title,
+                  },
+                  config.seriesColor + '80' // Lighter color for child groups
+                );
+                addGroup(eventGroup);
+                childGroupIds.push(eventGroup.id);
+              }
+            }
+
+            // Create the series group with all nodes
+            const seriesGroup = createNodeGroup(
+              seriesFull.title || 'Series',
+              allCreatedNodeIds,
+              {
+                type: 'series',
+                platform: platformName,
+                seriesEventId: seriesFull.id,
+                seriesEventSlug: seriesFull.ticker || seriesFull.id,
+                seriesEventTitle: seriesFull.title,
+                seriesImageUrl: seriesFull.image_url,
+                seriesCategory: seriesFull.category,
+                seriesRefreshInterval: 60,
+                seriesLastRefreshed: Date.now(),
+                childGroupIds,
+              },
+              config.seriesColor
+            );
+            addGroup(seriesGroup);
+          } else {
+            // Simple case: single group for all markets
+            const group = createNodeGroup(
+              seriesFull.title || 'Series',
+              allCreatedNodeIds,
+              {
+                type: 'series',
+                platform: platformName,
+                seriesEventId: seriesFull.id,
+                seriesEventSlug: seriesFull.ticker || seriesFull.id,
+                seriesEventTitle: seriesFull.title,
+                seriesImageUrl: seriesFull.image_url,
+                seriesCategory: seriesFull.category,
+                seriesRefreshInterval: 60,
+                seriesLastRefreshed: Date.now(),
+              },
+              config.seriesColor
+            );
+            addGroup(group);
+          }
+        }
+
+        // Clear search
+        setQuery('');
+        setSeriesList([]);
+        setHasSearched(false);
+      } catch (err) {
+        console.error('Failed to add series:', err);
+        setError(typeof err === 'string' ? err : 'Failed to add series. Please try again.');
+      } finally {
+        setIsAddingSeries(null);
+      }
+    },
+    [isAddingSeries, platform, platformName, viewport, addNode, addGroup, config.seriesColor]
+  );
+
+  // Legacy handler for URL preview (uses old SeriesSearchResult format)
+  const handleAddSeriesLegacy = useCallback(
     async (series: SeriesSearchResult) => {
       if (isAddingSeries) return;
       setIsAddingSeries(series.id);
@@ -289,7 +481,7 @@ export default function SeriesSearchPanel({
 
         // Clear search
         setQuery('');
-        setResults([]);
+        setSeriesList([]);
         setHasSearched(false);
       } catch (err) {
         console.error('Failed to add series:', err);
@@ -336,11 +528,11 @@ export default function SeriesSearchPanel({
     }
   }, [urlInput, isLoadingUrl, platformName]);
 
-  // Add series from URL preview
+  // Add series from URL preview (uses legacy handler)
   const handleAddFromUrl = useCallback(async () => {
     if (!urlPreview || isAddingSeries) return;
 
-    // Convert SeriesInfo to SeriesSearchResult format for reuse
+    // Convert SeriesInfo to SeriesSearchResult format for legacy handler
     const seriesResult: SeriesSearchResult = {
       id: urlPreview.id,
       title: urlPreview.title,
@@ -354,13 +546,13 @@ export default function SeriesSearchPanel({
       created_at: null,
     };
 
-    await handleAddSeries(seriesResult);
+    await handleAddSeriesLegacy(seriesResult);
 
     // Clear URL input
     setUrlInput('');
     setUrlPreview(null);
     setUrlError(null);
-  }, [urlPreview, isAddingSeries, handleAddSeries]);
+  }, [urlPreview, isAddingSeries, handleAddSeriesLegacy]);
 
   // Handle paste event for URL detection
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
@@ -384,11 +576,6 @@ export default function SeriesSearchPanel({
       }, 100);
     }
   }, [platformName]);
-
-  const formatPrice = (price: number | null): string => {
-    if (price === null || price === undefined) return '\u2014';
-    return `${(price * 100).toFixed(1)}\u00A2`;
-  };
 
   return (
     <div className={`bg-gray-900 rounded-lg border border-gray-800 overflow-hidden ${className}`}>
@@ -533,7 +720,7 @@ export default function SeriesSearchPanel({
               <button
                 onClick={() => {
                   setQuery('');
-                  setResults([]);
+                  setSeriesList([]);
                   setHasSearched(false);
                   setError(null);
                 }}
@@ -555,27 +742,26 @@ export default function SeriesSearchPanel({
             </div>
           )}
 
-          {/* Results */}
+          {/* Results - Step 1: Show series list */}
           <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/50">
-            {results.length > 0 ? (
+            {seriesList.length > 0 ? (
               <div className="divide-y divide-gray-800">
-                {results.map((event) => {
-                  const isAdding = isAddingSeries === event.id;
-                  const firstMarket = event.markets?.[0];
+                {seriesList.map((series) => {
+                  const isAdding = isAddingSeries === series.id;
 
                   return (
                     <button
-                      key={`${event.platform}-${event.id}`}
-                      onClick={() => handleAddSeries(event)}
+                      key={`${series.platform}-${series.id}`}
+                      onClick={() => handleAddSeries(series)}
                       disabled={!!isAddingSeries}
                       className={`w-full text-left px-3 py-2.5 hover:bg-gray-800/70 transition-colors ${
                         isAdding ? 'bg-blue-500/10' : ''
                       } disabled:opacity-50`}
                     >
                       <div className="flex items-start gap-2">
-                        {event.image_url ? (
+                        {series.image_url ? (
                           <img
-                            src={event.image_url}
+                            src={series.image_url}
                             alt=""
                             className="w-8 h-8 rounded object-cover flex-shrink-0 bg-gray-800"
                             onError={(e) => {
@@ -590,24 +776,31 @@ export default function SeriesSearchPanel({
 
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-medium text-gray-200 truncate">
-                            {event.title}
+                            {series.title}
                           </p>
                           <div className="flex items-center gap-2 mt-1 text-[10px]">
-                            <span className="flex items-center gap-1 text-blue-400">
-                              <Layers className="w-3 h-3" />
-                              {event.market_count}
-                            </span>
-                            {event.category && (
-                              <span className="text-gray-500 truncate">
-                                {event.category}
+                            {series.event_count != null && (
+                              <span className="flex items-center gap-1 text-blue-400">
+                                <Layers className="w-3 h-3" />
+                                {series.event_count} events
                               </span>
                             )}
-                            {firstMarket?.yes_price != null && (
-                              <span className="text-emerald-400">
-                                {formatPrice(firstMarket.yes_price)}
+                            {series.category && (
+                              <span className="text-gray-500 truncate">
+                                {series.category}
+                              </span>
+                            )}
+                            {series.frequency && (
+                              <span className="text-purple-400 truncate">
+                                {series.frequency}
                               </span>
                             )}
                           </div>
+                          {series.description && (
+                            <p className="text-[10px] text-gray-500 mt-1 truncate">
+                              {series.description}
+                            </p>
+                          )}
                         </div>
 
                         {isAdding && (
@@ -641,7 +834,7 @@ export default function SeriesSearchPanel({
             ) : hasSearched && !isSearching ? (
               <div className="px-3 py-6 text-center text-gray-500 text-xs">
                 <Search className="w-5 h-5 mx-auto mb-1.5 opacity-50" />
-                No events found
+                No series found
               </div>
             ) : !hasSearched ? (
               <div className="px-3 py-6 text-center text-gray-500 text-xs">

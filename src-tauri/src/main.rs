@@ -242,7 +242,10 @@ fn main() {
             refresh_market_connection_cmd,
             search_events_cmd,
             search_series_cmd,
-            // Series API commands
+            // Series API commands (two-step process)
+            list_series_cmd,
+            get_series_full_cmd,
+            // Legacy series API commands
             get_series_cmd,
             get_series_markets_cmd,
             parse_market_url_cmd,
@@ -1723,6 +1726,33 @@ async fn get_series_markets_cmd(
 ) -> Result<Vec<commands::SeriesMarketItem>, String> {
     info!("Getting {} series markets: {}", platform, series_id);
     markets::get_series_markets(platform, series_id).await
+}
+
+/// List series for a platform (two-step process - step 1)
+/// 
+/// Returns lightweight series metadata for display in a list view.
+/// Users can then select a series to fetch full details.
+#[tauri::command]
+async fn list_series_cmd(
+    platform: String,
+    query: String,
+    cursor: Option<String>,
+) -> Result<commands::SeriesListResponse, String> {
+    info!("Listing {} series (query={:?}, cursor={:?})", platform, query, cursor);
+    markets::list_series(platform, query, cursor).await
+}
+
+/// Get full series data with events and markets (two-step process - step 2)
+/// 
+/// Returns the complete series hierarchy: Series → Events → Markets
+/// This is called when the user selects a specific series from the list.
+#[tauri::command]
+async fn get_series_full_cmd(
+    platform: String,
+    series_id: String,
+) -> Result<commands::SeriesFullData, String> {
+    info!("Getting full {} series: {}", platform, series_id);
+    markets::get_series_full(platform, series_id).await
 }
 
 /// Parse a market URL and extract platform/series/market identifiers

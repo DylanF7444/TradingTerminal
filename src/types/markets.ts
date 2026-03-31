@@ -1288,6 +1288,110 @@ export interface SeriesSearchResponse {
   page_size: number;
 }
 
+// =============================================================================
+// HIERARCHICAL SERIES TYPES (Two-Step Process)
+// =============================================================================
+//
+// These types support the two-step series search flow:
+// 1. list_series_cmd -> SeriesListResponse (lightweight list for UI)
+// 2. get_series_full_cmd -> SeriesFullData (complete hierarchy for canvas)
+//
+// Hierarchy: Series -> Events -> Markets
+// =============================================================================
+
+/**
+ * Lightweight series item for list display (Step 1).
+ * Mirrors Rust SeriesListItem in src-tauri/src/commands/markets.rs
+ */
+export interface SeriesListItem {
+  /** Series identifier */
+  id: string;
+  /** Series ticker (Kalshi) */
+  ticker: string | null;
+  /** Series title */
+  title: string;
+  /** Optional description */
+  description: string | null;
+  /** Series category */
+  category: string | null;
+  /** Series image URL */
+  image_url: string | null;
+  /** Platform name */
+  platform: string;
+  /** Number of events in this series (if known) */
+  event_count: number | null;
+  /** Frequency (e.g., "weekly", "monthly") for Kalshi */
+  frequency: string | null;
+}
+
+/**
+ * Paginated series list response (Step 1).
+ * Mirrors Rust SeriesListResponse in src-tauri/src/commands/markets.rs
+ */
+export interface SeriesListResponse {
+  /** Series items for this page */
+  series: SeriesListItem[];
+  /** Whether more results may be available */
+  has_more: boolean;
+  /** Opaque cursor for next page */
+  next_cursor: string | null;
+}
+
+/**
+ * Event data with nested markets (part of SeriesFullData).
+ * Mirrors Rust SeriesEventData in src-tauri/src/commands/markets.rs
+ */
+export interface SeriesEventData {
+  /** Event identifier */
+  id: string;
+  /** Event ticker (Kalshi) */
+  ticker: string | null;
+  /** Event slug */
+  slug: string;
+  /** Event title */
+  title: string;
+  /** Event description */
+  description: string | null;
+  /** Event image URL */
+  image_url: string | null;
+  /** Event category */
+  category: string | null;
+  /** Markets within this event */
+  markets: SeriesMarketItem[];
+  /** Number of markets in this event */
+  market_count: number;
+}
+
+/**
+ * Full series data with events and markets (Step 2).
+ * Mirrors Rust SeriesFullData in src-tauri/src/commands/markets.rs
+ * 
+ * This is the complete hierarchical data structure:
+ *   Series -> Events[] -> Markets[]
+ */
+export interface SeriesFullData {
+  /** Series identifier */
+  id: string;
+  /** Series ticker or slug */
+  ticker: string | null;
+  /** Series title */
+  title: string;
+  /** Series description */
+  description: string | null;
+  /** Series image URL */
+  image_url: string | null;
+  /** Series category */
+  category: string | null;
+  /** Platform name */
+  platform: string;
+  /** Events within this series */
+  events: SeriesEventData[];
+  /** Number of events in this series */
+  event_count: number;
+  /** Total number of markets across all events */
+  total_market_count: number;
+}
+
 /**
  * Individual market result from /events endpoint (flat, no nested markets).
  * Mirrors Rust EventSearchResult in src-tauri/src/commands/markets.rs

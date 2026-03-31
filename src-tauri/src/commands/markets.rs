@@ -1012,6 +1012,93 @@ pub struct SeriesSearchResponse {
     pub page_size: u32,
 }
 
+// ============================================================================
+// HIERARCHICAL SERIES TYPES (for two-step series search)
+// ============================================================================
+
+/// Lightweight series item for step 1 listing
+/// Contains just enough info to display in a list
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesListItem {
+    /// Series identifier (ticker for Kalshi, id/slug for Polymarket)
+    pub id: String,
+    /// Series ticker (Kalshi) or slug (Polymarket)
+    pub ticker: Option<String>,
+    /// Series title
+    pub title: String,
+    /// Brief description or subtitle
+    pub description: Option<String>,
+    /// Category
+    pub category: Option<String>,
+    /// Image URL
+    pub image_url: Option<String>,
+    /// Platform name
+    pub platform: String,
+    /// Number of events in this series (if known)
+    pub event_count: Option<usize>,
+    /// Frequency (e.g., "daily", "weekly") - Kalshi specific
+    pub frequency: Option<String>,
+}
+
+/// Paginated series list response (step 1)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesListResponse {
+    /// Series list items
+    pub series: Vec<SeriesListItem>,
+    /// Whether more results may be available
+    pub has_more: bool,
+    /// Opaque cursor for next page
+    pub next_cursor: Option<String>,
+}
+
+/// An event within a series, containing its markets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesEventData {
+    /// Event identifier
+    pub id: String,
+    /// Event ticker (Kalshi) or slug (Polymarket)
+    pub ticker: Option<String>,
+    /// Event slug
+    pub slug: String,
+    /// Event title
+    pub title: String,
+    /// Event description
+    pub description: Option<String>,
+    /// Event image URL
+    pub image_url: Option<String>,
+    /// Event category
+    pub category: Option<String>,
+    /// Markets within this event
+    pub markets: Vec<SeriesMarketItem>,
+    /// Number of markets
+    pub market_count: usize,
+}
+
+/// Full series data with hierarchical events and markets (step 2)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesFullData {
+    /// Series identifier
+    pub id: String,
+    /// Series ticker (Kalshi) or slug (Polymarket)
+    pub ticker: Option<String>,
+    /// Series title
+    pub title: String,
+    /// Series description
+    pub description: Option<String>,
+    /// Series image URL
+    pub image_url: Option<String>,
+    /// Series category
+    pub category: Option<String>,
+    /// Platform name
+    pub platform: String,
+    /// Events within this series (each event contains markets)
+    pub events: Vec<SeriesEventData>,
+    /// Total number of events
+    pub event_count: usize,
+    /// Total number of markets across all events
+    pub total_market_count: usize,
+}
+
 /// Parse a Polymarket cursor string into an API offset
 fn parse_polymarket_cursor(cursor: &Option<String>) -> Result<u32, String> {
     match cursor {
@@ -1824,6 +1911,571 @@ async fn search_kalshi_series(
         has_more,
         next_cursor,
         page_size: KALSHI_PAGE_SIZE,
+    })
+}
+
+// ============================================================================
+// HIERARCHICAL SERIES SEARCH (Two-Step Process)
+// ============================================================================
+//
+// Step 1: list_series() - Get lightweight list of series for display
+// Step 2: get_series_full() - Get complete series data with events and markets
+//
+// This provides a better UX by first showing a searchable list, then loading
+// full details only when the user selects a specific series.
+// ============================================================================
+
+/// Step 1: List series for a platform (lightweight)
+/// Returns basic series info without loading all events/markets
+pub async fn list_series(
+    platform: String,
+    query: String,
+    cursor: Option<String>,
+) -> Result<SeriesListResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("PredictionMarketTerminal/1.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    match platform.as_str() {
+        "Polymarket" => list_series_polymarket(&client, &query, cursor).await,
+        "Kalshi" => list_series_kalshi(&client, &query, cursor).await,
+        _ => Err(format!("Unknown platform: {}", platform)),
+    }
+}
+
+/// List Kalshi series from /series endpoint
+async fn list_series_kalshi(
+    client: &reqwest::Client,
+    query: &str,
+    cursor: Option<String>,
+) -> Result<SeriesListResponse, String> {
+    let query_lower = query.to_lowercase();
+    
+    let mut url = format!(
+        "https://api.elections.kalshi.com/trade-api/v2/series?limit={}",
+        KALSHI_API_BATCH_SIZE
+    );
+    if let Some(ref c) = cursor {
+        if let Some(stripped) = c.strip_prefix("kalshi:") {
+            url.push_str(&format!("&cursor={}", stripped));
+        }
+    }
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Kalshi series request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Kalshi API returned {}: {}", status, body));
+    }
+
+    let data: JsonValue = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Kalshi series response: {}", e))?;
+
+    let next_cursor = data["cursor"]
+        .as_str()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .map(|c| format!("kalshi:{}", c));
+
+    let mut series_list: Vec<SeriesListItem> = Vec::new();
+    
+    if let Some(series_arr) = data["series"].as_array() {
+        for series in series_arr {
+            let ticker = series["ticker"].as_str().unwrap_or("");
+            let title = series["title"].as_str().unwrap_or("");
+            let category = series["category"].as_str().map(|s| s.to_string());
+            let frequency = series["frequency"].as_str().map(|s| s.to_string());
+
+            // Filter by query
+            if !query_lower.is_empty() {
+                let search_text = format!(
+                    "{} {} {}",
+                    title,
+                    ticker,
+                    category.as_deref().unwrap_or("")
+                ).to_lowercase();
+                if !search_text.contains(&query_lower) {
+                    continue;
+                }
+            }
+
+            series_list.push(SeriesListItem {
+                id: ticker.to_string(),
+                ticker: Some(ticker.to_string()),
+                title: title.to_string(),
+                description: frequency.clone().map(|f| format!("Frequency: {}", f)),
+                category,
+                image_url: None,
+                platform: "Kalshi".to_string(),
+                event_count: None, // Will be determined when fetching full data
+                frequency,
+            });
+        }
+    }
+
+    let has_more = next_cursor.is_some();
+
+    Ok(SeriesListResponse {
+        series: series_list,
+        has_more,
+        next_cursor,
+    })
+}
+
+/// List Polymarket series from /series endpoint
+async fn list_series_polymarket(
+    client: &reqwest::Client,
+    query: &str,
+    cursor: Option<String>,
+) -> Result<SeriesListResponse, String> {
+    let query_lower = query.to_lowercase();
+    
+    let offset = cursor
+        .as_ref()
+        .and_then(|c| c.strip_prefix("polymarket:"))
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let url = format!(
+        "https://gamma-api.polymarket.com/series?limit={}&offset={}",
+        POLYMARKET_API_BATCH_SIZE, offset
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Polymarket series request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Polymarket API returned {}: {}", status, body));
+    }
+
+    let data: Vec<JsonValue> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Polymarket series response: {}", e))?;
+
+    let batch_size = data.len() as u32;
+    let has_more = batch_size >= POLYMARKET_API_BATCH_SIZE;
+    let next_cursor = if has_more {
+        Some(format!("polymarket:{}", offset + batch_size))
+    } else {
+        None
+    };
+
+    let mut series_list: Vec<SeriesListItem> = Vec::new();
+    
+    for series in &data {
+        let id = if let Some(s) = series["id"].as_str() {
+            s.to_string()
+        } else if let Some(n) = series["id"].as_u64() {
+            n.to_string()
+        } else {
+            continue;
+        };
+
+        let title = series["title"].as_str().unwrap_or("");
+        let slug = series["slug"].as_str().unwrap_or("");
+        let description = series["description"].as_str().map(|s| s.to_string());
+        let category = series["category"].as_str().map(|s| s.to_string());
+        let image = series["image"].as_str().map(|s| s.to_string());
+
+        // Filter by query
+        if !query_lower.is_empty() {
+            let search_text = format!(
+                "{} {} {} {}",
+                title,
+                slug,
+                description.as_deref().unwrap_or(""),
+                category.as_deref().unwrap_or("")
+            ).to_lowercase();
+            if !search_text.contains(&query_lower) {
+                continue;
+            }
+        }
+
+        // Count events if available
+        let event_count = series["events"]
+            .as_array()
+            .map(|arr| arr.len());
+
+        series_list.push(SeriesListItem {
+            id,
+            ticker: Some(slug.to_string()),
+            title: title.to_string(),
+            description,
+            category,
+            image_url: image,
+            platform: "Polymarket".to_string(),
+            event_count,
+            frequency: None,
+        });
+    }
+
+    Ok(SeriesListResponse {
+        series: series_list,
+        has_more,
+        next_cursor,
+    })
+}
+
+/// Step 2: Get full series data with events and markets
+/// Called when user selects a series from the list
+pub async fn get_series_full(
+    platform: String,
+    series_id: String,
+) -> Result<SeriesFullData, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("PredictionMarketTerminal/1.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    match platform.as_str() {
+        "Polymarket" => get_series_full_polymarket(&client, &series_id).await,
+        "Kalshi" => get_series_full_kalshi(&client, &series_id).await,
+        _ => Err(format!("Unknown platform: {}", platform)),
+    }
+}
+
+/// Get full Kalshi series with events and markets
+async fn get_series_full_kalshi(
+    client: &reqwest::Client,
+    series_ticker: &str,
+) -> Result<SeriesFullData, String> {
+    // First get series metadata
+    let series_url = format!(
+        "https://api.elections.kalshi.com/trade-api/v2/series/{}",
+        series_ticker
+    );
+
+    let series_resp = client
+        .get(&series_url)
+        .send()
+        .await
+        .map_err(|e| format!("Kalshi series request failed: {}", e))?;
+
+    let series_data: JsonValue = if series_resp.status().is_success() {
+        series_resp.json().await.unwrap_or(JsonValue::Null)
+    } else {
+        JsonValue::Null
+    };
+
+    let series_info = &series_data["series"];
+    let title = series_info["title"].as_str().unwrap_or(series_ticker).to_string();
+    let category = series_info["category"].as_str().map(|s| s.to_string());
+
+    // Get all events for this series
+    let mut events: Vec<SeriesEventData> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut total_market_count = 0usize;
+
+    loop {
+        let mut url = format!(
+            "https://api.elections.kalshi.com/trade-api/v2/events?series_ticker={}&limit={}&with_nested_markets=true",
+            series_ticker, KALSHI_API_BATCH_SIZE
+        );
+        if let Some(ref c) = cursor {
+            url.push_str(&format!("&cursor={}", c));
+        }
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Kalshi events request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            break;
+        }
+
+        let data: JsonValue = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Kalshi events response: {}", e))?;
+
+        if let Some(events_arr) = data["events"].as_array() {
+            for event in events_arr {
+                let event_ticker = event["event_ticker"].as_str().unwrap_or("");
+                let event_title = event["title"].as_str().unwrap_or("");
+                let event_description = event["sub_title"].as_str().map(|s| s.to_string());
+                let event_image = event["image_url"].as_str().map(|s| s.to_string());
+                let event_category = event["category"].as_str().map(|s| s.to_string());
+
+                // Parse nested markets
+                let markets: Vec<SeriesMarketItem> = event["markets"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| parse_kalshi_market_item(m))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let market_count = markets.len();
+                total_market_count += market_count;
+
+                events.push(SeriesEventData {
+                    id: event_ticker.to_string(),
+                    ticker: Some(event_ticker.to_string()),
+                    slug: event_ticker.to_string(),
+                    title: event_title.to_string(),
+                    description: event_description,
+                    image_url: event_image,
+                    category: event_category,
+                    markets,
+                    market_count,
+                });
+            }
+        }
+
+        // Check for more pages
+        cursor = data["cursor"]
+            .as_str()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(SeriesFullData {
+        id: series_ticker.to_string(),
+        ticker: Some(series_ticker.to_string()),
+        title,
+        description: None,
+        image_url: None,
+        category,
+        platform: "Kalshi".to_string(),
+        events: events.clone(),
+        event_count: events.len(),
+        total_market_count,
+    })
+}
+
+/// Get full Polymarket series with events and markets
+async fn get_series_full_polymarket(
+    client: &reqwest::Client,
+    series_id: &str,
+) -> Result<SeriesFullData, String> {
+    // Try to get series by ID or slug
+    let url = format!(
+        "https://gamma-api.polymarket.com/series/{}",
+        series_id
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Polymarket series request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        // Try as slug in the events endpoint
+        return get_series_full_polymarket_via_events(client, series_id).await;
+    }
+
+    let series_data: JsonValue = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Polymarket series response: {}", e))?;
+
+    let id = if let Some(s) = series_data["id"].as_str() {
+        s.to_string()
+    } else if let Some(n) = series_data["id"].as_u64() {
+        n.to_string()
+    } else {
+        series_id.to_string()
+    };
+
+    let title = series_data["title"].as_str().unwrap_or("").to_string();
+    let slug = series_data["slug"].as_str().unwrap_or("").to_string();
+    let description = series_data["description"].as_str().map(|s| s.to_string());
+    let image = series_data["image"].as_str().map(|s| s.to_string());
+    let category = series_data["category"].as_str().map(|s| s.to_string());
+
+    // Parse events from the series response
+    let mut events: Vec<SeriesEventData> = Vec::new();
+    let mut total_market_count = 0usize;
+
+    if let Some(events_arr) = series_data["events"].as_array() {
+        for event in events_arr {
+            let event_id = if let Some(s) = event["id"].as_str() {
+                s.to_string()
+            } else if let Some(n) = event["id"].as_u64() {
+                n.to_string()
+            } else {
+                continue;
+            };
+
+            let event_title = event["title"].as_str().unwrap_or("").to_string();
+            let event_slug = event["slug"].as_str().unwrap_or("").to_string();
+            let event_description = event["description"].as_str().map(|s| s.to_string());
+            let event_image = event["image"].as_str().map(|s| s.to_string());
+            let event_category = event["category"].as_str().map(|s| s.to_string());
+
+            // Parse nested markets
+            let markets: Vec<SeriesMarketItem> = event["markets"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| parse_series_market_item(m))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let market_count = markets.len();
+            total_market_count += market_count;
+
+            events.push(SeriesEventData {
+                id: event_id,
+                ticker: None,
+                slug: event_slug,
+                title: event_title,
+                description: event_description,
+                image_url: event_image,
+                category: event_category,
+                markets,
+                market_count,
+            });
+        }
+    }
+
+    // If no events in series response, the markets might be directly on the series
+    if events.is_empty() {
+        if let Some(markets_arr) = series_data["markets"].as_array() {
+            let markets: Vec<SeriesMarketItem> = markets_arr
+                .iter()
+                .filter_map(|m| parse_series_market_item(m))
+                .collect();
+
+            if !markets.is_empty() {
+                total_market_count = markets.len();
+                events.push(SeriesEventData {
+                    id: id.clone(),
+                    ticker: None,
+                    slug: slug.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    image_url: image.clone(),
+                    category: category.clone(),
+                    markets,
+                    market_count: total_market_count,
+                });
+            }
+        }
+    }
+
+    Ok(SeriesFullData {
+        id,
+        ticker: Some(slug),
+        title,
+        description,
+        image_url: image,
+        category,
+        platform: "Polymarket".to_string(),
+        events: events.clone(),
+        event_count: events.len(),
+        total_market_count,
+    })
+}
+
+/// Fallback: Get Polymarket series data via events endpoint
+async fn get_series_full_polymarket_via_events(
+    client: &reqwest::Client,
+    series_slug: &str,
+) -> Result<SeriesFullData, String> {
+    // Search events endpoint for matching slug
+    let url = format!(
+        "https://gamma-api.polymarket.com/events?slug={}",
+        series_slug
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Polymarket events request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Series '{}' not found", series_slug));
+    }
+
+    let data: Vec<JsonValue> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if data.is_empty() {
+        return Err(format!("Series '{}' not found", series_slug));
+    }
+
+    // Use the first matching event as the "series"
+    let event = &data[0];
+
+    let id = if let Some(s) = event["id"].as_str() {
+        s.to_string()
+    } else if let Some(n) = event["id"].as_u64() {
+        n.to_string()
+    } else {
+        series_slug.to_string()
+    };
+
+    let title = event["title"].as_str().unwrap_or("").to_string();
+    let slug = event["slug"].as_str().unwrap_or(series_slug).to_string();
+    let description = event["description"].as_str().map(|s| s.to_string());
+    let image = event["image"].as_str().map(|s| s.to_string());
+    let category = event["category"].as_str().map(|s| s.to_string());
+
+    // Parse markets from the event
+    let markets: Vec<SeriesMarketItem> = event["markets"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| parse_series_market_item(m))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let total_market_count = markets.len();
+
+    // Create a single event containing all markets
+    let events = vec![SeriesEventData {
+        id: id.clone(),
+        ticker: None,
+        slug: slug.clone(),
+        title: title.clone(),
+        description: description.clone(),
+        image_url: image.clone(),
+        category: category.clone(),
+        markets,
+        market_count: total_market_count,
+    }];
+
+    Ok(SeriesFullData {
+        id,
+        ticker: Some(slug),
+        title,
+        description,
+        image_url: image,
+        category,
+        platform: "Polymarket".to_string(),
+        events,
+        event_count: 1,
+        total_market_count,
     })
 }
 

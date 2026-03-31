@@ -58,7 +58,14 @@ pub use markets::{
     SeriesSearchResponse,
     init_state as init_market_state,
     MarketState,
-    // Series API functions
+    // Series API functions (two-step hierarchical)
+    list_series,
+    get_series_full,
+    SeriesListItem,
+    SeriesListResponse,
+    SeriesEventData,
+    SeriesFullData,
+    // Legacy series API functions
     get_series,
     get_series_markets,
     parse_market_url_fn,

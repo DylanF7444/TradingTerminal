@@ -628,7 +628,7 @@ export interface NodeGraph {
 // =============================================================================
 
 export interface NodeGroupOrigin {
-  type: 'series' | 'manual';
+  type: 'series' | 'event' | 'manual';
   platform?: string;
   seriesEventId?: string;
   seriesEventSlug?: string;
@@ -637,6 +637,8 @@ export interface NodeGroupOrigin {
   seriesCategory?: string | null;
   seriesRefreshInterval?: number;
   seriesLastRefreshed?: number;
+  /** Child group IDs for hierarchical series → event grouping */
+  childGroupIds?: string[];
 }
 
 export interface NodeGroup {
