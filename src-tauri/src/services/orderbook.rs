@@ -815,21 +815,23 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
                     eprintln!("Failed to emit raw orderbook message: {}", e);
                 }
                 
-                // Parse market message
-                match parse_polymarket_market_message(&text, asset_ids) {
-                    Ok(Some(update)) => {
+                // Parse market message.
+                // Initial Polymarket snapshots can be arrays containing both YES/NO sides,
+                // so we must emit every parsed update, not just the first one.
+                match parse_polymarket_market_all(&text, asset_ids) {
+                    Ok(updates) => {
+                        if updates.is_empty() {
+                            continue;
+                        }
+
                         last_update = std::time::Instant::now();
                         last_pong = std::time::Instant::now();
-                        
-                        //println!("[DEBUG] Emitting Polymarket orderbook:update for market: {} (price: {:?})", update.market_id, update.last_price);
-                        
-                        // Emit to frontend
-                        if let Err(e) = app_handle.emit("orderbook:update", &update) {
-                            eprintln!("Failed to emit Polymarket market update: {}", e);
+
+                        for update in updates {
+                            if let Err(e) = app_handle.emit("orderbook:update", &update) {
+                                eprintln!("Failed to emit Polymarket market update: {}", e);
+                            }
                         }
-                    }
-                    Ok(None) => {
-                        // Message parsed but not an update (e.g., subscription confirm)
                     }
                     Err(e) => {
                         eprintln!("Failed to parse Polymarket market message: {}", e);
@@ -856,13 +858,6 @@ async fn run_polymarket_market_connection(asset_ids: &[String], app_handle: &App
     }
     
     Ok(())
-}
-
-/// Parse a Polymarket market WebSocket message
-/// Handles both single JSON objects and arrays of objects (multi-asset book snapshots)
-fn parse_polymarket_market_message(text: &str, asset_ids: &[String]) -> Result<Option<OrderbookUpdate>> {
-    let updates = parse_polymarket_market_all(text, asset_ids)?;
-    Ok(updates.into_iter().next())
 }
 
 /// Parse a Polymarket market WebSocket message and return ALL updates
@@ -2097,4 +2092,40 @@ pub async fn get_active_subscriptions(subscriptions: ActiveSubscriptions) -> Vec
 /// Create the shared subscriptions state
 pub fn create_subscriptions_state() -> ActiveSubscriptions {
     Arc::new(RwLock::new(HashMap::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_polymarket_market_all;
+
+    #[test]
+    fn parse_polymarket_market_all_returns_both_sides_from_array_snapshot() {
+        let text = r#"[
+            {
+                "event_type": "book",
+                "asset_id": "yes-token",
+                "bids": [{"price": "0.62", "size": "100"}],
+                "asks": [{"price": "0.65", "size": "50"}],
+                "timestamp": "1710000000000"
+            },
+            {
+                "event_type": "book",
+                "asset_id": "no-token",
+                "bids": [{"price": "0.35", "size": "120"}],
+                "asks": [{"price": "0.38", "size": "75"}],
+                "timestamp": "1710000000001"
+            }
+        ]"#;
+
+        let asset_ids = vec!["yes-token".to_string(), "no-token".to_string()];
+        let updates = parse_polymarket_market_all(text, &asset_ids).unwrap();
+
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].market_id, "yes-token");
+        assert_eq!(updates[1].market_id, "no-token");
+        assert_eq!(updates[0].bids.len(), 1);
+        assert_eq!(updates[0].asks.len(), 1);
+        assert_eq!(updates[1].bids.len(), 1);
+        assert_eq!(updates[1].asks.len(), 1);
+    }
 }

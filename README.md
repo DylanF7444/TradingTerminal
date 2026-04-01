@@ -96,7 +96,7 @@ The application is a Tauri 2 desktop app with two layers communicating via Tauri
 
 - **Zustand** (frontend): Slices pattern with immer middl   eware. Nodes and positions are loaded from SQLite on startup; optimistic UI updates are synced back via debounced Tauri commands.
 - **SQLite** (backend): Source of truth for nodes, connections, time-series, positions, and API keys. WAL mode for concurrent reads.
-- **WebSocket**: Real-time orderbook data via `websocket_manager` (consolidated per-platform connections) and `persistent_orderbook` (always-on subscriptions).
+- **WebSocket**: Real-time orderbook data via `websocket_manager` (consolidated per-platform connections) and `persistent_orderbook` (always-on subscriptions). Polymarket array snapshots are processed as per-token updates so both YES/NO sides initialize reliably.
 
 ---
 
