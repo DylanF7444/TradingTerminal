@@ -2412,6 +2412,8 @@ pub struct NodeStorageUsage {
     pub node_id: String,
     pub timeseries_rows: i64,
     pub websocket_message_rows: i64,
+    pub timeseries_estimated_bytes: i64,
+    pub websocket_message_estimated_bytes: i64,
     pub estimated_bytes: i64,
     pub data_rate_bytes_per_sec: f64,
 }
@@ -2479,6 +2481,8 @@ async fn get_node_storage_usage_cmd(
             node_id,
             timeseries_rows: ts_rows,
             websocket_message_rows: ws_rows,
+            timeseries_estimated_bytes: ts_bytes,
+            websocket_message_estimated_bytes: ws_bytes,
             estimated_bytes: total_bytes,
             data_rate_bytes_per_sec: data_rate,
         })

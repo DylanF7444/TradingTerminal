@@ -26,10 +26,11 @@ The terminal lets traders:
 1. **Connect data sources** (crypto prices, news feeds, weather, social media, economic indicators) as nodes on an interactive canvas
 2. **Connect prediction markets** (Polymarket, Kalshi) and view real-time orderbooks
 3. **Draw connections** between data sources and markets to track correlations
-4. **Run analyzers** (correlation, momentum, RSI, sentiment, arbitrage, volatility) that generate trading signals
-5. **Execute trades** directly on connected markets with risk management (Kelly criterion, position limits)
-6. **Monitor positions** with real-time P&L tracking
-7. **Access remotely** via a WebSocket relay gateway from other devices
+4. **Select node groups/series groups** directly on canvas, inspect group details (members, storage usage, incoming/outgoing connections), and broadcast connections from/to an entire group
+5. **Run analyzers** (correlation, momentum, RSI, sentiment, arbitrage, volatility) that generate trading signals
+6. **Execute trades** directly on connected markets with risk management (Kelly criterion, position limits)
+7. **Monitor positions** with real-time P&L tracking
+8. **Access remotely** via a WebSocket relay gateway from other devices
 
 ### Key Concepts
 

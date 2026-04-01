@@ -56,8 +56,10 @@ export interface CanvasProps {
   clampViewportToBounds?: boolean;
   viewport: Viewport;
   selectedNodeId: string | null;
+  selectedGroupId?: string | null;
   selectedIds?: Set<string>;
   onNodeClick: (node: Node) => void;
+  onGroupClick?: (groupId: string) => void;
   onNodeMove: (id: string, position: [number, number]) => void;
   onNodesMove?: (positions: Record<string, [number, number]>) => void;
   onNodeDelete: (id: string) => void;
@@ -93,8 +95,10 @@ export default function Canvas({
   clampViewportToBounds = true,
   viewport,
   selectedNodeId,
+  selectedGroupId = null,
   selectedIds = new Set(),
   onNodeClick,
+  onGroupClick,
   onNodeMove,
   onNodesMove,
   onNodeDelete,
@@ -137,6 +141,7 @@ export default function Canvas({
 
   // Connection mode state
   const [connectionSource, setConnectionSource] = useState<string | null>(null);
+  const [connectionSourceGroupId, setConnectionSourceGroupId] = useState<string | null>(null);
   // Hovered connection for delete button
   const [hoveredConnection, setHoveredConnection] = useState<Connection | null>(null);
 
@@ -262,6 +267,8 @@ export default function Canvas({
           labelWidth,
           labelHeight,
           memberPositions,
+          centerX: (minX + maxX) / 2,
+          centerY: (minY + maxY) / 2,
           fontSize,
           labelPadX,
         };
@@ -386,6 +393,21 @@ export default function Canvas({
       ctx.restore();
     });
 
+    // Draw pending group-to-node connection preview
+    if (connectionMode && connectionSourceGroupId && mousePosition) {
+      const sourceGroup = groupRenderData.find((g) => g.group.id === connectionSourceGroupId);
+      if (sourceGroup) {
+        ctx.beginPath();
+        ctx.moveTo(sourceGroup.centerX, sourceGroup.centerY);
+        ctx.lineTo(mousePosition.x, mousePosition.y);
+        ctx.strokeStyle = 'rgba(250, 204, 21, 0.8)';
+        ctx.lineWidth = 2 / viewport.zoom;
+        ctx.setLineDash([6 / viewport.zoom, 4 / viewport.zoom]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     // Draw group bounding boxes
     groupRenderData.forEach((groupData) => {
       // Draw filled background
@@ -395,8 +417,14 @@ export default function Canvas({
       ctx.fill();
 
       // Draw dashed border
-      ctx.strokeStyle = groupData.group.color;
-      ctx.lineWidth = 2;
+      const isSelectedGroup = selectedGroupId === groupData.group.id;
+      const isConnectionSourceGroup = connectionMode && connectionSourceGroupId === groupData.group.id;
+      ctx.strokeStyle = isSelectedGroup
+        ? '#facc15'
+        : isConnectionSourceGroup
+          ? '#fde047'
+          : groupData.group.color;
+      ctx.lineWidth = isSelectedGroup || isConnectionSourceGroup ? 3 : 2;
       ctx.setLineDash([8, 4]);
       ctx.beginPath();
       ctx.roundRect(groupData.minX, groupData.minY, groupData.boxWidth, groupData.boxHeight, 12);
@@ -406,7 +434,7 @@ export default function Canvas({
       // Draw label background
       ctx.font = `600 ${groupData.fontSize}px Inter, system-ui, sans-serif`;
 
-      ctx.fillStyle = groupData.group.color;
+      ctx.fillStyle = isSelectedGroup ? '#f59e0b' : groupData.group.color;
       ctx.beginPath();
       ctx.roundRect(groupData.labelX, groupData.labelY, groupData.labelWidth, groupData.labelHeight, 6);
       ctx.fill();
@@ -440,7 +468,7 @@ export default function Canvas({
     }
 
     ctx.restore();
-  }, [nodes, connections, viewport, canvasSize, selectionRect, groupRenderData]);
+  }, [nodes, connections, viewport, canvasSize, selectionRect, groupRenderData, selectedGroupId, connectionMode, connectionSourceGroupId, mousePosition]);
 
   // Calculate zoom limits based on canvas size and bounds
   const zoomLimits = useMemo(() => {
@@ -537,20 +565,22 @@ export default function Canvas({
           if (rect) {
             const worldX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
             const worldY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
-            for (let i = groupRenderData.length - 1; i >= 0; i--) {
-              const groupData = groupRenderData[i];
-              const inLabelX = worldX >= groupData.labelX && worldX <= groupData.labelX + groupData.labelWidth;
-              const inLabelY = worldY >= groupData.labelY && worldY <= groupData.labelY + groupData.labelHeight;
-              if (inLabelX && inLabelY) {
-                e.preventDefault();
-                e.stopPropagation();
-                setDraggingGroupId(groupData.group.id);
-                groupDragStartRef.current = {
-                  mouseX: worldX,
-                  mouseY: worldY,
-                  initialPositions: { ...groupData.memberPositions },
-                };
-                return;
+            if (!connectionMode) {
+              for (let i = groupRenderData.length - 1; i >= 0; i--) {
+                const groupData = groupRenderData[i];
+                const inLabelX = worldX >= groupData.labelX && worldX <= groupData.labelX + groupData.labelWidth;
+                const inLabelY = worldY >= groupData.labelY && worldY <= groupData.labelY + groupData.labelHeight;
+                if (inLabelX && inLabelY) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDraggingGroupId(groupData.group.id);
+                  groupDragStartRef.current = {
+                    mouseX: worldX,
+                    mouseY: worldY,
+                    initialPositions: { ...groupData.memberPositions },
+                  };
+                  return;
+                }
               }
             }
           }
@@ -563,7 +593,7 @@ export default function Canvas({
         });
       }
     },
-    [viewport, groupRenderData, onNodesMove]
+    [viewport, groupRenderData, onNodesMove, connectionMode]
   );
 
   // Handle mouse move for pan or drag
@@ -713,9 +743,44 @@ export default function Canvas({
   // Handle click - prevent background click if we were panning, cancel connection mode
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const worldX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+        const worldY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+        for (let i = groupRenderData.length - 1; i >= 0; i--) {
+          const groupData = groupRenderData[i];
+          const inGroupBounds =
+            worldX >= groupData.minX &&
+            worldX <= groupData.minX + groupData.boxWidth &&
+            worldY >= groupData.minY &&
+            worldY <= groupData.minY + groupData.boxHeight;
+          if (inGroupBounds) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (connectionMode) {
+              if (!connectionSource && !connectionSourceGroupId) {
+                setConnectionSourceGroupId(groupData.group.id);
+              } else if (connectionSource && !connectionSourceGroupId) {
+                onCreateConnection?.(connectionSource, `group:${groupData.group.id}`);
+                setConnectionSource(null);
+                setConnectionSourceGroupId(null);
+              } else {
+                setConnectionSource(null);
+                setConnectionSourceGroupId(null);
+              }
+            } else {
+              onGroupClick?.(groupData.group.id);
+              didPanRef.current = true;
+            }
+            return;
+          }
+        }
+      }
+
       // Cancel connection mode when clicking on background
-      if (connectionSource) {
+      if (connectionSource || connectionSourceGroupId) {
         setConnectionSource(null);
+        setConnectionSourceGroupId(null);
         return;
       }
       
@@ -727,7 +792,7 @@ export default function Canvas({
       }
       onBackgroundClick();
     },
-    [onBackgroundClick, connectionSource]
+    [onBackgroundClick, connectionSource, connectionSourceGroupId, viewport, groupRenderData, connectionMode, onGroupClick, onCreateConnection]
   );
 
   // Handle node drag start
@@ -802,8 +867,9 @@ export default function Canvas({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Escape key - cancel connection mode
-      if (e.key === 'Escape' && connectionSource) {
+      if (e.key === 'Escape' && (connectionSource || connectionSourceGroupId)) {
         setConnectionSource(null);
+        setConnectionSourceGroupId(null);
         return;
       }
       
@@ -826,7 +892,7 @@ export default function Canvas({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNodeId, onNodeDelete, connectionSource]);
+  }, [selectedNodeId, onNodeDelete, connectionSource, connectionSourceGroupId]);
 
   return (
     <div
@@ -862,7 +928,12 @@ export default function Canvas({
         {visibleNodes.map((node) => {
           // Determine if this node is highlighted for connection mode
           const isConnectionSource = connectionMode && connectionSource === node.id;
-          const isValidTarget = !!(connectionMode && connectionSource && connectionSource !== node.id);
+          const isValidTarget = !!(
+            connectionMode && (
+              (connectionSource && connectionSource !== node.id) ||
+              connectionSourceGroupId
+            )
+          );
 
           return (
             <NodeComponent
@@ -876,7 +947,11 @@ export default function Canvas({
               onClick={(e) => {
                 if (connectionMode) {
                   // Connection mode: handle connection creation
-                  if (!connectionSource) {
+                  if (connectionSourceGroupId) {
+                    onCreateConnection?.(`group:${connectionSourceGroupId}`, node.id);
+                    setConnectionSourceGroupId(null);
+                    setConnectionSource(null);
+                  } else if (!connectionSource) {
                     // First click: set source node
                     setConnectionSource(node.id);
                   } else if (connectionSource !== node.id) {
@@ -884,6 +959,7 @@ export default function Canvas({
                     onCreateConnection?.(connectionSource, node.id);
                     // Reset connection mode
                     setConnectionSource(null);
+                    setConnectionSourceGroupId(null);
                   }
                 } else if (e.shiftKey && onSelectNodes) {
                   // Shift+click: toggle multi-select

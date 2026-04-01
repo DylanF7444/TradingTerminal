@@ -72,6 +72,7 @@ import { WeatherPanel } from './components/Nodes/WeatherPanel';
 import { Clock } from './components/UI/Clock';
 import { NodeDetailsPanelExtracted as NodeDetailsPanel } from './components/Nodes/NodeDetailsPanel.extracted';
 import { RawStreamTab } from './components/Nodes/RawStreamTab';
+import { GroupDetailsPanel } from './components/Groups/GroupDetailsPanel';
 import { PanelErrorBoundary } from './components/UI/ErrorBoundary';
 import { UptimeDisplay } from './components/UI/UptimeDisplay';
 
@@ -112,6 +113,7 @@ type LayoutMode = 'desktop' | 'tablet' | 'mobile';
 function useAddNodeCallback() {
   const addNode = useStore((state: StoreState) => state.addNode);
   const selectNode = useStore((state: StoreState) => state.selectNode);
+  const setSelectedGroupId = useStore((state: StoreState) => state.setSelectedGroupId);
 
   return useCallback(
     (result: any) => {
@@ -119,8 +121,9 @@ function useAddNodeCallback() {
       const node = transformNodeFromBackend(rawNode);
       addNode(node);
       selectNode(node.id, false);
+      setSelectedGroupId(null);
     },
-    [addNode, selectNode],
+    [addNode, selectNode, setSelectedGroupId],
   );
 }
 
@@ -140,9 +143,11 @@ function App(): ReactNode {
   const connections = useStore((s: StoreState) => s.connections);
   const groups = useStore((s: StoreState) => s.groups);
   const selectedIds = useStore((s: StoreState) => s.selectedIds);
+  const selectedGroupId = useStore((s: StoreState) => s.selectedGroupId);
   const selectNode = useStore((s: StoreState) => s.selectNode);
   const selectNodes = useStore((s: StoreState) => s.selectNodes);
   const clearSelection = useStore((s: StoreState) => s.clearSelection);
+  const setSelectedGroupId = useStore((s: StoreState) => s.setSelectedGroupId);
   const viewport = useStore((s: StoreState) => s.viewport);
   const setViewport = useStore((s: StoreState) => s.setViewport);
 
@@ -299,6 +304,11 @@ function App(): ReactNode {
     return nodes[selectedId] || null;
   }, [selectedIds, nodes]);
 
+  const selectedGroup = useMemo(
+    () => (selectedGroupId ? groups[selectedGroupId] || null : null),
+    [selectedGroupId, groups],
+  );
+
   const nodesArray = useMemo(
     () => Object.values(nodes).filter((node) => node?.id),
     [nodes],
@@ -353,6 +363,7 @@ function App(): ReactNode {
       if (e.key === 'Escape') {
         if (showHelp) setShowHelp(false);
         else if (connectionMode) setConnectionMode(false);
+        else if (selectedGroupId) setSelectedGroupId(null);
         else if (selectedIds.size > 0) clearSelection();
         else if (showRightSidebar) setShowRightSidebar(false);
       }
@@ -368,12 +379,13 @@ function App(): ReactNode {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedIds.size, showHelp, showRightSidebar, clearSelection, connectionMode]);
+  }, [selectedIds.size, showHelp, showRightSidebar, clearSelection, connectionMode, selectedGroupId, setSelectedGroupId]);
 
   const handleNodeClick = useCallback((node: Node) => {
     selectNode(node.id, false);
+    setSelectedGroupId(null);
     setShowRightSidebar(true);
-  }, [selectNode]);
+  }, [selectNode, setSelectedGroupId]);
 
   const handleNodeMove = useCallback((id: string, position: [number, number]) => {
     useStore.getState().updateNodePosition(id, position);
@@ -403,7 +415,22 @@ function App(): ReactNode {
     }
   }, []);
 
-  const handleCanvasBackgroundClick = useCallback(() => clearSelection(), [clearSelection]);
+  const handleCanvasBackgroundClick = useCallback(() => {
+    clearSelection();
+    setSelectedGroupId(null);
+  }, [clearSelection, setSelectedGroupId]);
+
+  const handleGroupClick = useCallback((groupId: string) => {
+    clearSelection();
+    setSelectedGroupId(groupId);
+    setDetailPanelTab('details');
+    setShowRightSidebar(true);
+  }, [clearSelection, setSelectedGroupId, setDetailPanelTab, setShowRightSidebar]);
+
+  const handleSelectNodes = useCallback((nodeIds: string[]) => {
+    selectNodes(nodeIds);
+    setSelectedGroupId(null);
+  }, [selectNodes, setSelectedGroupId]);
 
   const handleViewportChange = useCallback(
     (v: { x: number; y: number; zoom: number }) => setViewport(v),
@@ -445,8 +472,79 @@ function App(): ReactNode {
     removeGroup(groupId);
   }, [removeGroup]);
 
+  useEffect(() => {
+    if (selectedGroupId && !groups[selectedGroupId]) {
+      setSelectedGroupId(null);
+    }
+  }, [selectedGroupId, groups, setSelectedGroupId]);
+
   const handleCreateConnection = useCallback((sourceId: string, targetId: string) => {
     const { addConnection, connections: conns } = useStore.getState();
+    if (sourceId.startsWith('group:') || targetId.startsWith('group:')) {
+      if (sourceId.startsWith('group:') && targetId.startsWith('group:')) {
+        console.warn('Cannot connect one group directly to another group');
+        return;
+      }
+
+      if (sourceId.startsWith('group:')) {
+        const groupId = sourceId.slice('group:'.length);
+        const group = useStore.getState().groups[groupId];
+        if (!group) {
+          console.warn(`Group ${groupId} not found`);
+          return;
+        }
+        const targetExists = useStore.getState().nodes[targetId];
+        if (!targetExists) {
+          console.warn(`Target node ${targetId} not found`);
+          return;
+        }
+
+        group.memberIds.forEach((memberId) => {
+          if (memberId === targetId) {
+            return;
+          }
+          if (conns.some((c) => c.source === memberId && c.target === targetId)) {
+            return;
+          }
+          addConnection({ source: memberId as NodeId, target: targetId as NodeId, strength: 0.8 });
+          void invoke('add_connection_cmd', { source: memberId, target: targetId, strength: 0.8 })
+            .catch((err: unknown) => console.error('Failed to persist broadcast connection:', err));
+        });
+
+        console.log(`[Connection] Created broadcast connection from group ${groupId} to ${targetId}`);
+        setConnectionMode(false);
+        return;
+      }
+
+      const groupId = targetId.slice('group:'.length);
+      const group = useStore.getState().groups[groupId];
+      if (!group) {
+        console.warn(`Group ${groupId} not found`);
+        return;
+      }
+      const sourceExists = useStore.getState().nodes[sourceId];
+      if (!sourceExists) {
+        console.warn(`Source node ${sourceId} not found`);
+        return;
+      }
+
+      group.memberIds.forEach((memberId) => {
+        if (memberId === sourceId) {
+          return;
+        }
+        if (conns.some((c) => c.source === sourceId && c.target === memberId)) {
+          return;
+        }
+        addConnection({ source: sourceId as NodeId, target: memberId as NodeId, strength: 0.8 });
+        void invoke('add_connection_cmd', { source: sourceId, target: memberId, strength: 0.8 })
+          .catch((err: unknown) => console.error('Failed to persist broadcast connection:', err));
+      });
+
+      console.log(`[Connection] Created broadcast connection from ${sourceId} to group ${groupId}`);
+      setConnectionMode(false);
+      return;
+    }
+
     if (conns.some((c) => c.source === sourceId && c.target === targetId)) {
       console.warn('Connection already exists');
       return;
@@ -463,7 +561,7 @@ function App(): ReactNode {
       .catch((err: unknown) => console.error('Failed to persist connection:', err));
     
     setConnectionMode(false);
-  }, []);
+  }, [setConnectionMode]);
 
   const handleConnectionDelete = useCallback(async (source: string, target: string) => {
     const { removeConnection } = useStore.getState();
@@ -495,8 +593,10 @@ function App(): ReactNode {
       groups: groupsArray,
       viewport,
       selectedNodeId: selectedNode?.id || null,
+      selectedGroupId,
       selectedIds,
       onNodeClick: handleNodeClick,
+      onGroupClick: handleGroupClick,
       onNodeMove: handleNodeMove,
       onNodesMove: handleNodesMove,
       onNodeDelete: handleNodeDelete,
@@ -507,18 +607,18 @@ function App(): ReactNode {
       connectionMode,
       onCreateConnection: handleCreateConnection,
       onConnectionDelete: handleConnectionDelete,
-      onSelectNodes: selectNodes,
+      onSelectNodes: handleSelectNodes,
       onCreateGroup: handleCreateGroup,
       onAddToGroup: handleAddToGroup,
       onRemoveFromGroup: handleRemoveFromGroup,
       onDisbandGroup: handleDisbandGroup,
     }),
     [
-      nodesArray, connectionsArray, groupsArray, viewport, selectedNode?.id, selectedIds,
+      nodesArray, connectionsArray, groupsArray, viewport, selectedNode?.id, selectedGroupId, selectedIds,
       handleNodeClick, handleNodeMove, handleNodesMove, handleNodeDelete,
-      handleCanvasBackgroundClick, handleViewportChange,
+      handleGroupClick, handleCanvasBackgroundClick, handleViewportChange,
       handleOpenOrderbook, handleNodeResize, connectionMode,
-      handleCreateConnection, handleConnectionDelete, selectNodes,
+      handleCreateConnection, handleConnectionDelete, handleSelectNodes,
       handleCreateGroup, handleAddToGroup, handleRemoveFromGroup, handleDisbandGroup,
     ],
   );
@@ -557,7 +657,7 @@ function App(): ReactNode {
     </>
   );
 
-  /** Node detail tabs + content — shared between desktop and mobile */
+  /** Node/group detail content — shared between desktop and mobile */
   const detailPanelContent = selectedNode ? (
     <>
       {/* Tab Navigation */}
@@ -602,7 +702,15 @@ function App(): ReactNode {
         </PanelErrorBoundary>
       </div>
     </>
+  ) : selectedGroup ? (
+    <div className="flex-1 overflow-y-auto p-4">
+      <PanelErrorBoundary panelName="Group Details">
+        <GroupDetailsPanel group={selectedGroup} nodes={nodes} connections={connections} />
+      </PanelErrorBoundary>
+    </div>
   ) : null;
+
+  const detailPanelTitle = selectedNode ? 'Node Details' : selectedGroup ? 'Group Details' : 'Details';
 
   /** Bottom panel — shared between desktop and tablet */
   const bottomPanel = showBottomPanel ? (
@@ -694,10 +802,10 @@ function App(): ReactNode {
       </main>
 
       {/* Right Sidebar */}
-      {showRightSidebar && selectedNode && (
+      {showRightSidebar && (selectedNode || selectedGroup) && (
         <aside className="w-96 bg-gray-900 border-l border-gray-800 flex flex-col animate-in slide-in-from-right duration-200" aria-label="Details panel">
           <div className="h-14 flex items-center justify-between px-4 border-b border-gray-800">
-            <h2 className="font-semibold text-gray-200">Node Details</h2>
+            <h2 className="font-semibold text-gray-200">{detailPanelTitle}</h2>
             <button onClick={toggleRightSidebar} className="p-1.5 hover:bg-gray-800 rounded-lg text-gray-400">
               <CloseIcon />
             </button>
@@ -769,21 +877,17 @@ function App(): ReactNode {
       </main>
 
       {/* Slide-over Details */}
-      {showRightSidebar && selectedNode && (
+      {showRightSidebar && (selectedNode || selectedGroup) && (
         <div className="absolute inset-0 z-50 overflow-hidden">
           <div className="absolute inset-0 bg-black/50" onClick={toggleRightSidebar} />
           <aside className="absolute right-0 top-0 bottom-0 w-96 bg-gray-900 shadow-xl flex flex-col">
             <div className="h-14 flex items-center justify-between px-4 border-b border-gray-800">
-              <h2 className="font-semibold text-gray-200">Node Details</h2>
+              <h2 className="font-semibold text-gray-200">{detailPanelTitle}</h2>
               <button onClick={toggleRightSidebar} className="p-1.5 hover:bg-gray-800 rounded-lg text-gray-400">
                 <CloseIcon />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4">
-              <PanelErrorBoundary panelName="Node Details">
-                <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
-              </PanelErrorBoundary>
-            </div>
+            {detailPanelContent}
           </aside>
         </div>
       )}
@@ -822,21 +926,21 @@ function App(): ReactNode {
                 handleNodeClick(node);
                 setMobileActiveTab('details');
               }}
+              onGroupClick={(groupId: string) => {
+                handleGroupClick(groupId);
+                setMobileActiveTab('details');
+              }}
             />
           </PanelErrorBoundary>
         )}
         {mobileActiveTab === 'controls' && (
           <div className="h-full overflow-y-auto p-4 space-y-6">{controlPanels}</div>
         )}
-        {mobileActiveTab === 'details' && selectedNode ? (
-          <div className="h-full overflow-y-auto p-4">
-            <PanelErrorBoundary panelName="Node Details">
-              <NodeDetailsPanel node={selectedNode} connections={connections} nodes={nodes} />
-            </PanelErrorBoundary>
-          </div>
+        {mobileActiveTab === 'details' && (selectedNode || selectedGroup) ? (
+          detailPanelContent
         ) : mobileActiveTab === 'details' ? (
           <div className="h-full flex items-center justify-center text-gray-500">
-            Select a node to view details
+            Select a node or group to view details
           </div>
         ) : null}
       </main>

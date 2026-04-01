@@ -57,6 +57,7 @@ export interface UISlice {
   theme: 'dark' | 'light';
   selectedSourceId: string | null;
   selectedNodeId: string | null;
+  selectedGroupId: string | null;
   modalOpen: string | null; // 'add-source' | 'add-market' | null
   
   // Actions
@@ -65,6 +66,7 @@ export interface UISlice {
   setTheme: (theme: UISlice['theme']) => void;
   setSelectedSourceId: (id: string | null) => void;
   setSelectedNodeId: (id: string | null) => void;
+  setSelectedGroupId: (id: string | null) => void;
   openModal: (modal: string) => void;
   closeModal: () => void;
 }
@@ -90,6 +92,7 @@ const createUISlice = (set: StoreSet, _get: StoreGet): UISlice => ({
   theme: 'dark',
   selectedSourceId: null,
   selectedNodeId: null,
+  selectedGroupId: null,
   modalOpen: null,
 
   toggleSidebar: () => set((state: StoreState) => ({ 
@@ -103,6 +106,8 @@ const createUISlice = (set: StoreSet, _get: StoreGet): UISlice => ({
   setSelectedSourceId: (id) => set(() => ({ selectedSourceId: id })),
   
   setSelectedNodeId: (id) => set(() => ({ selectedNodeId: id })),
+
+  setSelectedGroupId: (id) => set(() => ({ selectedGroupId: id })),
   
   openModal: (modal) => set(() => ({ modalOpen: modal })),
   
@@ -132,7 +137,7 @@ export const useStore = create<StoreState>()(
         ),
         {
           name: 'pmt-storage', // localStorage key
-          version: 2, // Bumped for groups migration
+          version: 3, // Bumped for selectedGroupId migration
 
           // Only persist specific parts of state (UI preferences, not real-time data)
           partialize: (state: StoreState) => ({
@@ -142,25 +147,30 @@ export const useStore = create<StoreState>()(
             activePanel: state.activePanel,
             // Selection state (restore on reload)
             selectedNodeId: state.selectedNodeId,
+            selectedGroupId: state.selectedGroupId,
             // Don't persist: nodes (from DB), markets (reconnect), positions (from DB), groups (now from DB)
           }),
 
           // Migration handling (when version changes)
           migrate: (persistedState: unknown, version: number) => {
-            if (version === 0) {
+            const state = { ...(persistedState as Record<string, unknown>) };
+
+            if (version < 1) {
               // Migration from version 0 to 1
-              return {
-                ...(persistedState as Record<string, unknown>),
-                selectedSourceId: null, // New field in v1
-              } as StoreState;
+              state.selectedSourceId = null;
             }
-            if (version === 1) {
-              // Migration from version 1 to 2: remove groups from localStorage (now in SQLite)
-              const state = { ...(persistedState as Record<string, unknown>) };
+
+            if (version < 2) {
+              // Migration to version 2: remove groups from localStorage (now in SQLite)
               delete state.groups;
-              return state as unknown as StoreState;
             }
-            return persistedState as StoreState;
+
+            if (version < 3) {
+              // Migration to version 3: add selectedGroupId
+              state.selectedGroupId = null;
+            }
+
+            return state as unknown as StoreState;
           },
         }
       ),
@@ -191,6 +201,9 @@ export const useSelectedNode = () => useStore((state: StoreState) => {
   const nodesArray = Object.values(state.nodes);
   return nodesArray.find((n) => n.id === state.selectedNodeId);
 });
+export const useSelectedGroup = () => useStore((state: StoreState) => (
+  state.selectedGroupId ? state.groups[state.selectedGroupId] ?? null : null
+));
 
 export const useMarkets = () => useStore((state: StoreState) => state.markets);
 export const useOrderbook = (marketId: string) => 
@@ -218,6 +231,7 @@ export const useUI = () => useStore((state: StoreState) => ({
   activePanel: state.activePanel,
   theme: state.theme,
   modalOpen: state.modalOpen,
+  selectedGroupId: state.selectedGroupId,
 }));
 
 // Actions selectors (dispatchers)
