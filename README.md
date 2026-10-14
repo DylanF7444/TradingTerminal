@@ -1,6 +1,13 @@
 # Prediction Market Trading Terminal
 
-A desktop trading terminal for prediction markets (Polymarket, Kalshi) built with Tauri 2, React 19, and Rust. It connects real-time data sources (crypto prices, news, weather, social media) to prediction market orderbooks via an interactive node graph, enabling traders to visualize correlations and execute trades.
+A desktop trading terminal for Polymarket and Kalshi, built with Tauri 2, React 19, and Rust. An interactive node graph connects live external data to prediction-market order books for analysis, signal generation, and position management.
+
+## Portfolio overview
+
+- **Visual research:** Connect markets to crypto, financial, news, weather, social, and economic data sources.
+- **Analysis pipeline:** Async Rust services ingest data, run analyzers, and generate signals for execution.
+- **Trading controls:** Inspect live order books, place multi-leg orders, track positions and P&L, and apply Kelly-based sizing and exposure limits.
+- **Persistence and access:** SQLite WAL storage, consolidated platform WebSockets, API-key management, and optional relay-based remote access.
 
 ---
 
